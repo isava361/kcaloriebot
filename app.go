@@ -121,7 +121,7 @@ func main() {
 				keyboard := tgbotapi.NewInlineKeyboardMarkup(
 					tgbotapi.NewInlineKeyboardRow(
 						tgbotapi.NewInlineKeyboardButtonData("Amend", "amend_"+strconv.FormatInt(favoriteID, 10)),
-						tgbotapi.NewInlineKeyboardButtonData("Delete", "delete_"+strconv.FormatInt(favoriteID, 10)),
+						tgbotapi.NewInlineKeyboardButtonData("Delete", "favedelete_"+strconv.FormatInt(favoriteID, 10)),
 					),
 				)
 			
@@ -177,7 +177,7 @@ func main() {
 				if _, err := bot.Request(callbackConfig); err != nil {
 					log.Printf("Error sending callback response: %s", err)
 				}
-			} else if strings.HasPrefix(update.CallbackQuery.Data, "delete_") {
+			} else if strings.HasPrefix(update.CallbackQuery.Data, "favedelete_") {
 				favoriteID, err := strconv.ParseInt(strings.TrimPrefix(update.CallbackQuery.Data, "delete_"), 10, 64)
 				if err != nil {
 					log.Printf("Invalid favorite ID: %s", err)
