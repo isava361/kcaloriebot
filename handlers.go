@@ -348,6 +348,9 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
                 msg := tgbotapi.NewMessage(message.Chat.ID, "Food entry added successfully!")
                 msg.ReplyMarkup = defaultkeyboard
                 bot.Send(msg)
+                delete(userInputs, userID)
+                setUserState(userID, stateDefault, db)
+                return nil
             }
         }
 
