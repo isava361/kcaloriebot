@@ -128,7 +128,15 @@ func getWeekStats(userID int64, db *sql.DB) (float64, sql.NullFloat64, sql.NullF
         timezone = "UTC"
     }
 
-    var avgCalories float64
+    loc, err := getCurrentTimeForLocation(timezone)
+    if err != nil {
+        log.Printf("Failed to get location: %v", err)
+        timezone = "UTC"
+    } else {
+        timezone = loc.String()
+    }
+
+    var avgCalories sql.NullFloat64
     var avgProtein, avgFat, avgCarbs sql.NullFloat64
 
     err = db.QueryRow("SELECT AVG(calories), AVG(protein), AVG(fat), AVG(carbs) FROM (SELECT SUM(calories) AS calories, SUM(protein) AS protein, SUM(fat) AS fat, SUM(carbs) AS carbs FROM food_entries WHERE user_id = ? AND DATE(entry_date, ?) BETWEEN DATE('now', ?, '-6 days') AND DATE('now', ?) GROUP BY DATE(entry_date, ?))", userID, timezone, timezone, timezone, timezone).Scan(&avgCalories, &avgProtein, &avgFat, &avgCarbs)
@@ -140,7 +148,11 @@ func getWeekStats(userID int64, db *sql.DB) (float64, sql.NullFloat64, sql.NullF
         return 0, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, err
     }
 
-    return avgCalories, avgProtein, avgFat, avgCarbs, nil
+    if !avgCalories.Valid {
+        avgCalories = sql.NullFloat64{Float64: 0, Valid: true}
+    }
+
+    return avgCalories.Float64, avgProtein, avgFat, avgCarbs, nil
 }
 
 func getMonthStats(userID int64, db *sql.DB) (float64, sql.NullFloat64, sql.NullFloat64, sql.NullFloat64, error) {
@@ -151,7 +163,15 @@ func getMonthStats(userID int64, db *sql.DB) (float64, sql.NullFloat64, sql.Null
         timezone = "UTC"
     }
 
-    var avgCalories float64
+    loc, err := getCurrentTimeForLocation(timezone)
+    if err != nil {
+        log.Printf("Failed to get location: %v", err)
+        timezone = "UTC"
+    } else {
+        timezone = loc.String()
+    }
+
+    var avgCalories sql.NullFloat64
     var avgProtein, avgFat, avgCarbs sql.NullFloat64
 
     err = db.QueryRow("SELECT AVG(calories), AVG(protein), AVG(fat), AVG(carbs) FROM (SELECT SUM(calories) AS calories, SUM(protein) AS protein, SUM(fat) AS fat, SUM(carbs) AS carbs FROM food_entries WHERE user_id = ? AND DATE(entry_date, ?) BETWEEN DATE('now', ?, 'start of month') AND DATE('now', ?) GROUP BY DATE(entry_date, ?))", userID, timezone, timezone, timezone, timezone).Scan(&avgCalories, &avgProtein, &avgFat, &avgCarbs)
@@ -163,7 +183,11 @@ func getMonthStats(userID int64, db *sql.DB) (float64, sql.NullFloat64, sql.Null
         return 0, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, err
     }
 
-    return avgCalories, avgProtein, avgFat, avgCarbs, nil
+    if !avgCalories.Valid {
+        avgCalories = sql.NullFloat64{Float64: 0, Valid: true}
+    }
+
+    return avgCalories.Float64, avgProtein, avgFat, avgCarbs, nil
 }
 
 func getTodayFoodEntries(userID int64, db *sql.DB) ([]FoodEntry, error) {
