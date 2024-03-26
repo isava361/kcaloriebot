@@ -81,7 +81,7 @@ func getTodayStats(userID int64, db *sql.DB) (float64, sql.NullFloat64, sql.Null
 			SUM(carbs) 
 		FROM food_entries 
 		WHERE user_id = ? 
-			AND datetime(entry_date, ?) BETWEEN datetime('now', ?) AND datetime('now', ?, '+1 day')
+			AND datetime(substr(entry_date, 1, 19), ?) BETWEEN datetime('now', ?) AND datetime('now', ?, '+1 day')
 	`, userID, timezone, timezone, timezone).Scan(&totalCalories, &totalProtein, &totalFat, &totalCarbs)
 	if err != nil {
 		if err == sql.ErrNoRows {
