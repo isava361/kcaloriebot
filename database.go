@@ -69,6 +69,14 @@ func getTodayStats(userID int64, db *sql.DB) (float64, sql.NullFloat64, sql.Null
         log.Printf("Failed to get user timezone: %v", err)
         timezone = "UTC"
     }
+    
+    loc, err := getCurrentTimeForLocation(timezone)
+    if err != nil {
+        log.Printf("Failed to get location: %v", err)
+        timezone = "UTC"
+    } else {
+        timezone = loc.String()
+    }
 
     var totalCalories float64
     var totalProtein, totalFat, totalCarbs sql.NullFloat64
