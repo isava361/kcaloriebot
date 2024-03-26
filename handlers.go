@@ -11,6 +11,7 @@ import (
 
 const (
     stateDefault = iota
+    stateWaitingForFoodName
     stateWaitingForCalories
     stateWaitingForGrams
     stateWaitingForProtein
@@ -19,12 +20,12 @@ const (
 )
 
 type UserInput struct {
+    Name     string
     Calories float64
     Grams    float64
     Protein  sql.NullFloat64
     Fat      sql.NullFloat64
 }
-
 var userInputs = make(map[int64]*UserInput)
 
 func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) error {

@@ -8,12 +8,14 @@ import (
 
 type FoodEntry struct {
     EntryID  int64
+    Name     string
     Calories float64
     Grams    float64
     Protein  sql.NullFloat64
     Fat      sql.NullFloat64
     Carbs    sql.NullFloat64
 }
+
 
 func getUserState(userID int64, db *sql.DB) int {
     var state int
