@@ -10,7 +10,6 @@ import (
 	"fmt"
 )
 
-var userFavoriteNutrients = make(map[int64]string)
 
 func main() {
 
