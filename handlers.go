@@ -217,13 +217,15 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
             grams := input.Grams
             protein := input.Protein
             fat := input.Fat
-            if (protein+fat+carbs) > 100 {
-                msg := tgbotapi.NewMessage(message.Chat.ID, "Your values for macronutriens add up to more than 100g. Please start again")
-                msg.ReplyMarkup = defaultkeyboard
-                bot.Send(msg)
-                delete(userInputs, userID)
-                setUserState(userID, stateDefault, db)
-                return nil
+            if protein.Valid && fat.Valid && carbs > 100 {
+                if (protein.Float64+fat.Float64+carbs) > 100 {
+                    msg := tgbotapi.NewMessage(message.Chat.ID, "Your values for macronutrients add up to more than 100g. Please start again")
+                    msg.ReplyMarkup = defaultkeyboard
+                    bot.Send(msg)
+                    delete(userInputs, userID)
+                    setUserState(userID, stateDefault, db)
+                    return nil
+                }
             }
             carbsNull := sql.NullFloat64{Float64: carbs * input.Grams / 100, Valid: true}
             err = addFood(userID, calories*grams/100, grams, protein, fat, carbsNull, db)
