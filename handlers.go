@@ -263,7 +263,7 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
             msgText := fmt.Sprintf("Month's Stats (Average):\nCalories: %.2f\nProtein: %.2f\nFat: %.2f\nCarbs: %.2f", calories, protein.Float64, fat.Float64, carbs.Float64)
             msg := tgbotapi.NewMessage(message.Chat.ID, msgText)
             bot.Send(msg)
-        } else if message.Text == "Delete Food" {
+        } else if message.Text == "Food Today" {
             // Retrieve today's food entries for the user
             entries, err := getTodayFoodEntries(userID, db)
             if err != nil {
@@ -288,7 +288,7 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
             }
 
             keyboard := tgbotapi.NewInlineKeyboardMarkup(rows...)
-            msg := tgbotapi.NewMessage(message.Chat.ID, "Select a food entry to delete:")
+            msg := tgbotapi.NewMessage(message.Chat.ID, "Food added today. Press on a button to delete this entry:")
             msg.ReplyMarkup = keyboard
             bot.Send(msg)
         } else if strings.HasPrefix(message.Text, "delete_") {
@@ -321,7 +321,7 @@ func sendDefaultKeyboard(bot *tgbotapi.BotAPI, chatID int64) {
     keyboard := tgbotapi.NewReplyKeyboard(
         tgbotapi.NewKeyboardButtonRow(
             tgbotapi.NewKeyboardButton("Add Food"),
-            tgbotapi.NewKeyboardButton("Delete Food"),
+            tgbotapi.NewKeyboardButton("Food Today"),
         ),
         tgbotapi.NewKeyboardButtonRow(
             tgbotapi.NewKeyboardButton("Today Stats"),
