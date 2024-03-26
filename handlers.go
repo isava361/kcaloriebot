@@ -221,6 +221,23 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
 			msg := tgbotapi.NewMessage(message.Chat.ID, "Select a food entry to delete:")
 			msg.ReplyMarkup = keyboard
 			bot.Send(msg)
+		} else if strings.HasPrefix(message.Text, "delete_") {
+			entryID, err := strconv.ParseInt(strings.TrimPrefix(message.Text, "delete_"), 10, 64)
+			if err != nil {
+				msg := tgbotapi.NewMessage(message.Chat.ID, "Invalid food entry ID.")
+				bot.Send(msg)
+				return nil
+			}
+		
+			err = deleteFoodEntry(entryID, db)
+			if err != nil {
+				msg := tgbotapi.NewMessage(message.Chat.ID, "Failed to delete food entry. Please try again.")
+				bot.Send(msg)
+				return nil
+			}
+		
+			msg := tgbotapi.NewMessage(message.Chat.ID, "Food entry deleted successfully!")
+			bot.Send(msg)
 		} else {
             msg := tgbotapi.NewMessage(message.Chat.ID, "Invalid command. Please select an option from the keyboard.")
             bot.Send(msg)

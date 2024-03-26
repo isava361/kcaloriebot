@@ -218,3 +218,35 @@ func getMonthStats(userID int64, db *sql.DB) (float64, sql.NullFloat64, sql.Null
  
 	return avgCalories, avgProtein, avgFat, avgCarbs, nil
 }
+
+func getTodayFoodEntries(userID int64, db *sql.DB) ([]FoodEntry, error) {
+    var entries []FoodEntry
+
+    rows, err := db.Query("SELECT entry_id, calories, grams, protein, fat, carbs FROM food_entries WHERE user_id = ? AND entry_date = DATE('now')", userID)
+    if err != nil {
+        log.Printf("Failed to get today's food entries: %v", err)
+        return nil, err
+    }
+    defer rows.Close()
+
+    for rows.Next() {
+        var entry FoodEntry
+        err := rows.Scan(&entry.EntryID, &entry.Calories, &entry.Grams, &entry.Protein, &entry.Fat, &entry.Carbs)
+        if err != nil {
+            log.Printf("Failed to scan food entry: %v", err)
+            return nil, err
+        }
+        entries = append(entries, entry)
+    }
+
+    return entries, nil
+}
+
+func deleteFoodEntry(entryID int64, db *sql.DB) error {
+    _, err := db.Exec("DELETE FROM food_entries WHERE entry_id = ?", entryID)
+    if err != nil {
+        log.Printf("Failed to delete food entry: %v", err)
+        return err
+    }
+    return nil
+}
