@@ -5,6 +5,7 @@ import (
 	"log"
 
 	_ "github.com/mattn/go-sqlite3"
+    "fmt"
 )
 
 type FoodEntry struct {
