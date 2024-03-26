@@ -43,6 +43,21 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
         ),
     )
 
+    defaultkeyboard := tgbotapi.NewReplyKeyboard(
+        tgbotapi.NewKeyboardButtonRow(
+            tgbotapi.NewKeyboardButton("Add Food"),
+            tgbotapi.NewKeyboardButton("Food Today"),
+        ),
+        tgbotapi.NewKeyboardButtonRow(
+            tgbotapi.NewKeyboardButton("Today Stats"),
+            tgbotapi.NewKeyboardButton("Yesterday Stats"),
+        ),
+        tgbotapi.NewKeyboardButtonRow(
+            tgbotapi.NewKeyboardButton("Week Stats"),
+			tgbotapi.NewKeyboardButton("Month Stats"),
+        ),
+    )
+
     input, ok := userInputs[userID]
     if !ok {
         input = &UserInput{}
@@ -57,8 +72,8 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
             setUserState(userID, stateDefault, db)
             delete(userInputs, userID)
             msg := tgbotapi.NewMessage(message.Chat.ID, "Food entry canceled.")
+            msg.ReplyMarkup = defaultkeyboard
             bot.Send(msg)
-            sendDefaultKeyboard(bot, message.Chat.ID)
             return nil
         }
 
@@ -81,8 +96,8 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
             setUserState(userID, stateDefault, db)
             delete(userInputs, userID)
             msg := tgbotapi.NewMessage(message.Chat.ID, "Food entry canceled.")
+            msg.ReplyMarkup = defaultkeyboard
             bot.Send(msg)
-            sendDefaultKeyboard(bot, message.Chat.ID)
             return nil
         }
 
@@ -105,8 +120,8 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
             setUserState(userID, stateDefault, db)
             delete(userInputs, userID)
             msg := tgbotapi.NewMessage(message.Chat.ID, "Food entry canceled.")
+            msg.ReplyMarkup = defaultkeyboard
             bot.Send(msg)
-            sendDefaultKeyboard(bot, message.Chat.ID)
             return nil
         }
 
@@ -137,8 +152,8 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
             setUserState(userID, stateDefault, db)
             delete(userInputs, userID)
             msg := tgbotapi.NewMessage(message.Chat.ID, "Food entry canceled.")
+            msg.ReplyMarkup = defaultkeyboard
             bot.Send(msg)
-            sendDefaultKeyboard(bot, message.Chat.ID)
             return nil
         }
 
@@ -168,8 +183,8 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
             setUserState(userID, stateDefault, db)
             delete(userInputs, userID)
             msg := tgbotapi.NewMessage(message.Chat.ID, "Food entry canceled.")
+            msg.ReplyMarkup = defaultkeyboard
             bot.Send(msg)
-            sendDefaultKeyboard(bot, message.Chat.ID)
             return nil
         }
 
@@ -232,7 +247,7 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
         } else if message.Text == "Today Stats" {
             calories, protein, fat, carbs, err := getTodayStats(userID, db)
             if err != nil {
-                msg := tgbotapi.NewMessage(message.Chat.ID, "Failed to retrieve today's stats. Please try again.")
+                msg := tgbotapi.NewMessage(message.Chat.ID, "No food entries found for today.")
                 bot.Send(msg)
                 return nil
             }
@@ -242,7 +257,7 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
         } else if message.Text == "Yesterday Stats" {
             calories, protein, fat, carbs, err := getYesterdayStats(userID, db)
             if err != nil {
-                msg := tgbotapi.NewMessage(message.Chat.ID, "Failed to retrieve yesterday's stats. Please try again.")
+                msg := tgbotapi.NewMessage(message.Chat.ID, "No food entries found for yesterday.")
                 bot.Send(msg)
                 return nil
             }
@@ -252,7 +267,7 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
         } else if message.Text == "Week Stats" {
             calories, protein, fat, carbs, err := getWeekStats(userID, db)
             if err != nil {
-                msg := tgbotapi.NewMessage(message.Chat.ID, "Failed to retrieve week's stats. Please try again.")
+                msg := tgbotapi.NewMessage(message.Chat.ID, "No food entries found for the week.")
                 bot.Send(msg)
                 return nil
             }
@@ -262,7 +277,7 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
         } else if message.Text == "Month Stats" {
             calories, protein, fat, carbs, err := getMonthStats(userID, db)
             if err != nil {
-                msg := tgbotapi.NewMessage(message.Chat.ID, "Failed to retrieve month's stats. Please try again.")
+                msg := tgbotapi.NewMessage(message.Chat.ID, "No food entries found for the month.")
                 bot.Send(msg)
                 return nil
             }
@@ -273,7 +288,7 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
             // Retrieve today's food entries for the user
             entries, err := getTodayFoodEntries(userID, db)
             if err != nil {
-                msg := tgbotapi.NewMessage(message.Chat.ID, "Failed to retrieve today's food entries. Please try again.")
+                msg := tgbotapi.NewMessage(message.Chat.ID, "No food entries found for today.")
                 bot.Send(msg)
                 return nil
             }
