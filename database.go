@@ -54,8 +54,8 @@ func setUserState(userID int64, state int, db *sql.DB) error {
     return nil
 }
 
-func addFood(userID int64, calories, grams float64, protein, fat, carbs sql.NullFloat64, db *sql.DB) error {
-    _, err := db.Exec("INSERT INTO food_entries (user_id, entry_date, calories, grams, protein, fat, carbs) VALUES (?, DATETIME('now'), ?, ?, ?, ?, ?)", userID, calories, grams, protein, fat, carbs)
+func addFood(userID int64, name string, calories, grams float64, protein, fat, carbs sql.NullFloat64, db *sql.DB) error {
+    _, err := db.Exec("INSERT INTO food_entries (user_id, entry_date, name, calories, grams, protein, fat, carbs) VALUES (?, DATETIME('now'), ?, ?, ?, ?, ?, ?)", userID, name, calories, grams, protein, fat, carbs)
     if err != nil {
         log.Printf("Failed to add food entry: %v", err)
         return err
@@ -131,7 +131,7 @@ func getMonthStats(userID int64, db *sql.DB) (float64, sql.NullFloat64, sql.Null
 func getTodayFoodEntries(userID int64, db *sql.DB) ([]FoodEntry, error) {
     var entries []FoodEntry
 
-    rows, err := db.Query("SELECT entry_id, calories, grams, protein, fat, carbs FROM food_entries WHERE user_id = ? AND DATE(entry_date) = DATE('now')", userID)
+    rows, err := db.Query("SELECT entry_id, name, calories, grams, protein, fat, carbs FROM food_entries WHERE user_id = ? AND DATE(entry_date) = DATE('now')", userID)
     if err != nil {
         log.Printf("Failed to get today's food entries: %v", err)
         return nil, err
@@ -163,7 +163,7 @@ func deleteFoodEntry(entryID int64, db *sql.DB) error {
 func getTodayFoodEntriesWithPagination(userID int64, offset int, db *sql.DB) ([]FoodEntry, error) {
     var entries []FoodEntry
 
-    rows, err := db.Query("SELECT entry_id, calories, grams, protein, fat, carbs FROM food_entries WHERE user_id = ? AND DATE(entry_date) = DATE('now') LIMIT 5 OFFSET ?", userID, offset)
+    rows, err := db.Query("SELECT entry_id, name, calories, grams, protein, fat, carbs FROM food_entries WHERE user_id = ? AND DATE(entry_date) = DATE('now') LIMIT 5 OFFSET ?", userID, offset)
     if err != nil {
         log.Printf("Failed to get today's food entries: %v", err)
         return nil, err
