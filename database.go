@@ -106,23 +106,36 @@ func getTodayStats(userID int64, db *sql.DB) (float64, sql.NullFloat64, sql.Null
 }
 
 func getYesterdayStats(userID int64, db *sql.DB) (float64, sql.NullFloat64, sql.NullFloat64, sql.NullFloat64, error) {
-	var totalCalories sql.NullFloat64
-	var totalProtein, totalFat, totalCarbs sql.NullFloat64
+    var totalCalories sql.NullFloat64
+    var totalProtein, totalFat, totalCarbs sql.NullFloat64
+    var timezone string
 
-	err := db.QueryRow("SELECT SUM(calories), SUM(protein), SUM(fat), SUM(carbs) FROM food_entries WHERE user_id = ? AND DATE(entry_date) = DATE('now', '-1 day')", userID).Scan(&totalCalories, &totalProtein, &totalFat, &totalCarbs)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return 0, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, nil
-		}
-		log.Printf("Failed to get yesterday's stats: %v", err)
-		return 0, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, err
-	}
+    err := db.QueryRow("SELECT timezone FROM users WHERE user_id = ?", userID).Scan(&timezone)
+    if err != nil {
+        log.Printf("Failed to get user timezone: %v", err)
+        return 0, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, err
+    }
 
-	if !totalCalories.Valid {
-		totalCalories = sql.NullFloat64{Float64: 0, Valid: true}
-	}
+    offset, err := getTimezoneOffsetForLocation(timezone)
+    if err != nil {
+        log.Printf("Failed to get timezone offset: %v", err)
+        return 0, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, err
+    }
 
-	return totalCalories.Float64, totalProtein, totalFat, totalCarbs, nil
+    err = db.QueryRow("SELECT SUM(calories), SUM(protein), SUM(fat), SUM(carbs) FROM food_entries WHERE user_id = ? AND DATE(entry_date, ?) = DATE('now', ?, '-1 day')", userID, offset, offset).Scan(&totalCalories, &totalProtein, &totalFat, &totalCarbs)
+    if err != nil {
+        if err == sql.ErrNoRows {
+            return 0, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, nil
+        }
+        log.Printf("Failed to get yesterday's stats: %v", err)
+        return 0, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, err
+    }
+
+    if !totalCalories.Valid {
+        totalCalories = sql.NullFloat64{Float64: 0, Valid: true}
+    }
+
+    return totalCalories.Float64, totalProtein, totalFat, totalCarbs, nil
 }
 
 func getWeekStats(userID int64, db *sql.DB) (float64, sql.NullFloat64, sql.NullFloat64, sql.NullFloat64, error) {
@@ -166,26 +179,39 @@ func getMonthStats(userID int64, db *sql.DB) (float64, sql.NullFloat64, sql.Null
 }
 
 func getTodayFoodEntries(userID int64, db *sql.DB) ([]FoodEntry, error) {
-	var entries []FoodEntry
+    var entries []FoodEntry
+    var timezone string
 
-	rows, err := db.Query("SELECT entry_id, name, calories, grams, protein, fat, carbs FROM food_entries WHERE user_id = ? AND DATE(entry_date) = DATE('now')", userID)
-	if err != nil {
-		log.Printf("Failed to get today's food entries: %v", err)
-		return nil, err
-	}
-	defer rows.Close()
+    err := db.QueryRow("SELECT timezone FROM users WHERE user_id = ?", userID).Scan(&timezone)
+    if err != nil {
+        log.Printf("Failed to get user timezone: %v", err)
+        return nil, err
+    }
 
-	for rows.Next() {
-		var entry FoodEntry
-		err := rows.Scan(&entry.EntryID, &entry.Name, &entry.Calories, &entry.Grams, &entry.Protein, &entry.Fat, &entry.Carbs)
-		if err != nil {
-			log.Printf("Failed to scan food entry: %v", err)
-			return nil, err
-		}
-		entries = append(entries, entry)
-	}
+    offset, err := getTimezoneOffsetForLocation(timezone)
+    if err != nil {
+        log.Printf("Failed to get timezone offset: %v", err)
+        return nil, err
+    }
 
-	return entries, nil
+    rows, err := db.Query("SELECT entry_id, name, calories, grams, protein, fat, carbs FROM food_entries WHERE user_id = ? AND DATE(entry_date, ?) = DATE('now', ?)", userID, offset, offset)
+    if err != nil {
+        log.Printf("Failed to get today's food entries: %v", err)
+        return nil, err
+    }
+    defer rows.Close()
+
+    for rows.Next() {
+        var entry FoodEntry
+        err := rows.Scan(&entry.EntryID, &entry.Name, &entry.Calories, &entry.Grams, &entry.Protein, &entry.Fat, &entry.Carbs)
+        if err != nil {
+            log.Printf("Failed to scan food entry: %v", err)
+            return nil, err
+        }
+        entries = append(entries, entry)
+    }
+
+    return entries, nil
 }
 
 func deleteFoodEntry(entryID int64, db *sql.DB) error {
@@ -198,26 +224,39 @@ func deleteFoodEntry(entryID int64, db *sql.DB) error {
 }
 
 func getTodayFoodEntriesWithPagination(userID int64, offset int, db *sql.DB) ([]FoodEntry, error) {
-	var entries []FoodEntry
+    var entries []FoodEntry
+    var timezone string
 
-	rows, err := db.Query("SELECT entry_id, name, calories, grams, protein, fat, carbs FROM food_entries WHERE user_id = ? AND DATE(entry_date) = DATE('now') LIMIT 5 OFFSET ?", userID, offset)
-	if err != nil {
-		log.Printf("Failed to get today's food entries: %v", err)
-		return nil, err
-	}
-	defer rows.Close()
+    err := db.QueryRow("SELECT timezone FROM users WHERE user_id = ?", userID).Scan(&timezone)
+    if err != nil {
+        log.Printf("Failed to get user timezone: %v", err)
+        return nil, err
+    }
 
-	for rows.Next() {
-		var entry FoodEntry
-		err := rows.Scan(&entry.EntryID, &entry.Name, &entry.Calories, &entry.Grams, &entry.Protein, &entry.Fat, &entry.Carbs)
-		if err != nil {
-			log.Printf("Failed to scan food entry: %v", err)
-			return nil, err
-		}
-		entries = append(entries, entry)
-	}
+    timezoneOffset, err := getTimezoneOffsetForLocation(timezone)
+    if err != nil {
+        log.Printf("Failed to get timezone offset: %v", err)
+        return nil, err
+    }
 
-	return entries, nil
+    rows, err := db.Query("SELECT entry_id, name, calories, grams, protein, fat, carbs FROM food_entries WHERE user_id = ? AND DATE(entry_date, ?) = DATE('now', ?) LIMIT 5 OFFSET ?", userID, timezoneOffset, timezoneOffset, offset)
+    if err != nil {
+        log.Printf("Failed to get today's food entries: %v", err)
+        return nil, err
+    }
+    defer rows.Close()
+
+    for rows.Next() {
+        var entry FoodEntry
+        err := rows.Scan(&entry.EntryID, &entry.Name, &entry.Calories, &entry.Grams, &entry.Protein, &entry.Fat, &entry.Carbs)
+        if err != nil {
+            log.Printf("Failed to scan food entry: %v", err)
+            return nil, err
+        }
+        entries = append(entries, entry)
+    }
+
+    return entries, nil
 }
 
 func setUserTimezone(userID int64, timezone string, db *sql.DB) error {
