@@ -472,7 +472,7 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
             }
         } else if nutrient == "protein" {
             protein = sql.NullFloat64{Float64: value, Valid: true}
-            err = updateFavoriteFood(favorite.FavoriteID, nutrient, protein, db)
+            err = updateFavoriteFood(favorite.FavoriteID, nutrient, protein.Float64, db)
             if err != nil {
                 log.Printf("Failed to update favorite food: %s", err)
                 msg := tgbotapi.NewMessage(message.Chat.ID, "Failed to update favorite food. Please try again.")
@@ -481,7 +481,7 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
             }
         } else if nutrient == "fat" {
             fat = sql.NullFloat64{Float64: value, Valid: true}
-            err = updateFavoriteFood(favorite.FavoriteID, nutrient, fat, db)
+            err = updateFavoriteFood(favorite.FavoriteID, nutrient, fat.Float64, db)
             if err != nil {
                 log.Printf("Failed to update favorite food: %s", err)
                 msg := tgbotapi.NewMessage(message.Chat.ID, "Failed to update favorite food. Please try again.")
@@ -490,7 +490,7 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
             }
         } else if nutrient == "carbs" {
             carbs = sql.NullFloat64{Float64: value, Valid: true}
-            err = updateFavoriteFood(favorite.FavoriteID, nutrient, carbs, db)
+            err = updateFavoriteFood(favorite.FavoriteID, nutrient, carbs.Float64, db)
             if err != nil {
                 log.Printf("Failed to update favorite food: %s", err)
                 msg := tgbotapi.NewMessage(message.Chat.ID, "Failed to update favorite food. Please try again.")
