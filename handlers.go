@@ -501,6 +501,7 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
     
         // Send a confirmation message
         msg := tgbotapi.NewMessage(message.Chat.ID, "Favorite product updated successfully!")
+        msg.ReplyMarkup = defaultkeyboard
         bot.Send(msg)
     
         // Reset the user's state
