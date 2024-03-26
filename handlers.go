@@ -193,7 +193,35 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
             msgText := fmt.Sprintf("Month's Stats (Average):\nCalories: %.2f\nProtein: %.2f\nFat: %.2f\nCarbs: %.2f", calories, protein.Float64, fat.Float64, carbs.Float64)
             msg := tgbotapi.NewMessage(message.Chat.ID, msgText)
             bot.Send(msg)
-        } else {
+        } else if message.Text == "Delete Food" {
+			// Retrieve today's food entries for the user
+			entries, err := getTodayFoodEntries(userID, db)
+			if err != nil {
+				msg := tgbotapi.NewMessage(message.Chat.ID, "Failed to retrieve today's food entries. Please try again.")
+				bot.Send(msg)
+				return nil
+			}
+		
+			if len(entries) == 0 {
+				msg := tgbotapi.NewMessage(message.Chat.ID, "No food entries found for today.")
+				bot.Send(msg)
+				return nil
+			}
+		
+			// Create inline keyboard with food entry options
+			var rows [][]tgbotapi.InlineKeyboardButton
+			for _, entry := range entries {
+				buttonText := fmt.Sprintf("%s (%.2f calories)", entry.FoodName, entry.Calories)
+				button := tgbotapi.NewInlineKeyboardButtonData(buttonText, fmt.Sprintf("delete_%d", entry.EntryID))
+				row := []tgbotapi.InlineKeyboardButton{button}
+				rows = append(rows, row)
+			}
+		
+			keyboard := tgbotapi.NewInlineKeyboardMarkup(rows...)
+			msg := tgbotapi.NewMessage(message.Chat.ID, "Select a food entry to delete:")
+			msg.ReplyMarkup = keyboard
+			bot.Send(msg)
+		} else {
             msg := tgbotapi.NewMessage(message.Chat.ID, "Invalid command. Please select an option from the keyboard.")
             bot.Send(msg)
         }
@@ -206,14 +234,15 @@ func sendDefaultKeyboard(bot *tgbotapi.BotAPI, chatID int64) {
     keyboard := tgbotapi.NewReplyKeyboard(
         tgbotapi.NewKeyboardButtonRow(
             tgbotapi.NewKeyboardButton("Add Food"),
+            tgbotapi.NewKeyboardButton("Delete Food"),
+        ),
+        tgbotapi.NewKeyboardButtonRow(
             tgbotapi.NewKeyboardButton("Today Stats"),
-        ),
-        tgbotapi.NewKeyboardButtonRow(
             tgbotapi.NewKeyboardButton("Yesterday Stats"),
-            tgbotapi.NewKeyboardButton("Week Stats"),
         ),
         tgbotapi.NewKeyboardButtonRow(
-            tgbotapi.NewKeyboardButton("Month Stats"),
+            tgbotapi.NewKeyboardButton("Week Stats"),
+			tgbotapi.NewKeyboardButton("Month Stats"),
         ),
     )
     msg := tgbotapi.NewMessage(chatID, "Select an option:")
