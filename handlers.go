@@ -463,19 +463,40 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
         var protein, fat, carbs sql.NullFloat64
         if nutrient == "calories" {
             calories = value
+            err = updateFavoriteFood(favorite.FavoriteID, nutrient, calories, db)
+            if err != nil {
+                log.Printf("Failed to update favorite food: %s", err)
+                msg := tgbotapi.NewMessage(message.Chat.ID, "Failed to update favorite food. Please try again.")
+                bot.Send(msg)
+                return nil
+            }
         } else if nutrient == "protein" {
             protein = sql.NullFloat64{Float64: value, Valid: true}
+            err = updateFavoriteFood(favorite.FavoriteID, nutrient, protein, db)
+            if err != nil {
+                log.Printf("Failed to update favorite food: %s", err)
+                msg := tgbotapi.NewMessage(message.Chat.ID, "Failed to update favorite food. Please try again.")
+                bot.Send(msg)
+                return nil
+            }
         } else if nutrient == "fat" {
             fat = sql.NullFloat64{Float64: value, Valid: true}
+            err = updateFavoriteFood(favorite.FavoriteID, nutrient, fat, db)
+            if err != nil {
+                log.Printf("Failed to update favorite food: %s", err)
+                msg := tgbotapi.NewMessage(message.Chat.ID, "Failed to update favorite food. Please try again.")
+                bot.Send(msg)
+                return nil
+            }
         } else if nutrient == "carbs" {
             carbs = sql.NullFloat64{Float64: value, Valid: true}
-        }
-        err = updateFavoriteFood(favorite.FavoriteID, calories, protein, fat, carbs, db)
-        if err != nil {
-            log.Printf("Failed to update favorite food: %s", err)
-            msg := tgbotapi.NewMessage(message.Chat.ID, "Failed to update favorite food. Please try again.")
-            bot.Send(msg)
-            return nil
+            err = updateFavoriteFood(favorite.FavoriteID, nutrient, carbs, db)
+            if err != nil {
+                log.Printf("Failed to update favorite food: %s", err)
+                msg := tgbotapi.NewMessage(message.Chat.ID, "Failed to update favorite food. Please try again.")
+                bot.Send(msg)
+                return nil
+            }
         }
     
         // Send a confirmation message
