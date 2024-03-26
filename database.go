@@ -440,3 +440,47 @@ func fetchFavoriteFoods(bot *tgbotapi.BotAPI, chatID int64, userID int64, db *sq
         return err
     }
 }
+
+func updateFoodEntry(entryID int64, nutrient string, value float64, db *sql.DB) error {
+    // Retrieve the current food entry details from the database
+    var entry FoodEntry
+    err := db.QueryRow("SELECT name, calories, grams, protein, fat, carbs FROM food_entries WHERE entry_id = ?", entryID).Scan(&entry.Name, &entry.Calories, &entry.Grams, &entry.Protein, &entry.Fat, &entry.Carbs)
+    if err != nil {
+        log.Printf("Failed to retrieve food entry details: %v", err)
+        return err
+    }
+
+    // Update the selected nutrient value
+    switch nutrient {
+    case "calories":
+        entry.Calories = value
+    case "grams":
+        entry.Grams = value
+    case "protein":
+        entry.Protein = sql.NullFloat64{Float64: value, Valid: true}
+    case "fat":
+        entry.Fat = sql.NullFloat64{Float64: value, Valid: true}
+    case "carbs":
+        entry.Carbs = sql.NullFloat64{Float64: value, Valid: true}
+    default:
+        return fmt.Errorf("invalid nutrient: %s", nutrient)
+    }
+
+    // Update the food entry in the database
+    _, err = db.Exec("UPDATE food_entries SET calories = ?, grams = ?, protein = ?, fat = ?, carbs = ? WHERE entry_id = ?", entry.Calories, entry.Grams, entry.Protein, entry.Fat, entry.Carbs, entryID)
+    if err != nil {
+        log.Printf("Failed to update food entry: %v", err)
+        return err
+    }
+
+    return nil
+}
+
+func deleteFoodEntry(entryID int64, db *sql.DB) error {
+    _, err := db.Exec("DELETE FROM food_entries WHERE entry_id = ?", entryID)
+    if err != nil {
+        log.Printf("Failed to delete food entry: %v", err)
+        return err
+    }
+    return nil
+}
