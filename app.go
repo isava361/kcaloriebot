@@ -161,12 +161,12 @@ func main() {
 				msg := tgbotapi.NewMessage(update.CallbackQuery.Message.Chat.ID, "What do you want to amend?")
 				amendOptions := tgbotapi.NewInlineKeyboardMarkup(
 					tgbotapi.NewInlineKeyboardRow(
-						tgbotapi.NewInlineKeyboardButtonData("Calories", "amend_calories_"+strconv.FormatInt(favoriteID, 10)),
-						tgbotapi.NewInlineKeyboardButtonData("Protein", "amend_protein_"+strconv.FormatInt(favoriteID, 10)),
+						tgbotapi.NewInlineKeyboardButtonData("Calories", "calories_amend_"+strconv.FormatInt(favoriteID, 10)),
+						tgbotapi.NewInlineKeyboardButtonData("Protein", "protein_amend_"+strconv.FormatInt(favoriteID, 10)),
 					),
 					tgbotapi.NewInlineKeyboardRow(
-						tgbotapi.NewInlineKeyboardButtonData("Fat", "amend_fat_"+strconv.FormatInt(favoriteID, 10)),
-						tgbotapi.NewInlineKeyboardButtonData("Carbs", "amend_carbs_"+strconv.FormatInt(favoriteID, 10)),
+						tgbotapi.NewInlineKeyboardButtonData("Fat", "fat_amend_"+strconv.FormatInt(favoriteID, 10)),
+						tgbotapi.NewInlineKeyboardButtonData("Carbs", "carbs_amend_"+strconv.FormatInt(favoriteID, 10)),
 					),
 				)
 				msg.ReplyMarkup = amendOptions
@@ -258,7 +258,7 @@ func main() {
 				if _, err := bot.Request(callbackConfig); err != nil {
 					log.Printf("Error sending callback response: %s", err)
 				}			
-			} else if strings.HasPrefix(update.CallbackQuery.Data, "amend_calories_") || strings.HasPrefix(update.CallbackQuery.Data, "amend_protein_") || strings.HasPrefix(update.CallbackQuery.Data, "amend_fat_") || strings.HasPrefix(update.CallbackQuery.Data, "amend_carbs_") {
+			} else if strings.HasPrefix(update.CallbackQuery.Data, "calories_amend_") || strings.HasPrefix(update.CallbackQuery.Data, "protein_amend_") || strings.HasPrefix(update.CallbackQuery.Data, "fat_amend_") || strings.HasPrefix(update.CallbackQuery.Data, "carbs_amend_") {
 				var favoriteID int64				
 				parts := strings.Split(update.CallbackQuery.Data, "_")
 				if len(parts) != 3 {
@@ -270,8 +270,8 @@ func main() {
 					continue
 				}
 				
-				if strings.HasPrefix(update.CallbackQuery.Data, "amend_calories_") {
-					favoriteID, err = strconv.ParseInt(strings.TrimPrefix(update.CallbackQuery.Data, "amend_calories_"), 10, 64)
+				if strings.HasPrefix(update.CallbackQuery.Data, "calories_amend_") {
+					favoriteID, err = strconv.ParseInt(strings.TrimPrefix(update.CallbackQuery.Data, "calories_amend_"), 10, 64)
 					if err != nil {
 						log.Printf("Invalid favorite ID: %s", err)
 						callbackConfig := tgbotapi.NewCallback(update.CallbackQuery.ID, "Invalid favorite ID")
@@ -280,8 +280,8 @@ func main() {
 						}
 						continue
 					}			
-				} else if strings.HasPrefix(update.CallbackQuery.Data, "amend_protein_") {
-					favoriteID, err = strconv.ParseInt(strings.TrimPrefix(update.CallbackQuery.Data, "amend_protein_"), 10, 64)
+				} else if strings.HasPrefix(update.CallbackQuery.Data, "protein_amend_") {
+					favoriteID, err = strconv.ParseInt(strings.TrimPrefix(update.CallbackQuery.Data, "protein_amend_"), 10, 64)
 					if err != nil {
 						log.Printf("Invalid favorite ID: %s", err)
 						callbackConfig := tgbotapi.NewCallback(update.CallbackQuery.ID, "Invalid favorite ID")
@@ -290,8 +290,8 @@ func main() {
 						}
 						continue
 					}			
-				} else if strings.HasPrefix(update.CallbackQuery.Data, "amend_fat_") {
-					favoriteID, err = strconv.ParseInt(strings.TrimPrefix(update.CallbackQuery.Data, "amend_fat_"), 10, 64)
+				} else if strings.HasPrefix(update.CallbackQuery.Data, "fat_amend_") {
+					favoriteID, err = strconv.ParseInt(strings.TrimPrefix(update.CallbackQuery.Data, "fat_amend_"), 10, 64)
 					if err != nil {
 						log.Printf("Invalid favorite ID: %s", err)
 						callbackConfig := tgbotapi.NewCallback(update.CallbackQuery.ID, "Invalid favorite ID")
@@ -300,8 +300,8 @@ func main() {
 						}
 						continue
 					}			
-				} else if strings.HasPrefix(update.CallbackQuery.Data, "amend_carbs_") {
-					favoriteID, err = strconv.ParseInt(strings.TrimPrefix(update.CallbackQuery.Data, "amend_carbs_"), 10, 64)
+				} else if strings.HasPrefix(update.CallbackQuery.Data, "carbs_amend_") {
+					favoriteID, err = strconv.ParseInt(strings.TrimPrefix(update.CallbackQuery.Data, "carbs_amend_"), 10, 64)
 					if err != nil {
 						log.Printf("Invalid favorite ID: %s", err)
 						callbackConfig := tgbotapi.NewCallback(update.CallbackQuery.ID, "Invalid favorite ID")
@@ -313,13 +313,13 @@ func main() {
 				}
 				// Ask the user to enter the new value for the selected nutrient
 				var nutrient string
-				if strings.HasPrefix(update.CallbackQuery.Data, "amend_calories_") {
+				if strings.HasPrefix(update.CallbackQuery.Data, "calories_amend_") {
 					nutrient = "calories"
-				} else if strings.HasPrefix(update.CallbackQuery.Data, "amend_protein_") {
+				} else if strings.HasPrefix(update.CallbackQuery.Data, "protein_amend_") {
 					nutrient = "protein"
-				} else if strings.HasPrefix(update.CallbackQuery.Data, "amend_fat_") {
+				} else if strings.HasPrefix(update.CallbackQuery.Data, "fat_amend_") {
 					nutrient = "fat"
-				} else if strings.HasPrefix(update.CallbackQuery.Data, "amend_carbs_") {
+				} else if strings.HasPrefix(update.CallbackQuery.Data, "carbs_amend_") {
 					nutrient = "carbs"
 				}
 			
