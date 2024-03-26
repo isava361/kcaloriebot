@@ -87,7 +87,13 @@ func main() {
                 if _, err := bot.Request(callbackConfig); err != nil {
                     log.Printf("Error sending callback response: %s", err)
                 }
-            } else {
+            } else if strings.HasPrefix(data, "previous:") || strings.HasPrefix(data, "next:") {
+				offset, _ := strconv.Atoi(strings.Split(data, ":")[1])
+				err := fetchFoodEntries(bot, update.CallbackQuery.Message.Chat.ID, update.CallbackQuery.From.ID, db, offset, update.CallbackQuery.Message.MessageID)
+				if err != nil {
+					log.Printf("Failed to fetch food entries: %v", err)
+				}
+			} else {
                 log.Printf("Unhandled callback data: %s", update.CallbackQuery.Data)
                 callbackConfig := tgbotapi.NewCallback(update.CallbackQuery.ID, "Unhandled callback data")
                 if _, err := bot.Request(callbackConfig); err != nil {
