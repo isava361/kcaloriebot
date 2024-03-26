@@ -87,7 +87,7 @@ func main() {
                 if _, err := bot.Request(callbackConfig); err != nil {
                     log.Printf("Error sending callback response: %s", err)
                 }
-            } else if strings.HasPrefix(data, "previous:") || strings.HasPrefix(data, "next:") {
+            } else if strings.HasPrefix(update.CallbackQuery.Data, "previous:") || strings.HasPrefix(update.CallbackQuery.Data, "next:") {
 				offset, _ := strconv.Atoi(strings.Split(data, ":")[1])
 				err := fetchFoodEntries(bot, update.CallbackQuery.Message.Chat.ID, update.CallbackQuery.From.ID, db, offset, update.CallbackQuery.Message.MessageID)
 				if err != nil {
