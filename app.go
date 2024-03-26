@@ -270,7 +270,7 @@ func main() {
 				}
 				
 				if strings.HasPrefix(update.CallbackQuery.Data, "amend_calories_") {
-					favoriteID, err := strconv.ParseInt(strings.TrimPrefix(update.CallbackQuery.Data, "amend_calories_"), 10, 64)
+					favoriteID, err = strconv.ParseInt(strings.TrimPrefix(update.CallbackQuery.Data, "amend_calories_"), 10, 64)
 					if err != nil {
 						log.Printf("Invalid favorite ID: %s", err)
 						callbackConfig := tgbotapi.NewCallback(update.CallbackQuery.ID, "Invalid favorite ID")
@@ -280,7 +280,7 @@ func main() {
 						continue
 					}			
 				} else if strings.HasPrefix(update.CallbackQuery.Data, "amend_protein_") {
-					favoriteID, err := strconv.ParseInt(strings.TrimPrefix(update.CallbackQuery.Data, "amend_protein_"), 10, 64)
+					favoriteID, err = strconv.ParseInt(strings.TrimPrefix(update.CallbackQuery.Data, "amend_protein_"), 10, 64)
 					if err != nil {
 						log.Printf("Invalid favorite ID: %s", err)
 						callbackConfig := tgbotapi.NewCallback(update.CallbackQuery.ID, "Invalid favorite ID")
@@ -290,7 +290,7 @@ func main() {
 						continue
 					}			
 				} else if strings.HasPrefix(update.CallbackQuery.Data, "amend_fat_") {
-					favoriteID, err := strconv.ParseInt(strings.TrimPrefix(update.CallbackQuery.Data, "amend_fat_"), 10, 64)
+					favoriteID, err = strconv.ParseInt(strings.TrimPrefix(update.CallbackQuery.Data, "amend_fat_"), 10, 64)
 					if err != nil {
 						log.Printf("Invalid favorite ID: %s", err)
 						callbackConfig := tgbotapi.NewCallback(update.CallbackQuery.ID, "Invalid favorite ID")
@@ -300,7 +300,7 @@ func main() {
 						continue
 					}			
 				} else if strings.HasPrefix(update.CallbackQuery.Data, "amend_carbs_") {
-					favoriteID, err := strconv.ParseInt(strings.TrimPrefix(update.CallbackQuery.Data, "amend_carbs_"), 10, 64)
+					favoriteID, err = strconv.ParseInt(strings.TrimPrefix(update.CallbackQuery.Data, "amend_carbs_"), 10, 64)
 					if err != nil {
 						log.Printf("Invalid favorite ID: %s", err)
 						callbackConfig := tgbotapi.NewCallback(update.CallbackQuery.ID, "Invalid favorite ID")
