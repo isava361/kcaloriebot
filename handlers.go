@@ -321,7 +321,7 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
         }
     
         if !timezone.Valid {
-            msg := tgbotapi.NewMessage(message.Chat.ID, "Please enter your location or timezone (e.g., 'New York' or 'America/New_York'):")
+            msg := tgbotapi.NewMessage(message.Chat.ID, "Please enter your location or timezone (e.g., 'New York'):")
             bot.Send(msg)
             setUserState(userID, stateWaitingForTimezone, db)
             return nil
