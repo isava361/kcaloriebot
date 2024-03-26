@@ -17,6 +17,15 @@ type FoodEntry struct {
 	Carbs    sql.NullFloat64
 }
 
+type FavoriteFood struct {
+    FavoriteID int64
+    Name       string
+    Calories   float64
+    Protein    sql.NullFloat64
+    Fat        sql.NullFloat64
+    Carbs      sql.NullFloat64
+}
+
 func getUserState(userID int64, db *sql.DB) int {
 	var state int
 	err := db.QueryRow("SELECT state FROM users WHERE user_id = ?", userID).Scan(&state)

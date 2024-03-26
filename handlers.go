@@ -31,6 +31,7 @@ type UserInput struct {
     Grams    float64
     Protein  sql.NullFloat64
     Fat      sql.NullFloat64
+    Carbs    sql.NullFloat64
 }
 var userInputs = make(map[int64]*UserInput)
 
@@ -512,6 +513,10 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
         } else if message.Text == "Back" {
             msg := tgbotapi.NewMessage(message.Chat.ID, "Select an option:")
             msg.ReplyMarkup = defaultkeyboard
+            bot.Send(msg)
+        } if message.Text == "Search Favorites" {
+            setUserState(userID, stateWaitingForFavoriteSearch, db)
+            msg := tgbotapi.NewMessage(message.Chat.ID, "Enter the name or part of the name of the product to search:")
             bot.Send(msg)
         } else {
             msg := tgbotapi.NewMessage(message.Chat.ID, "Invalid command. Please select an option from the keyboard.")
