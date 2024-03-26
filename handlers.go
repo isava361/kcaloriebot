@@ -124,7 +124,7 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
                 bot.Send(msg)
                 return nil
             }
-            input.Protein = sql.NullFloat64{Float64: protein, Valid: true}
+            input.Protein = sql.NullFloat64{Float64: protein * input.Grams / 100, Valid: true}
             setUserState(userID, stateWaitingForFat, db)
             msg := tgbotapi.NewMessage(message.Chat.ID, "Enter the fat per 100g (or send Skip to omit):")
             msg.ReplyMarkup = skipkeyboard
@@ -155,7 +155,7 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
                 bot.Send(msg)
                 return nil
             }
-            input.Fat = sql.NullFloat64{Float64: fat, Valid: true}
+            input.Fat = sql.NullFloat64{Float64: fat * input.Grams / 100, Valid: true}
             setUserState(userID, stateWaitingForCarbs, db)
             msg := tgbotapi.NewMessage(message.Chat.ID, "Enter the carbs per 100g (or send Skip to omit):")
             msg.ReplyMarkup = skipkeyboard
@@ -202,7 +202,7 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
             grams := input.Grams
             protein := input.Protein
             fat := input.Fat
-            carbsNull := sql.NullFloat64{Float64: carbs, Valid: true}
+            carbsNull := sql.NullFloat64{Float64: carbs * input.Grams / 100, Valid: true}
             err = addFood(userID, calories*grams/100, grams, protein, fat, carbsNull, db)
             if err != nil {
                 msg := tgbotapi.NewMessage(message.Chat.ID, "Failed to add food entry. Please try again.")
