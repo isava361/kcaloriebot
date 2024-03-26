@@ -514,7 +514,7 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
             msg := tgbotapi.NewMessage(message.Chat.ID, "Select an option:")
             msg.ReplyMarkup = defaultkeyboard
             bot.Send(msg)
-        } if message.Text == "Search Favorites" {
+        } else if message.Text == "Search Favorites" {
             setUserState(userID, stateWaitingForFavoriteSearch, db)
             msg := tgbotapi.NewMessage(message.Chat.ID, "Enter the name or part of the name of the product to search:")
             bot.Send(msg)
