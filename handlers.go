@@ -364,7 +364,19 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
             }
             msg := tgbotapi.NewMessage(message.Chat.ID, "Product saved as a favorite!")
             bot.Send(msg)
-        } 
+            setUserState(userID, stateDefault, db)
+            msg = tgbotapi.NewMessage(message.Chat.ID, "Select an option:")
+            msg.ReplyMarkup = defaultkeyboard
+            bot.Send(msg)
+        } else if message.Text == "No" {
+            setUserState(userID, stateDefault, db)
+            msg := tgbotapi.NewMessage(message.Chat.ID, "Select an option:")
+            msg.ReplyMarkup = defaultkeyboard
+            bot.Send(msg)
+        } else {
+            msg := tgbotapi.NewMessage(message.Chat.ID, "Invalid input. Please select 'Yes' or 'No'.")
+            bot.Send(msg)
+        }
     
     case stateWaitingForFavoriteSearch:
         query := message.Text
