@@ -181,3 +181,12 @@ func getTodayFoodEntriesWithPagination(userID int64, offset int, db *sql.DB) ([]
 
     return entries, nil
 }
+
+func setUserTimezone(userID int64, timezone string, db *sql.DB) error {
+    _, err := db.Exec("UPDATE users SET timezone = ? WHERE user_id = ?", timezone, userID)
+    if err != nil {
+        log.Printf("Failed to update user timezone: %v", err)
+        return err
+    }
+    return nil
+}

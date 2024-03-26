@@ -7,6 +7,7 @@ import (
 	"fmt"
     "log"
 	"strconv"
+    "time"
 ) 
 
 const (
@@ -438,4 +439,37 @@ func fetchFoodEntries(bot *tgbotapi.BotAPI, chatID int64, userID int64, db *sql.
         _, err := bot.Send(editMsg)
         return err
     }
+}
+
+func getCurrentTimeForLocation(location string) (time.Time, error) {
+    // List of common prefixes to try
+    prefixes := []string{"Europe/", "America/", "Asia/", "Africa/", "Australia/"}
+
+    // Normalize location: replace spaces with underscores and convert to Title case
+    locationParts := strings.Split(strings.ToLower(location), " ")
+    for i, part := range locationParts {
+        locationParts[i] = strings.Title(part)
+    }
+    normalizedLocation := strings.Join(locationParts, "_")
+
+    var loc *time.Location
+    var err error
+
+    // First, try the raw location string in case it's already a full IANA identifier
+    loc, err = time.LoadLocation(normalizedLocation)
+    if err == nil {
+        return time.Now().In(loc), nil
+    }
+
+    // If not successful, try with different regional prefixes
+    for _, prefix := range prefixes {
+        loc, err = time.LoadLocation(prefix + normalizedLocation)
+        if err == nil {
+            return time.Now().In(loc), nil
+        }
+    }
+
+    // If none of the combinations worked, return the last error
+    log.Printf("Error loading location: %v", err)
+    return time.Time{}, err
 }
