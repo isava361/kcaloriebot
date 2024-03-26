@@ -20,7 +20,7 @@ const (
 )
 
 type UserInput struct {
-    Name     string
+    Name     sql.NullString
     Calories float64
     Grams    float64
     Protein  sql.NullFloat64
@@ -79,9 +79,9 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
         }
 
         if message.Text == "Skip" {
-            input.Name = ""
+            input.Name = sql.NullString{Valid: false}
         } else {
-            input.Name = message.Text
+            input.Name = sql.NullString{String: message.Text, Valid: true}
         }
         setUserState(userID, stateWaitingForCalories, db)
         msg := tgbotapi.NewMessage(message.Chat.ID, "Enter the calories per 100g:")

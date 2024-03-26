@@ -54,7 +54,7 @@ func setUserState(userID int64, state int, db *sql.DB) error {
     return nil
 }
 
-func addFood(userID int64, name string, calories, grams float64, protein, fat, carbs sql.NullFloat64, db *sql.DB) error {
+func addFood(userID int64, name sql.NullString, calories, grams float64, protein, fat, carbs sql.NullFloat64, db *sql.DB) error {
     _, err := db.Exec("INSERT INTO food_entries (user_id, entry_date, name, calories, grams, protein, fat, carbs) VALUES (?, DATETIME('now'), ?, ?, ?, ?, ?, ?)", userID, name, calories, grams, protein, fat, carbs)
     if err != nil {
         log.Printf("Failed to add food entry: %v", err)
