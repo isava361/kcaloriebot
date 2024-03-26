@@ -122,6 +122,7 @@ func createTables(db *sql.DB) error {
 			protein REAL,
 			fat REAL,
 			carbs REAL,
+			name TEXT,
 			FOREIGN KEY (user_id) REFERENCES users (user_id)
 		);
 	`)
