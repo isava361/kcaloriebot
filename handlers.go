@@ -219,12 +219,13 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
         }
 
         if message.Text == "Skip" {
+            name := input.Name
             calories := input.Calories
             grams := input.Grams
             protein := input.Protein
             fat := input.Fat
             carbsNull := sql.NullFloat64{Valid: false}
-            err := addFood(userID, calories*grams/100, grams, protein, fat, carbsNull, db)
+            err := addFood(userID,name, calories*grams/100, grams, protein, fat, carbsNull, db)
             if err != nil {
                 msg := tgbotapi.NewMessage(message.Chat.ID, "Failed to add food entry. Please try again.")
                 bot.Send(msg)
@@ -243,6 +244,7 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
                 bot.Send(msg)
                 return nil
             }
+            name := input.Name
             calories := input.Calories
             grams := input.Grams
             protein := input.Protein
@@ -272,7 +274,7 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
                 return nil
             }
             carbsNull := sql.NullFloat64{Float64: carbs * input.Grams / 100, Valid: true}
-            err = addFood(userID, calories*grams/100, grams, protein, fat, carbsNull, db)
+            err = addFood(userID, name, calories*grams/100, grams, protein, fat, carbsNull, db)
             if err != nil {
                 msg := tgbotapi.NewMessage(message.Chat.ID, "Failed to add food entry. Please try again.")
                 bot.Send(msg)
