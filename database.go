@@ -4,6 +4,7 @@ import (
 	"log"
 	"database/sql"
 	_ "github.com/mattn/go-sqlite3"
+	"strings"
 )
 
 func getUserState(userID int64, db *sql.DB) int {
