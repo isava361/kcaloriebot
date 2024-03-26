@@ -39,24 +39,52 @@ func main() {
 	
 
 	for update := range updates {
+        if update.Message != nil {
+            m := update.Message
+            if m.From == nil {
+                continue
+            }
 
-		if update.Message != nil {
-			m := update.Message
-			if m.From == nil {
-				continue
-			}
+            log.Printf("Message received")
+            err := handleMessage(bot, m, db)
+            if err != nil {
+                log.Printf("[%s] %s, err: %s", update.Message.From.UserName, update.Message.Text, err.Error())
+                continue
+            }
 
-			log.Printf("Message received")
-			err := handleMessage(bot, m, db)
-			if err != nil {
-				log.Printf("[%s] %s,   err: %s", update.Message.From.UserName, update.Message.Text, err.Error())
-				continue
-			}
+            log.Printf("[%s] %s", update.Message.From.UserName, update.Message.Text)
+        } else if update.CallbackQuery != nil { // Handle callback queries
+            callback := update.CallbackQuery
 
-			log.Printf("[%s] %s", update.Message.From.UserName, update.Message.Text)
-		}
-	}
+            // Check if the callback data starts with "delete_"
+            if strings.HasPrefix(callback.Data, "delete_") {
+                entryID, err := strconv.ParseInt(strings.TrimPrefix(callback.Data, "delete_"), 10, 64)
+                if err != nil {
+                    log.Printf("Invalid food entry ID: %s", err)
+                    continue
+                }
+
+                err = deleteFoodEntry(entryID, db)
+                if err != nil {
+                    log.Printf("Failed to delete food entry: %s", err)
+                    continue
+                }
+
+                // Send a confirmation message
+                msg := tgbotapi.NewMessage(callback.Message.Chat.ID, "Food entry deleted successfully!")
+                bot.Send(msg)
+
+                // Answer the callback query with an empty message to remove the keyboard
+                callback.Text = "Food entry deleted."
+                callback.ShowAlert = false
+                bot.AnswerCallbackQuery(callback)
+            } else {
+                log.Printf("Unhandled callback data: %s", callback.Data)
+            }
+        }
+    }
 }
+
 
 func createTables(db *sql.DB) error {
 	_, err := db.Exec(`
