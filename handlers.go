@@ -321,11 +321,11 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
             err := fetchFoodEntries(bot, message.Chat.ID, userID, db, offset, 0)
             if err != nil {
                 log.Printf("Failed to fetch food entries: %v", err)
-                return nil
-            } else {
+            } 
+            return nil
+        } else {
             msg := tgbotapi.NewMessage(message.Chat.ID, "Invalid command. Please select an option from the keyboard.")
             bot.Send(msg)
-           }
         }
     }
 
