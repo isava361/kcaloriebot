@@ -8,6 +8,7 @@ import (
     "log"
 	"strconv"
     "time"
+    "stings"
 ) 
 
 const (
@@ -71,7 +72,7 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
     switch getUserState(userID, db) {
     case stateWaitingForTimezone:
         location := message.Text
-        currentTime, err := getCurrentTimeForLocation(location)
+        _, err := getCurrentTimeForLocation(location)
         if err != nil {
             msg := tgbotapi.NewMessage(message.Chat.ID, "Invalid location. Please try a different city with the same timezone.")
             bot.Send(msg)

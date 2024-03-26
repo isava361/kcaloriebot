@@ -71,7 +71,7 @@ func getTodayStats(userID int64, db *sql.DB) (float64, sql.NullFloat64, sql.Null
         log.Printf("Failed to get user timezone: %v", err)
         timezone = "UTC"
     }
-	err := db.QueryRow("SELECT SUM(calories), SUM(protein), SUM(fat), SUM(carbs) FROM food_entries WHERE user_id = ? AND DATE(entry_date, ?) = DATE('now', ?)", userID, timezone, timezone).Scan(&totalCalories, &totalProtein, &totalFat, &totalCarbs)
+	err = db.QueryRow("SELECT SUM(calories), SUM(protein), SUM(fat), SUM(carbs) FROM food_entries WHERE user_id = ? AND DATE(entry_date, ?) = DATE('now', ?)", userID, timezone, timezone).Scan(&totalCalories, &totalProtein, &totalFat, &totalCarbs)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return 0, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, nil
