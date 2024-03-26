@@ -604,30 +604,6 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
                 log.Printf("Failed to fetch favorite foods: %v", err)
             }
             return nil
-            }
-        
-            // Create the message text with the list of favorites
-            var messageText string
-            if len(favorites) == 0 {
-                messageText = "You haven't added any favorite foods yet."
-            } else {
-                messageText = "Your favorite foods:"
-            }
-        
-            // Create the inline keyboard with buttons for each favorite
-            var rows [][]tgbotapi.InlineKeyboardButton
-            for _, favorite := range favorites {
-                buttonText := fmt.Sprintf("%s - Calories: %.2f, Protein: %.2f, Fat: %.2f, Carbs: %.2f", favorite.Name, favorite.Calories, favorite.Protein.Float64, favorite.Fat.Float64, favorite.Carbs.Float64)
-                button := tgbotapi.NewInlineKeyboardButtonData(buttonText, fmt.Sprintf("favorite_%d", favorite.FavoriteID))
-                row := []tgbotapi.InlineKeyboardButton{button}
-                rows = append(rows, row)
-            }
-            keyboard := tgbotapi.NewInlineKeyboardMarkup(rows...)
-        
-            // Send the message with the list of favorites and inline keyboard
-            msg := tgbotapi.NewMessage(message.Chat.ID, messageText)
-            msg.ReplyMarkup = keyboard
-            bot.Send(msg)
         } else {
             msg := tgbotapi.NewMessage(message.Chat.ID, "Invalid command. Please select an option from the keyboard.")
             bot.Send(msg)
