@@ -340,12 +340,36 @@ func getAllFavoriteFoods(userID int64, db *sql.DB) ([]FavoriteFood, error) {
     return favorites, nil
 }
 
-func updateFavoriteFood(favoriteID int64, calories float64, protein, fat, carbs sql.NullFloat64, db *sql.DB) error {
-    _, err := db.Exec("UPDATE favorite_foods SET calories = ?, protein = ?, fat = ?, carbs = ? WHERE favorite_id = ?", calories, protein, fat, carbs, favoriteID)
+func updateFavoriteFood(favoriteID int64, nutrient string, value float64, db *sql.DB) error {
+    // Retrieve the current favorite food details from the database
+    var favorite FavoriteFood
+    err := db.QueryRow("SELECT name, calories, protein, fat, carbs FROM favorite_foods WHERE favorite_id = ?", favoriteID).Scan(&favorite.Name, &favorite.Calories, &favorite.Protein, &favorite.Fat, &favorite.Carbs)
+    if err != nil {
+        log.Printf("Failed to retrieve favorite food details: %v", err)
+        return err
+    }
+
+    // Update the selected nutrient value
+    switch nutrient {
+    case "calories":
+        favorite.Calories = value
+    case "protein":
+        favorite.Protein = sql.NullFloat64{Float64: value, Valid: true}
+    case "fat":
+        favorite.Fat = sql.NullFloat64{Float64: value, Valid: true}
+    case "carbs":
+        favorite.Carbs = sql.NullFloat64{Float64: value, Valid: true}
+    default:
+        return fmt.Errorf("invalid nutrient: %s", nutrient)
+    }
+
+    // Update the favorite food in the database
+    _, err = db.Exec("UPDATE favorite_foods SET calories = ?, protein = ?, fat = ?, carbs = ? WHERE favorite_id = ?", favorite.Calories, favorite.Protein, favorite.Fat, favorite.Carbs, favoriteID)
     if err != nil {
         log.Printf("Failed to update favorite food: %v", err)
         return err
     }
+
     return nil
 }
 
