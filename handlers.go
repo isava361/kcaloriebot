@@ -60,7 +60,7 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
         ),
         tgbotapi.NewKeyboardButtonRow(
             tgbotapi.NewKeyboardButton("Statistics"),
-            tgbotapi.NewKeyboardButton("Search Favourites"),
+            tgbotapi.NewKeyboardButton("Search Favorites"),
         ),
     )
 
@@ -531,6 +531,7 @@ func sendDefaultKeyboard(bot *tgbotapi.BotAPI, chatID int64) {
         ),
         tgbotapi.NewKeyboardButtonRow(
             tgbotapi.NewKeyboardButton("Statistics"),
+            tgbotapi.NewKeyboardButton("Search Favorites"),
         ),
     )
     msg := tgbotapi.NewMessage(chatID, "Select an option:")
