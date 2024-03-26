@@ -27,7 +27,10 @@ func main() {
 	}
 	defer db.Close()
 
-	// ADD DATABASE CODE
+	err = createTables(db)
+	if err != nil {
+		log.Fatalf("Failed to create tables: %v", err)
+	}
 
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
@@ -53,4 +56,29 @@ func main() {
 			log.Printf("[%s] %s", update.Message.From.UserName, update.Message.Text)
 		}
 	}
+}
+
+func createTables(db *sql.DB) error {
+	_, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS users (
+			user_id INTEGER PRIMARY KEY,
+			state INTEGER NOT NULL
+		);
+
+		CREATE TABLE IF NOT EXISTS food_entries (
+			entry_id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id INTEGER NOT NULL,
+			entry_date DATE NOT NULL,
+			calories REAL,
+			grams REAL,
+			protein REAL,
+			fat REAL,
+			carbs REAL,
+			FOREIGN KEY (user_id) REFERENCES users (user_id)
+		);
+	`)
+	if err != nil {
+		return err
+	}
+	return nil
 }
