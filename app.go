@@ -12,21 +12,6 @@ import (
 
 var userFavoriteNutrients = make(map[int64]string)
 
-const (
-    stateDefault = iota
-    stateWaitingForFoodName
-    stateWaitingForCalories
-    stateWaitingForGrams
-    stateWaitingForProtein
-    stateWaitingForFat
-    stateWaitingForCarbs
-    stateWaitingForTimezone
-    stateWaitingForFavoriteOption
-    stateWaitingForFavoriteSearch
-    stateWaitingForFavoriteGrams 
-    stateWaitingForFavoriteAmendment 
-)
-
 func main() {
 
 	token, err := readBotToken("./config/token.txt")
