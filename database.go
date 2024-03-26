@@ -8,14 +8,13 @@ import (
 
 type FoodEntry struct {
     EntryID  int64
-    Name     string
+    Name     sql.NullString
     Calories float64
     Grams    float64
     Protein  sql.NullFloat64
     Fat      sql.NullFloat64
     Carbs    sql.NullFloat64
 }
-
 
 func getUserState(userID int64, db *sql.DB) int {
     var state int
@@ -140,7 +139,7 @@ func getTodayFoodEntries(userID int64, db *sql.DB) ([]FoodEntry, error) {
 
     for rows.Next() {
         var entry FoodEntry
-        err := rows.Scan(&entry.EntryID, &entry.Calories, &entry.Grams, &entry.Protein, &entry.Fat, &entry.Carbs)
+        err := rows.Scan(&entry.EntryID, &entry.Name, &entry.Calories, &entry.Grams, &entry.Protein, &entry.Fat, &entry.Carbs)
         if err != nil {
             log.Printf("Failed to scan food entry: %v", err)
             return nil, err
@@ -172,7 +171,7 @@ func getTodayFoodEntriesWithPagination(userID int64, offset int, db *sql.DB) ([]
 
     for rows.Next() {
         var entry FoodEntry
-        err := rows.Scan(&entry.EntryID, &entry.Calories, &entry.Grams, &entry.Protein, &entry.Fat, &entry.Carbs)
+        err := rows.Scan(&entry.EntryID, &entry.Name, &entry.Calories, &entry.Grams, &entry.Protein, &entry.Fat, &entry.Carbs)
         if err != nil {
             log.Printf("Failed to scan food entry: %v", err)
             return nil, err
