@@ -23,6 +23,7 @@ const (
     stateWaitingForFavoriteOption
     stateWaitingForFavoriteSearch
     stateWaitingForFavoriteGrams 
+    stateWaitingForFavoriteAmendment 
 )
 
 type UserInput struct {
@@ -34,6 +35,8 @@ type UserInput struct {
     Carbs    sql.NullFloat64
 }
 var userInputs = make(map[int64]*UserInput)
+
+var userFavoriteNutrients = make(map[int64]string)
 
 var userFavorites = make(map[int64]FavoriteFood)
 
