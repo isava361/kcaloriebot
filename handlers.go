@@ -33,6 +33,7 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
     skipkeyboard := tgbotapi.NewReplyKeyboard(
         tgbotapi.NewKeyboardButtonRow(
             tgbotapi.NewKeyboardButton("Skip"),
+            tgbotapi.NewKeyboardButton("Cancel"),
         ),
     )
 
@@ -46,22 +47,42 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
     switch getUserState(userID, db) {
     case stateWaitingForCalories:
         // Process calories input
+        if message.Text == "Cancel" {
+            setUserState(userID, stateDefault, db)
+            delete(userInputs, userID)
+            msg := tgbotapi.NewMessage(message.Chat.ID, "Food entry canceled.")
+            bot.Send(msg)
+            sendDefaultKeyboard(bot, message.Chat.ID)
+            return nil
+        }
+
         calories, err := strconv.ParseFloat(message.Text, 64)
         if err != nil {
-            msg := tgbotapi.NewMessage(message.Chat.ID, "Invalid calories value. Please enter a valid number.")
+            msg := tgbotapi.NewMessage(message.Chat.ID, "Invalid calories value. Please enter a valid number or send Cancel to cancel the food entry.")
+            msg.ReplyMarkup = skipkeyboard
             bot.Send(msg)
             return nil
         }
         input.Calories = calories
         setUserState(userID, stateWaitingForGrams, db)
         msg := tgbotapi.NewMessage(message.Chat.ID, "Enter the grams of food:")
+        msg.ReplyMarkup = skipkeyboard
         bot.Send(msg)
 
     case stateWaitingForGrams:
         // Process grams input
+        if message.Text == "Cancel" {
+            setUserState(userID, stateDefault, db)
+            delete(userInputs, userID)
+            msg := tgbotapi.NewMessage(message.Chat.ID, "Food entry canceled.")
+            bot.Send(msg)
+            sendDefaultKeyboard(bot, message.Chat.ID)
+            return nil
+        }
+
         grams, err := strconv.ParseFloat(message.Text, 64)
         if err != nil {
-            msg := tgbotapi.NewMessage(message.Chat.ID, "Invalid grams value. Please enter a valid number.")
+            msg := tgbotapi.NewMessage(message.Chat.ID, "Invalid grams value. Please enter a valid number or send Cancel to cancel the food entry.")
             msg.ReplyMarkup = skipkeyboard
             bot.Send(msg)
             return nil
@@ -74,6 +95,15 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
 
     case stateWaitingForProtein:
         // Process protein input or skip
+        if message.Text == "Cancel" {
+            setUserState(userID, stateDefault, db)
+            delete(userInputs, userID)
+            msg := tgbotapi.NewMessage(message.Chat.ID, "Food entry canceled.")
+            bot.Send(msg)
+            sendDefaultKeyboard(bot, message.Chat.ID)
+            return nil
+        }
+
         if message.Text == "Skip" {
             input.Protein = sql.NullFloat64{Valid: false}
             setUserState(userID, stateWaitingForFat, db)
@@ -97,6 +127,15 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
 
     case stateWaitingForFat:
         // Process fat input or skip
+        if message.Text == "Cancel" {
+            setUserState(userID, stateDefault, db)
+            delete(userInputs, userID)
+            msg := tgbotapi.NewMessage(message.Chat.ID, "Food entry canceled.")
+            bot.Send(msg)
+            sendDefaultKeyboard(bot, message.Chat.ID)
+            return nil
+        }
+
         if message.Text == "Skip" {
             input.Fat = sql.NullFloat64{Valid: false}
             setUserState(userID, stateWaitingForCarbs, db)
@@ -119,6 +158,15 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
 
     case stateWaitingForCarbs:
         // Process carbs input or skip
+        if message.Text == "Cancel" {
+            setUserState(userID, stateDefault, db)
+            delete(userInputs, userID)
+            msg := tgbotapi.NewMessage(message.Chat.ID, "Food entry canceled.")
+            bot.Send(msg)
+            sendDefaultKeyboard(bot, message.Chat.ID)
+            return nil
+        }
+
         if message.Text == "Skip" {
             calories := input.Calories
             grams := input.Grams
@@ -131,6 +179,7 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
                 bot.Send(msg)
                 return nil
             }
+            delete(userInputs, userID)
             setUserState(userID, stateDefault, db)
             msg := tgbotapi.NewMessage(message.Chat.ID, "Food entry added successfully!")
             bot.Send(msg)
@@ -154,6 +203,7 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
                 bot.Send(msg)
                 return nil
             }
+            delete(userInputs, userID)
             setUserState(userID, stateDefault, db)
             msg := tgbotapi.NewMessage(message.Chat.ID, "Food entry added successfully!")
             bot.Send(msg)
@@ -164,12 +214,14 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
         // Handle callback queries
         if message.Text == "/start" {
             setUserState(userID, stateDefault, db)
+            delete(userInputs, userID)
             msg := tgbotapi.NewMessage(message.Chat.ID, "Welcome to the Calorie Calculator Bot!")
             bot.Send(msg)
             sendDefaultKeyboard(bot, message.Chat.ID)
         } else if message.Text == "Add Food" {
             setUserState(userID, stateWaitingForCalories, db)
             msg := tgbotapi.NewMessage(message.Chat.ID, "Enter the calories per 100g:")
+            msg.ReplyMarkup = skipkeyboard
             bot.Send(msg)
         } else if message.Text == "Today Stats" {
             calories, protein, fat, carbs, err := getTodayStats(userID, db)
