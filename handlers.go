@@ -598,13 +598,12 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
             msg := tgbotapi.NewMessage(message.Chat.ID, "Enter the name or part of the name of the product to search:")
             bot.Send(msg)
         } else if message.Text == "Manage Favorites" {
-            // Retrieve the list of favorite foods for the user
-            favorites, err := getAllFavoriteFoods(message.From.ID, db)
+            offset := 0
+            err := fetchFavoriteFoods(bot, message.Chat.ID, userID, db, offset, 0)
             if err != nil {
-                log.Printf("Failed to get favorite foods: %s", err)
-                msg := tgbotapi.NewMessage(message.Chat.ID, "Failed to retrieve favorite foods. Please try again.")
-                bot.Send(msg)
-                return nil
+                log.Printf("Failed to fetch favorite foods: %v", err)
+            }
+            return nil
             }
         
             // Create the message text with the list of favorites

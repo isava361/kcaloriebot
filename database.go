@@ -319,8 +319,8 @@ func getFavoriteFood(favoriteID int64, db *sql.DB) (FavoriteFood, error) {
     return favorite, nil
 }
 
-func getAllFavoriteFoods(userID int64, db *sql.DB) ([]FavoriteFood, error) {
-    rows, err := db.Query("SELECT favorite_id, name, calories, protein, fat, carbs FROM favorite_foods WHERE user_id = ?", userID)
+func getAllFavoriteFoods(userID int64, offset int, db *sql.DB) ([]FavoriteFood, error) {
+    rows, err := db.Query("SELECT favorite_id, name, calories, protein, fat, carbs FROM favorite_foods WHERE user_id = ? LIMIT 5 OFFSET ?", userID, offset)
     if err != nil {
         log.Printf("Failed to get all favorite foods: %v", err)
         return nil, err
@@ -381,4 +381,62 @@ func deleteFavoriteFood(favoriteID int64, db *sql.DB) error {
         return err
     }
     return nil
+}
+
+func fetchFavoriteFoods(bot *tgbotapi.BotAPI, chatID int64, userID int64, db *sql.DB, offset int, messageID int) error {
+    favorites, err := getAllFavoriteFoods(userID, offset, db)
+    if err != nil {
+        return err
+    }
+
+    if len(favorites) == 0 {
+        if offset > 0 {
+            return fetchFavoriteFoods(bot, chatID, userID, db, offset-5, messageID)
+        }
+        msg := tgbotapi.NewMessage(chatID, "No favorite foods found.")
+        bot.Send(msg)
+        return nil
+    }
+
+    var rows [][]tgbotapi.InlineKeyboardButton
+    for _, favorite := range favorites {
+        buttonText := fmt.Sprintf("%s - Calories: %.2f, Protein: %.2f, Fat: %.2f, Carbs: %.2f", favorite.Name, favorite.Calories, favorite.Protein.Float64, favorite.Fat.Float64, favorite.Carbs.Float64)
+        button := tgbotapi.NewInlineKeyboardButtonData(buttonText, fmt.Sprintf("favorite_%d", favorite.FavoriteID))
+        row := []tgbotapi.InlineKeyboardButton{button}
+        rows = append(rows, row)
+    }
+
+    var keyboardRows [][]tgbotapi.InlineKeyboardButton
+    if offset > 0 {
+        keyboardRows = append(keyboardRows, tgbotapi.NewInlineKeyboardRow(
+            tgbotapi.NewInlineKeyboardButtonData("⬅️", fmt.Sprintf("previous_fav:%d", offset-5))))
+    }
+
+    moreRows, err := db.Query("SELECT 1 FROM favorite_foods WHERE user_id = ? LIMIT 1 OFFSET ?", userID, offset+5)
+    if err != nil {
+        return err
+    }
+    hasMore := moreRows.Next()
+    moreRows.Close()
+
+    if hasMore {
+        keyboardRows = append(keyboardRows, tgbotapi.NewInlineKeyboardRow(
+            tgbotapi.NewInlineKeyboardButtonData("➡️", fmt.Sprintf("next_fav:%d", offset+5))))
+    }
+
+    rows = append(rows, keyboardRows...)
+
+    keyboard := tgbotapi.NewInlineKeyboardMarkup(rows...)
+
+    if messageID == 0 {
+        msg := tgbotapi.NewMessage(chatID, "Your favorite foods:")
+        msg.ReplyMarkup = keyboard
+        _, err := bot.Send(msg)
+        return err
+    } else {
+        editMsg := tgbotapi.NewEditMessageText(chatID, messageID, "Your favorite foods:")
+        editMsg.ReplyMarkup = &keyboard
+        _, err := bot.Send(editMsg)
+        return err
+    }
 }

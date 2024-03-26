@@ -336,6 +336,12 @@ func main() {
 				if _, err := bot.Request(callbackConfig); err != nil {
 					log.Printf("Error sending callback response: %s", err)
 				}
+			} else if strings.HasPrefix(update.CallbackQuery.Data, "previous_fav:") || strings.HasPrefix(update.CallbackQuery.Data, "next_fav:") {
+				offset, _ := strconv.Atoi(strings.Split(update.CallbackQuery.Data, ":")[1])
+				err := fetchFavoriteFoods(bot, update.CallbackQuery.Message.Chat.ID, update.CallbackQuery.From.ID, db, offset, update.CallbackQuery.Message.MessageID)
+				if err != nil {
+					log.Printf("Failed to fetch favorite foods: %v", err)
+				}
 			} else {
                 log.Printf("Unhandled callback data: %s", update.CallbackQuery.Data)
                 callbackConfig := tgbotapi.NewCallback(update.CallbackQuery.ID, "Unhandled callback data")
