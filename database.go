@@ -64,32 +64,45 @@ func addFood(userID int64, name sql.NullString, calories, grams float64, protein
 }
 
 func getTodayStats(userID int64, db *sql.DB) (float64, sql.NullFloat64, sql.NullFloat64, sql.NullFloat64, error) {
-	var totalCalories sql.NullFloat64
-	var totalProtein, totalFat, totalCarbs sql.NullFloat64
+    var totalCalories sql.NullFloat64
+    var totalProtein, totalFat, totalCarbs sql.NullFloat64
+    var timezone string
 
-	err := db.QueryRow(`
-		SELECT
-			SUM(calories),
-			SUM(protein),
-			SUM(fat),
-			SUM(carbs)
-		FROM food_entries
-		WHERE user_id = ?
-			AND DATE(entry_date) = DATE('now')
-	`, userID).Scan(&totalCalories, &totalProtein, &totalFat, &totalCarbs)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return 0, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, nil
-		}
-		log.Printf("Failed to get today's stats: %v", err)
-		return 0, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, err
-	}
+    err := db.QueryRow("SELECT timezone FROM users WHERE user_id = ?", userID).Scan(&timezone)
+    if err != nil {
+        log.Printf("Failed to get user timezone: %v", err)
+        return 0, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, err
+    }
 
-	if !totalCalories.Valid {
-		totalCalories = sql.NullFloat64{Float64: 0, Valid: true}
-	}
+    offset, err := getTimezoneOffsetForLocation(timezone)
+    if err != nil {
+        log.Printf("Failed to get timezone offset: %v", err)
+        return 0, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, err
+    }
 
-	return totalCalories.Float64, totalProtein, totalFat, totalCarbs, nil
+    err = db.QueryRow(`
+        SELECT
+            SUM(calories),
+            SUM(protein),
+            SUM(fat),
+            SUM(carbs)
+        FROM food_entries
+        WHERE user_id = ?
+            AND DATE(entry_date, ?) = DATE('now', ?)
+    `, userID, offset, offset).Scan(&totalCalories, &totalProtein, &totalFat, &totalCarbs)
+    if err != nil {
+        if err == sql.ErrNoRows {
+            return 0, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, nil
+        }
+        log.Printf("Failed to get today's stats: %v", err)
+        return 0, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, err
+    }
+
+    if !totalCalories.Valid {
+        totalCalories = sql.NullFloat64{Float64: 0, Valid: true}
+    }
+
+    return totalCalories.Float64, totalProtein, totalFat, totalCarbs, nil
 }
 
 func getYesterdayStats(userID int64, db *sql.DB) (float64, sql.NullFloat64, sql.NullFloat64, sql.NullFloat64, error) {
