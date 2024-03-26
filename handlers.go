@@ -227,7 +227,7 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
         } else if message.Text == "Add Food" {
             setUserState(userID, stateWaitingForCalories, db)
             msg := tgbotapi.NewMessage(message.Chat.ID, "Enter the calories per 100g:")
-            msg.ReplyMarkup = skipkeyboard
+            msg.ReplyMarkup = cancelkeyboard
             bot.Send(msg)
         } else if message.Text == "Today Stats" {
             calories, protein, fat, carbs, err := getTodayStats(userID, db)
