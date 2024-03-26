@@ -259,7 +259,17 @@ func main() {
 					log.Printf("Error sending callback response: %s", err)
 				}			
 			} else if strings.HasPrefix(update.CallbackQuery.Data, "amend_calories_") || strings.HasPrefix(update.CallbackQuery.Data, "amend_protein_") || strings.HasPrefix(update.CallbackQuery.Data, "amend_fat_") || strings.HasPrefix(update.CallbackQuery.Data, "amend_carbs_") {
-				favoriteID, err := strconv.ParseInt(strings.Split(update.CallbackQuery.Data, "_")[2], 10, 64)
+				parts := strings.Split(update.CallbackQuery.Data, "_")
+				if len(parts) != 3 {
+					log.Printf("Invalid callback data format: %s", update.CallbackQuery.Data)
+					callbackConfig := tgbotapi.NewCallback(update.CallbackQuery.ID, "Invalid callback data format")
+					if _, err := bot.Request(callbackConfig); err != nil {
+						log.Printf("Error sending callback response: %s", err)
+					}
+					continue
+				}
+				
+				favoriteID, err := strconv.ParseInt(parts[2], 10, 64)
 				if err != nil {
 					log.Printf("Invalid favorite ID: %s", err)
 					callbackConfig := tgbotapi.NewCallback(update.CallbackQuery.ID, "Invalid favorite ID")
@@ -267,7 +277,7 @@ func main() {
 						log.Printf("Error sending callback response: %s", err)
 					}
 					continue
-				}
+				}			
 			
 				// Ask the user to enter the new value for the selected nutrient
 				var nutrient string
