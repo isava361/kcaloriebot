@@ -120,9 +120,10 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
                 bot.Send(msg)
                 return nil
             }
-            setUserCarbs(userID, carbs, db)
+            carbsNull := sql.NullFloat64{Float64: carbs, Valid: true}
+			setUserCarbs(userID, carbsNull, db)
             calories, grams, protein, fat, carbs := getUserFoodEntry(userID, db)
-            err = addFood(userID, calories, grams, protein, fat, carbs, db)
+            err = addFood(userID, calories, grams, protein, fat, carbsNull, db)
             if err != nil {
                 msg := tgbotapi.NewMessage(message.Chat.ID, "Failed to add food entry. Please try again.")
                 bot.Send(msg)
