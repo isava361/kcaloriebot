@@ -142,7 +142,7 @@ func main() {
 				}
 			
 				// Retrieve the favorite product details from the database
-				_, err := getFavoriteFood(favoriteID, db)
+				_, err = getFavoriteFood(favoriteID, db)
 				if err != nil {
 					log.Printf("Failed to retrieve favorite food: %s", err)
 					callbackConfig := tgbotapi.NewCallback(update.CallbackQuery.ID, "Failed to retrieve favorite food")
