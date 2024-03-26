@@ -188,16 +188,29 @@ func main() {
 					continue
 				}
 			
+				// Retrieve the favorite product details from the database
+				favorite, err := getFavoriteFood(favoriteID, db)
+				if err != nil {
+					log.Printf("Failed to retrieve favorite food: %s", err)
+					callbackConfig := tgbotapi.NewCallback(update.CallbackQuery.ID, "Failed to retrieve favorite food")
+					if _, err := bot.Request(callbackConfig); err != nil {
+						log.Printf("Error sending callback response: %s", err)
+					}
+					continue
+				}
+			
 				// Ask for confirmation before deleting the favorite
-				msg := tgbotapi.NewMessage(update.CallbackQuery.Message.Chat.ID, "Are you sure you want to delete this product?")
-				confirmationOptions := tgbotapi.NewInlineKeyboardMarkup(
+				confirmationText := fmt.Sprintf("Are you sure you want to delete the favorite: %s?", favorite.Name)
+				confirmationKeyboard := tgbotapi.NewInlineKeyboardMarkup(
 					tgbotapi.NewInlineKeyboardRow(
 						tgbotapi.NewInlineKeyboardButtonData("Yes", "confirm_delete_"+strconv.FormatInt(favoriteID, 10)),
-						tgbotapi.NewInlineKeyboardButtonData("No", "cancel_delete"),
+						tgbotapi.NewInlineKeyboardButtonData("No", "cancel_delete_"+strconv.FormatInt(favoriteID, 10)),
 					),
 				)
-				msg.ReplyMarkup = confirmationOptions
-				bot.Send(msg)
+			
+				editMsg := tgbotapi.NewEditMessageText(update.CallbackQuery.Message.Chat.ID, update.CallbackQuery.Message.MessageID, confirmationText)
+				editMsg.ReplyMarkup = &confirmationKeyboard
+				bot.Send(editMsg)
 			
 				// Answer the callback query
 				callbackConfig := tgbotapi.NewCallback(update.CallbackQuery.ID, "")
@@ -226,15 +239,25 @@ func main() {
 					continue
 				}
 			
-				// Send a confirmation message
-				msg := tgbotapi.NewMessage(update.CallbackQuery.Message.Chat.ID, "Favorite product deleted successfully!")
-				bot.Send(msg)
+				// Update the message to confirm the deletion
+				editMsg := tgbotapi.NewEditMessageText(update.CallbackQuery.Message.Chat.ID, update.CallbackQuery.Message.MessageID, "Favorite product deleted successfully!")
+				bot.Send(editMsg)
 			
 				// Answer the callback query
 				callbackConfig := tgbotapi.NewCallback(update.CallbackQuery.ID, "")
 				if _, err := bot.Request(callbackConfig); err != nil {
 					log.Printf("Error sending callback response: %s", err)
 				}
+			} else if strings.HasPrefix(update.CallbackQuery.Data, "cancel_delete_") {
+				// Update the message to cancel the deletion
+				editMsg := tgbotapi.NewEditMessageText(update.CallbackQuery.Message.Chat.ID, update.CallbackQuery.Message.MessageID, "Deletion cancelled.")
+				bot.Send(editMsg)
+			
+				// Answer the callback query
+				callbackConfig := tgbotapi.NewCallback(update.CallbackQuery.ID, "")
+				if _, err := bot.Request(callbackConfig); err != nil {
+					log.Printf("Error sending callback response: %s", err)
+				}			
 			} else if strings.HasPrefix(update.CallbackQuery.Data, "amend_calories_") || strings.HasPrefix(update.CallbackQuery.Data, "amend_protein_") || strings.HasPrefix(update.CallbackQuery.Data, "amend_fat_") || strings.HasPrefix(update.CallbackQuery.Data, "amend_carbs_") {
 				favoriteID, err := strconv.ParseInt(strings.Split(update.CallbackQuery.Data, "_")[2], 10, 64)
 				if err != nil {
