@@ -70,7 +70,7 @@ func getTodayStats(userID int64, db *sql.DB) (float64, sql.NullFloat64, sql.Null
         timezone = "UTC"
     }
 
-    loc, err := getCurrentTimeForLocation(timezone)
+    loc, err := getTimezoneOffsetForLocation(timezone)
     if err != nil {
         log.Printf("Failed to get location: %v", err)
         timezone = "UTC"
@@ -105,7 +105,7 @@ func getYesterdayStats(userID int64, db *sql.DB) (float64, sql.NullFloat64, sql.
         timezone = "UTC"
     }
 
-    loc, err := getCurrentTimeForLocation(timezone)
+    loc, err := getTimezoneOffsetForLocation(timezone)
     if err != nil {
         log.Printf("Failed to get location: %v", err)
         timezone = "UTC"
@@ -140,7 +140,7 @@ func getWeekStats(userID int64, db *sql.DB) (float64, sql.NullFloat64, sql.NullF
         timezone = "UTC"
     }
 
-    loc, err := getCurrentTimeForLocation(timezone)
+    loc, err := getTimezoneOffsetForLocation(timezone)
     if err != nil {
         log.Printf("Failed to get location: %v", err)
         timezone = "UTC"
@@ -175,7 +175,7 @@ func getMonthStats(userID int64, db *sql.DB) (float64, sql.NullFloat64, sql.Null
         timezone = "UTC"
     }
 
-    loc, err := getCurrentTimeForLocation(timezone)
+    loc, err := getTimezoneOffsetForLocation(timezone)
     if err != nil {
         log.Printf("Failed to get location: %v", err)
         timezone = "UTC"
@@ -208,6 +208,14 @@ func getTodayFoodEntries(userID int64, db *sql.DB) ([]FoodEntry, error) {
     if err != nil {
         log.Printf("Failed to get user timezone: %v", err)
         timezone = "UTC"
+    }
+
+    loc, err := getTimezoneOffsetForLocation(timezone)
+    if err != nil {
+        log.Printf("Failed to get location: %v", err)
+        timezone = "UTC"
+    } else {
+        timezone = loc.String()
     }
 
     var entries []FoodEntry
@@ -250,6 +258,13 @@ func getTodayFoodEntriesWithPagination(userID int64, offset int, db *sql.DB) ([]
         timezone = "UTC"
     }
 
+    loc, err := getTimezoneOffsetForLocation(timezone)
+    if err != nil {
+        log.Printf("Failed to get location: %v", err)
+        timezone = "UTC"
+    } else {
+        timezone = loc.String()
+    }
     var entries []FoodEntry
 
     rows, err := db.Query("SELECT entry_id, name, calories, grams, protein, fat, carbs FROM food_entries WHERE user_id = ? AND DATE(entry_date, ?) = DATE('now', ?) LIMIT 5 OFFSET ?", userID, timezone, timezone, offset)

@@ -525,3 +525,42 @@ func getCurrentTimeForLocation(location string) (time.Time, error) {
     log.Printf("Error loading location: %v", err)
     return time.Time{}, err
 }
+
+func getTimezoneOffsetForLocation(location string) (string, error) {
+    // List of common prefixes to try
+    prefixes := []string{"Europe/", "America/", "Asia/", "Africa/", "Australia/"}
+
+    // Normalize location: replace spaces with underscores and convert to Title case
+    locationParts := strings.Split(strings.ToLower(location), " ")
+    for i, part := range locationParts {
+        locationParts[i] = strings.Title(part)
+    }
+    normalizedLocation := strings.Join(locationParts, "_")
+
+    var loc *time.Location
+    var err error
+
+    // First, try the raw location string in case it's already a full IANA identifier
+    loc, err = time.LoadLocation(normalizedLocation)
+    if err == nil {
+        return formatTimezoneOffset(loc), nil
+    }
+
+    // If not successful, try with different regional prefixes
+    for _, prefix := range prefixes {
+        loc, err = time.LoadLocation(prefix + normalizedLocation)
+        if err == nil {
+            return formatTimezoneOffset(loc), nil
+        }
+    }
+
+    // If none of the combinations worked, return the last error
+    log.Printf("Error loading location: %v", err)
+    return "", err
+}
+
+func formatTimezoneOffset(loc *time.Location) string {
+    now := time.Now().In(loc)
+    offset := now.Format("-0700")
+    return "UTC" + offset[:3] + ":" + offset[3:]
+}
