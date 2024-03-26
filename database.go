@@ -63,24 +63,26 @@ func addFood(userID int64, name sql.NullString, calories, grams float64, protein
 }
 
 func getTodayStats(userID int64, db *sql.DB) (float64, sql.NullFloat64, sql.NullFloat64, sql.NullFloat64, error) {
-	var totalCalories float64
-	var totalProtein, totalFat, totalCarbs sql.NullFloat64
     var timezone string
     err := db.QueryRow("SELECT timezone FROM users WHERE user_id = ?", userID).Scan(&timezone)
     if err != nil {
         log.Printf("Failed to get user timezone: %v", err)
         timezone = "UTC"
     }
-	err = db.QueryRow("SELECT SUM(calories), SUM(protein), SUM(fat), SUM(carbs) FROM food_entries WHERE user_id = ? AND DATE(entry_date, ?) = DATE('now', ?)", userID, timezone, timezone).Scan(&totalCalories, &totalProtein, &totalFat, &totalCarbs)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return 0, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, nil
-		}
-		log.Printf("Failed to get today's stats: %v", err)
-		return 0, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, err
-	}
- 
-	return totalCalories, totalProtein, totalFat, totalCarbs, nil
+
+    var totalCalories float64
+    var totalProtein, totalFat, totalCarbs sql.NullFloat64
+
+    err = db.QueryRow("SELECT SUM(calories), SUM(protein), SUM(fat), SUM(carbs) FROM food_entries WHERE user_id = ? AND DATE(entry_date, ?) = DATE('now', ?)", userID, timezone, timezone).Scan(&totalCalories, &totalProtein, &totalFat, &totalCarbs)
+    if err != nil {
+        if err == sql.ErrNoRows {
+            return 0, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, nil
+        }
+        log.Printf("Failed to get today's stats: %v", err)
+        return 0, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, err
+    }
+
+    return totalCalories, totalProtein, totalFat, totalCarbs, nil
 }
 
 func getYesterdayStats(userID int64, db *sql.DB) (float64, sql.NullFloat64, sql.NullFloat64, sql.NullFloat64, error) {
