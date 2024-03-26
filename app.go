@@ -178,7 +178,7 @@ func main() {
 					log.Printf("Error sending callback response: %s", err)
 				}
 			} else if strings.HasPrefix(update.CallbackQuery.Data, "favedelete_") {
-				favoriteID, err := strconv.ParseInt(strings.TrimPrefix(update.CallbackQuery.Data, "delete_"), 10, 64)
+				favoriteID, err := strconv.ParseInt(strings.TrimPrefix(update.CallbackQuery.Data, "favedelete_"), 10, 64)
 				if err != nil {
 					log.Printf("Invalid favorite ID: %s", err)
 					callbackConfig := tgbotapi.NewCallback(update.CallbackQuery.ID, "Invalid favorite ID")
