@@ -96,7 +96,7 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
         input.Grams = grams
         setUserState(userID, stateWaitingForProtein, db)
         msg := tgbotapi.NewMessage(message.Chat.ID, "Enter the protein per 100g (or send Skip to omit):")
-        msg.ReplyMarkup = cancelkeyboard
+        msg.ReplyMarkup = skipkeyboard
         bot.Send(msg)
 
     case stateWaitingForProtein:
