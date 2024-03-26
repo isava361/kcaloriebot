@@ -363,9 +363,7 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
 
     case "Search Favorites":
         setUserState(userID, stateWaitingForFavoriteSearch, db)
-        msg := tgbotapi.NewMessage(message.Chat.ID, "Enter the name or part
-    
-     of the name of the product to search:")
+        msg := tgbotapi.NewMessage(message.Chat.ID, "Enter the name or part of the name of the product to search:")
         bot.Send(msg)
     
     case stateWaitingForFavoriteSearch:
