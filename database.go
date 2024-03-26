@@ -52,25 +52,6 @@ func setUserState(userID int64, state int, db *sql.DB) error {
     return nil
 }
 
-package main
-
-import (
-	"log"
-	"database/sql"
-	_ "github.com/mattn/go-sqlite3"
-)
-
-type FoodEntry struct {
-    EntryID  int64
-    Calories float64
-    Grams    float64
-    Protein  sql.NullFloat64
-    Fat      sql.NullFloat64
-    Carbs    sql.NullFloat64
-}
-
-// ... (getUserState, setUserState, and other functions remain the same)
-
 func addFood(userID int64, calories, grams float64, protein, fat, carbs sql.NullFloat64, db *sql.DB) error {
     _, err := db.Exec("INSERT INTO food_entries (user_id, entry_date, calories, grams, protein, fat, carbs) VALUES (?, DATETIME('now'), ?, ?, ?, ?, ?)", userID, calories, grams, protein, fat, carbs)
     if err != nil {
