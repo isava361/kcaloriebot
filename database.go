@@ -70,7 +70,7 @@ func getTodayStats(userID int64, db *sql.DB) (float64, sql.NullFloat64, sql.Null
         timezone = "UTC"
     }
 
-    timezone, err := getTimezoneOffsetForLocation(timezone)
+    timezone, err = getTimezoneOffsetForLocation(timezone)
     if err != nil {
         log.Printf("Failed to get location: %v", err)
         timezone = "UTC"
@@ -103,7 +103,7 @@ func getYesterdayStats(userID int64, db *sql.DB) (float64, sql.NullFloat64, sql.
         timezone = "UTC"
     }
 
-    timezone, err := getTimezoneOffsetForLocation(timezone)
+    timezone, err = getTimezoneOffsetForLocation(timezone)
     if err != nil {
         log.Printf("Failed to get location: %v", err)
         timezone = "UTC"
@@ -136,7 +136,7 @@ func getWeekStats(userID int64, db *sql.DB) (float64, sql.NullFloat64, sql.NullF
         timezone = "UTC"
     }
 
-    timezone, err := getTimezoneOffsetForLocation(timezone)
+    timezone, err = getTimezoneOffsetForLocation(timezone)
     if err != nil {
         log.Printf("Failed to get location: %v", err)
         timezone = "UTC"
@@ -169,7 +169,7 @@ func getMonthStats(userID int64, db *sql.DB) (float64, sql.NullFloat64, sql.Null
         timezone = "UTC"
     }
 
-    timezone, err := getTimezoneOffsetForLocation(timezone)
+    timezone, err = getTimezoneOffsetForLocation(timezone)
     if err != nil {
         log.Printf("Failed to get location: %v", err)
         timezone = "UTC"
@@ -202,7 +202,7 @@ func getTodayFoodEntries(userID int64, db *sql.DB) ([]FoodEntry, error) {
         timezone = "UTC"
     }
 
-    timezone, err := getTimezoneOffsetForLocation(timezone)
+    timezone, err = getTimezoneOffsetForLocation(timezone)
     if err != nil {
         log.Printf("Failed to get location: %v", err)
         timezone = "UTC"
@@ -248,7 +248,7 @@ func getTodayFoodEntriesWithPagination(userID int64, offset int, db *sql.DB) ([]
         timezone = "UTC"
     }
 
-    timezone, err := getTimezoneOffsetForLocation(timezone)
+    timezone, err = getTimezoneOffsetForLocation(timezone)
     if err != nil {
         log.Printf("Failed to get location: %v", err)
         timezone = "UTC"
