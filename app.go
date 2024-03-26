@@ -110,7 +110,8 @@ func createTables(db *sql.DB) error {
 	_, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS users (
 			user_id INTEGER PRIMARY KEY,
-			state INTEGER NOT NULL
+			state INTEGER NOT NULL,
+			timezone TEXT
 		);
 
 		CREATE TABLE IF NOT EXISTS food_entries (
