@@ -105,7 +105,15 @@ func getYesterdayStats(userID int64, db *sql.DB) (float64, sql.NullFloat64, sql.
         timezone = "UTC"
     }
 
-    var totalCalories float64
+    loc, err := getCurrentTimeForLocation(timezone)
+    if err != nil {
+        log.Printf("Failed to get location: %v", err)
+        timezone = "UTC"
+    } else {
+        timezone = loc.String()
+    }
+
+    var totalCalories sql.NullFloat64
     var totalProtein, totalFat, totalCarbs sql.NullFloat64
 
     err = db.QueryRow("SELECT SUM(calories), SUM(protein), SUM(fat), SUM(carbs) FROM food_entries WHERE user_id = ? AND DATE(entry_date, ?) = DATE('now', ?, '-1 day')", userID, timezone, timezone).Scan(&totalCalories, &totalProtein, &totalFat, &totalCarbs)
@@ -117,7 +125,11 @@ func getYesterdayStats(userID int64, db *sql.DB) (float64, sql.NullFloat64, sql.
         return 0, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, err
     }
 
-    return totalCalories, totalProtein, totalFat, totalCarbs, nil
+    if !totalCalories.Valid {
+        totalCalories = sql.NullFloat64{Float64: 0, Valid: true}
+    }
+
+    return totalCalories.Float64, totalProtein, totalFat, totalCarbs, nil
 }
 
 func getWeekStats(userID int64, db *sql.DB) (float64, sql.NullFloat64, sql.NullFloat64, sql.NullFloat64, error) {
