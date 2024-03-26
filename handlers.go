@@ -211,7 +211,7 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
 			// Create inline keyboard with food entry options
 			var rows [][]tgbotapi.InlineKeyboardButton
 			for _, entry := range entries {
-				buttonText := fmt.Sprintf("%s (%.2f calories)", entry.FoodName, entry.Calories)
+				buttonText := fmt.Sprintf("Calories: %.2f, Grams: %.2f", entry.Calories, entry.Grams)
 				button := tgbotapi.NewInlineKeyboardButtonData(buttonText, fmt.Sprintf("delete_%d", entry.EntryID))
 				row := []tgbotapi.InlineKeyboardButton{button}
 				rows = append(rows, row)
