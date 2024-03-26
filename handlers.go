@@ -53,12 +53,21 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
             tgbotapi.NewKeyboardButton("Food Today"),
         ),
         tgbotapi.NewKeyboardButtonRow(
+            tgbotapi.NewKeyboardButton("Statistics"),
+        ),
+    )
+
+    statskeyboard := tgbotapi.NewReplyKeyboard(
+        tgbotapi.NewKeyboardButtonRow(
             tgbotapi.NewKeyboardButton("Today Stats"),
             tgbotapi.NewKeyboardButton("Yesterday Stats"),
         ),
         tgbotapi.NewKeyboardButtonRow(
             tgbotapi.NewKeyboardButton("Week Stats"),
-			tgbotapi.NewKeyboardButton("Month Stats"),
+            tgbotapi.NewKeyboardButton("Month Stats"),
+        ),
+        tgbotapi.NewKeyboardButtonRow(
+            tgbotapi.NewKeyboardButton("Back"),
         ),
     )
 
@@ -388,6 +397,14 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
             msg := tgbotapi.NewMessage(message.Chat.ID, "Please enter your location (e.g., 'New York'):")
             bot.Send(msg)
             setUserState(userID, stateWaitingForTimezone, db)
+        } else if message.Text == "Statistics" {
+            msg := tgbotapi.NewMessage(message.Chat.ID, "Select a statistics option:")
+            msg.ReplyMarkup = statskeyboard
+            bot.Send(msg)
+        } else if message.Text == "Back" {
+            msg := tgbotapi.NewMessage(message.Chat.ID, "Select an option:")
+            msg.ReplyMarkup = defaultkeyboard
+            bot.Send(msg)
         } else {
             msg := tgbotapi.NewMessage(message.Chat.ID, "Invalid command. Please select an option from the keyboard.")
             bot.Send(msg)
@@ -404,12 +421,7 @@ func sendDefaultKeyboard(bot *tgbotapi.BotAPI, chatID int64) {
             tgbotapi.NewKeyboardButton("Food Today"),
         ),
         tgbotapi.NewKeyboardButtonRow(
-            tgbotapi.NewKeyboardButton("Today Stats"),
-            tgbotapi.NewKeyboardButton("Yesterday Stats"),
-        ),
-        tgbotapi.NewKeyboardButtonRow(
-            tgbotapi.NewKeyboardButton("Week Stats"),
-			tgbotapi.NewKeyboardButton("Month Stats"),
+            tgbotapi.NewKeyboardButton("Statistics"),
         ),
     )
     msg := tgbotapi.NewMessage(chatID, "Select an option:")
