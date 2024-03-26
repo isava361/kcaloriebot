@@ -217,7 +217,7 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
             grams := input.Grams
             protein := input.Protein
             fat := input.Fat
-            if protein.Valid && fat.Valid && carbs > 100 {
+            if protein.Valid && fat.Valid {
                 if (protein.Float64+fat.Float64+carbs) > 100 {
                     msg := tgbotapi.NewMessage(message.Chat.ID, "Your values for macronutrients add up to more than 100g. Please start again")
                     msg.ReplyMarkup = defaultkeyboard
