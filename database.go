@@ -64,32 +64,37 @@ func addFood(userID int64, name sql.NullString, calories, grams float64, protein
 }
 
 func getTodayStats(userID int64, db *sql.DB) (float64, sql.NullFloat64, sql.NullFloat64, sql.NullFloat64, error) {
-	var totalCalories sql.NullFloat64
-	var totalProtein, totalFat, totalCarbs sql.NullFloat64
+    var totalCalories sql.NullFloat64
+    var totalProtein, totalFat, totalCarbs sql.NullFloat64
 
-	err := db.QueryRow(`
-		SELECT
-			SUM(calories),
-			SUM(protein),
-			SUM(fat),
-			SUM(carbs)
-		FROM food_entries
-		WHERE user_id = ?
-			AND DATE(entry_date) = DATE('now')
-	`, userID).Scan(&totalCalories, &totalProtein, &totalFat, &totalCarbs)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return 0, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, nil
-		}
-		log.Printf("Failed to get today's stats: %v", err)
-		return 0, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, err
-	}
+    dateFilterClause, err := getDateFilterClause(userID, db, "DATE(entry_date)", "=")
+    if err != nil {
+        return 0, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, err
+    }
 
-	if !totalCalories.Valid {
-		totalCalories = sql.NullFloat64{Float64: 0, Valid: true}
-	}
+    err = db.QueryRow(`
+        SELECT
+            SUM(calories),
+            SUM(protein),
+            SUM(fat),
+            SUM(carbs)
+        FROM food_entries
+        WHERE user_id = ?
+            AND `+dateFilterClause,
+        userID).Scan(&totalCalories, &totalProtein, &totalFat, &totalCarbs)
+    if err != nil {
+        if err == sql.ErrNoRows {
+            return 0, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, nil
+        }
+        log.Printf("Failed to get today's stats: %v", err)
+        return 0, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, err
+    }
 
-	return totalCalories.Float64, totalProtein, totalFat, totalCarbs, nil
+    if !totalCalories.Valid {
+        totalCalories = sql.NullFloat64{Float64: 0, Valid: true}
+    }
+
+    return totalCalories.Float64, totalProtein, totalFat, totalCarbs, nil
 }
 
 func getYesterdayStats(userID int64, db *sql.DB) (float64, sql.NullFloat64, sql.NullFloat64, sql.NullFloat64, error) {
@@ -214,4 +219,28 @@ func setUserTimezone(userID int64, timezone string, db *sql.DB) error {
         return err
     }
     return nil
+}
+
+func getDateFilterClause(userID int64, db *sql.DB, dateColumn string, dateOperator string) (string, error) {
+    var timezoneOffset sql.NullString
+    err := db.QueryRow("SELECT timezone FROM users WHERE user_id = ?", userID).Scan(&timezoneOffset)
+    if err != nil {
+        if err == sql.ErrNoRows {
+            // Default to UTC if no timezone is set for the user
+            return fmt.Sprintf("%s %s DATETIME('now', 'utc')", dateColumn, dateOperator), nil
+        }
+        return "", err
+    }
+
+    if !timezoneOffset.Valid {
+        // Default to UTC if no timezone is set for the user
+        return fmt.Sprintf("%s %s DATETIME('now', 'utc')", dateColumn, dateOperator), nil
+    }
+
+    offset, err := getTimezoneOffsetForLocation(timezoneOffset.String)
+    if err != nil {
+        return "", err
+    }
+
+    return fmt.Sprintf("%s %s DATETIME('now', '%s')", dateColumn, dateOperator, offset), nil
 }
