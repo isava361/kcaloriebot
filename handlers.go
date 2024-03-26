@@ -60,6 +60,7 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
         ),
         tgbotapi.NewKeyboardButtonRow(
             tgbotapi.NewKeyboardButton("Statistics"),
+            tgbotapi.NewKeyboardButton("Search Favourites"),
         ),
     )
 
