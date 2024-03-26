@@ -88,7 +88,7 @@ func main() {
                     log.Printf("Error sending callback response: %s", err)
                 }
             } else if strings.HasPrefix(update.CallbackQuery.Data, "previous:") || strings.HasPrefix(update.CallbackQuery.Data, "next:") {
-				offset, _ := strconv.Atoi(strings.Split(data, ":")[1])
+				offset, _ := strconv.Atoi(strings.Split(update.CallbackQuery.Data, ":")[1])
 				err := fetchFoodEntries(bot, update.CallbackQuery.Message.Chat.ID, update.CallbackQuery.From.ID, db, offset, update.CallbackQuery.Message.MessageID)
 				if err != nil {
 					log.Printf("Failed to fetch food entries: %v", err)
