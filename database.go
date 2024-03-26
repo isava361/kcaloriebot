@@ -112,11 +112,11 @@ func setUserFat(userID int64, fat float64, db *sql.DB) error {
 	return nil
  }
 
- func setUserCarbs(userID int64, carbs float64, db *sql.DB) error {
-	_, err := db.Exec("UPDATE food_entries SET carbs = ? WHERE user_id = ? AND entry_date = DATE('now')", carbs, userID)
+func setUserCarbs(userID int64, carbs sql.NullFloat64, db *sql.DB) error {
+	_, err := db.Exec("UPDATE food_entries SET carbs = ? WHERE user_id = ? AND entry_date = DATE('now')", carbs.Float64, userID)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			_, err := db.Exec("INSERT INTO food_entries (user_id, entry_date, carbs) VALUES (?, DATE('now'), ?)", userID, carbs)
+			_, err := db.Exec("INSERT INTO food_entries (user_id, entry_date, carbs) VALUES (?, DATE('now'), ?)", userID, carbs.Float64)
 			if err != nil {
 				log.Printf("Failed to insert carbs: %v", err)
 				return err
@@ -127,7 +127,7 @@ func setUserFat(userID int64, fat float64, db *sql.DB) error {
 		return err
 	}
 	return nil
- }
+}
 
  func getUserFoodEntry(userID int64, db *sql.DB) (float64, float64, sql.NullFloat64, sql.NullFloat64, sql.NullFloat64) {
    var calories, grams float64

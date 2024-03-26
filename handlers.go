@@ -2,7 +2,6 @@ package main
 
 import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
-	"log"
 	"database/sql"
 	_ "github.com/mattn/go-sqlite3"
 	"fmt"
