@@ -56,8 +56,6 @@ func main() {
 
             log.Printf("[%s] %s", update.Message.From.UserName, update.Message.Text)
         } else if update.CallbackQuery != nil {
-            userID := update.CallbackQuery.From.ID
-
             // Check if the callback data starts with "delete_"
             if strings.HasPrefix(update.CallbackQuery.Data, "delete_") {
                 entryID, err := strconv.ParseInt(strings.TrimPrefix(update.CallbackQuery.Data, "delete_"), 10, 64)
