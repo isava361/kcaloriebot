@@ -23,7 +23,7 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
 
 	skipkeyboard := tgbotapi.NewReplyKeyboard(
 		tgbotapi.NewKeyboardButtonRow(
-			tgbotapi.NewKeyboardButton("Skip"),
+			tgbotapi.NewKeyboardButton("Skip")
 		)
 	)
 
