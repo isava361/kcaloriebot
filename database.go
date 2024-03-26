@@ -317,3 +317,43 @@ func getFavoriteFood(favoriteID int64, db *sql.DB) (FavoriteFood, error) {
     }
     return favorite, nil
 }
+
+func getAllFavoriteFoods(userID int64, db *sql.DB) ([]FavoriteFood, error) {
+    rows, err := db.Query("SELECT favorite_id, name, calories, protein, fat, carbs FROM favorite_foods WHERE user_id = ?", userID)
+    if err != nil {
+        log.Printf("Failed to get all favorite foods: %v", err)
+        return nil, err
+    }
+    defer rows.Close()
+
+    var favorites []FavoriteFood
+    for rows.Next() {
+        var favorite FavoriteFood
+        err := rows.Scan(&favorite.FavoriteID, &favorite.Name, &favorite.Calories, &favorite.Protein, &favorite.Fat, &favorite.Carbs)
+        if err != nil {
+            log.Printf("Failed to scan favorite food: %v", err)
+            return nil, err
+        }
+        favorites = append(favorites, favorite)
+    }
+
+    return favorites, nil
+}
+
+func updateFavoriteFood(favoriteID int64, calories float64, protein, fat, carbs sql.NullFloat64, db *sql.DB) error {
+    _, err := db.Exec("UPDATE favorite_foods SET calories = ?, protein = ?, fat = ?, carbs = ? WHERE favorite_id = ?", calories, protein, fat, carbs, favoriteID)
+    if err != nil {
+        log.Printf("Failed to update favorite food: %v", err)
+        return err
+    }
+    return nil
+}
+
+func deleteFavoriteFood(favoriteID int64, db *sql.DB) error {
+    _, err := db.Exec("DELETE FROM favorite_foods WHERE favorite_id = ?", favoriteID)
+    if err != nil {
+        log.Printf("Failed to delete favorite food: %v", err)
+        return err
+    }
+    return nil
+}

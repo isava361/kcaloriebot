@@ -129,6 +129,142 @@ func main() {
 				if _, err := bot.Request(callbackConfig); err != nil {
 					log.Printf("Error sending callback response: %s", err)
 				}
+			} else if strings.HasPrefix(update.CallbackQuery.Data, "amend_") {
+				favoriteID, err := strconv.ParseInt(strings.TrimPrefix(update.CallbackQuery.Data, "amend_"), 10, 64)
+				if err != nil {
+					log.Printf("Invalid favorite ID: %s", err)
+					callbackConfig := tgbotapi.NewCallback(update.CallbackQuery.ID, "Invalid favorite ID")
+					if _, err := bot.Request(callbackConfig); err != nil {
+						log.Printf("Error sending callback response: %s", err)
+					}
+					continue
+				}
+			
+				// Retrieve the favorite product details from the database
+				favorite, err := getFavoriteFood(favoriteID, db)
+				if err != nil {
+					log.Printf("Failed to retrieve favorite food: %s", err)
+					callbackConfig := tgbotapi.NewCallback(update.CallbackQuery.ID, "Failed to retrieve favorite food")
+					if _, err := bot.Request(callbackConfig); err != nil {
+						log.Printf("Error sending callback response: %s", err)
+					}
+					continue
+				}
+			
+				// Ask the user what they want to amend
+				msg := tgbotapi.NewMessage(update.CallbackQuery.Message.Chat.ID, "What do you want to amend?")
+				amendOptions := tgbotapi.NewInlineKeyboardMarkup(
+					tgbotapi.NewInlineKeyboardRow(
+						tgbotapi.NewInlineKeyboardButtonData("Calories", "amend_calories_"+strconv.FormatInt(favoriteID, 10)),
+						tgbotapi.NewInlineKeyboardButtonData("Protein", "amend_protein_"+strconv.FormatInt(favoriteID, 10)),
+					),
+					tgbotapi.NewInlineKeyboardRow(
+						tgbotapi.NewInlineKeyboardButtonData("Fat", "amend_fat_"+strconv.FormatInt(favoriteID, 10)),
+						tgbotapi.NewInlineKeyboardButtonData("Carbs", "amend_carbs_"+strconv.FormatInt(favoriteID, 10)),
+					),
+				)
+				msg.ReplyMarkup = amendOptions
+				bot.Send(msg)
+			
+				// Answer the callback query
+				callbackConfig := tgbotapi.NewCallback(update.CallbackQuery.ID, "")
+				if _, err := bot.Request(callbackConfig); err != nil {
+					log.Printf("Error sending callback response: %s", err)
+				}
+			} else if strings.HasPrefix(update.CallbackQuery.Data, "delete_") {
+				favoriteID, err := strconv.ParseInt(strings.TrimPrefix(update.CallbackQuery.Data, "delete_"), 10, 64)
+				if err != nil {
+					log.Printf("Invalid favorite ID: %s", err)
+					callbackConfig := tgbotapi.NewCallback(update.CallbackQuery.ID, "Invalid favorite ID")
+					if _, err := bot.Request(callbackConfig); err != nil {
+						log.Printf("Error sending callback response: %s", err)
+					}
+					continue
+				}
+			
+				// Ask for confirmation before deleting the favorite
+				msg := tgbotapi.NewMessage(update.CallbackQuery.Message.Chat.ID, "Are you sure you want to delete this product?")
+				confirmationOptions := tgbotapi.NewInlineKeyboardMarkup(
+					tgbotapi.NewInlineKeyboardRow(
+						tgbotapi.NewInlineKeyboardButtonData("Yes", "confirm_delete_"+strconv.FormatInt(favoriteID, 10)),
+						tgbotapi.NewInlineKeyboardButtonData("No", "cancel_delete"),
+					),
+				)
+				msg.ReplyMarkup = confirmationOptions
+				bot.Send(msg)
+			
+				// Answer the callback query
+				callbackConfig := tgbotapi.NewCallback(update.CallbackQuery.ID, "")
+				if _, err := bot.Request(callbackConfig); err != nil {
+					log.Printf("Error sending callback response: %s", err)
+				}
+			} else if strings.HasPrefix(update.CallbackQuery.Data, "confirm_delete_") {
+				favoriteID, err := strconv.ParseInt(strings.TrimPrefix(update.CallbackQuery.Data, "confirm_delete_"), 10, 64)
+				if err != nil {
+					log.Printf("Invalid favorite ID: %s", err)
+					callbackConfig := tgbotapi.NewCallback(update.CallbackQuery.ID, "Invalid favorite ID")
+					if _, err := bot.Request(callbackConfig); err != nil {
+						log.Printf("Error sending callback response: %s", err)
+					}
+					continue
+				}
+			
+				// Delete the favorite product from the database
+				err = deleteFavoriteFood(favoriteID, db)
+				if err != nil {
+					log.Printf("Failed to delete favorite food: %s", err)
+					callbackConfig := tgbotapi.NewCallback(update.CallbackQuery.ID, "Failed to delete favorite food")
+					if _, err := bot.Request(callbackConfig); err != nil {
+						log.Printf("Error sending callback response: %s", err)
+					}
+					continue
+				}
+			
+				// Send a confirmation message
+				msg := tgbotapi.NewMessage(update.CallbackQuery.Message.Chat.ID, "Favorite product deleted successfully!")
+				bot.Send(msg)
+			
+				// Answer the callback query
+				callbackConfig := tgbotapi.NewCallback(update.CallbackQuery.ID, "")
+				if _, err := bot.Request(callbackConfig); err != nil {
+					log.Printf("Error sending callback response: %s", err)
+				}
+			} else if strings.HasPrefix(update.CallbackQuery.Data, "amend_calories_") || strings.HasPrefix(update.CallbackQuery.Data, "amend_protein_") || strings.HasPrefix(update.CallbackQuery.Data, "amend_fat_") || strings.HasPrefix(update.CallbackQuery.Data, "amend_carbs_") {
+				favoriteID, err := strconv.ParseInt(strings.Split(update.CallbackQuery.Data, "_")[2], 10, 64)
+				if err != nil {
+					log.Printf("Invalid favorite ID: %s", err)
+					callbackConfig := tgbotapi.NewCallback(update.CallbackQuery.ID, "Invalid favorite ID")
+					if _, err := bot.Request(callbackConfig); err != nil {
+						log.Printf("Error sending callback response: %s", err)
+					}
+					continue
+				}
+			
+				// Ask the user to enter the new value for the selected nutrient
+				var nutrient string
+				if strings.HasPrefix(update.CallbackQuery.Data, "amend_calories_") {
+					nutrient = "calories"
+				} else if strings.HasPrefix(update.CallbackQuery.Data, "amend_protein_") {
+					nutrient = "protein"
+				} else if strings.HasPrefix(update.CallbackQuery.Data, "amend_fat_") {
+					nutrient = "fat"
+				} else if strings.HasPrefix(update.CallbackQuery.Data, "amend_carbs_") {
+					nutrient = "carbs"
+				}
+			
+				msg := tgbotapi.NewMessage(update.CallbackQuery.Message.Chat.ID, fmt.Sprintf("Enter the new value for %s:", nutrient))
+				bot.Send(msg)
+			
+				// Store the selected favorite product and nutrient in the user's state
+				setUserState(update.CallbackQuery.From.ID, stateWaitingForFavoriteAmendment, db)
+				userFavorites[update.CallbackQuery.From.ID] = FavoriteFood{FavoriteID: favoriteID}
+				userFavoriteNutrients[update.CallbackQuery.From.ID] = nutrient
+			
+				// Answer the callback query
+				callbackConfig := tgbotapi.NewCallback(update.CallbackQuery.ID, "")
+				if _, err := bot.Request(callbackConfig); err != nil {
+					log.Printf("Error sending callback response: %s", err)
+				}
 			} else {
                 log.Printf("Unhandled callback data: %s", update.CallbackQuery.Data)
                 callbackConfig := tgbotapi.NewCallback(update.CallbackQuery.ID, "Unhandled callback data")
