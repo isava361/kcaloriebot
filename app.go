@@ -259,6 +259,7 @@ func main() {
 					log.Printf("Error sending callback response: %s", err)
 				}			
 			} else if strings.HasPrefix(update.CallbackQuery.Data, "amend_calories_") || strings.HasPrefix(update.CallbackQuery.Data, "amend_protein_") || strings.HasPrefix(update.CallbackQuery.Data, "amend_fat_") || strings.HasPrefix(update.CallbackQuery.Data, "amend_carbs_") {
+				var favoriteID int				
 				parts := strings.Split(update.CallbackQuery.Data, "_")
 				if len(parts) != 3 {
 					log.Printf("Invalid callback data format: %s", update.CallbackQuery.Data)
