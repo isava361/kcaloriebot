@@ -562,5 +562,5 @@ func getTimezoneOffsetForLocation(location string) (string, error) {
 func formatTimezoneOffset(loc *time.Location) string {
     now := time.Now().In(loc)
     offset := now.Format("-0700")
-    return "UTC" + offset[:3] + ":" + offset[3:]
+    return offset[:3] + ":" + offset[3:]
 }
