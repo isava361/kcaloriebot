@@ -59,9 +59,12 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
     case stateWaitingForProtein:
         // Process protein input or skip
         if message.Text == "Skip" {
-            setUserState(userID, stateWaitingForFat, db)
-            msg := tgbotapi.NewMessage(message.Chat.ID, "Enter the fat per 100g (or send Skip to omit):")
-            bot.Send(msg)
+			proteinNull := sql.NullFloat64{Valid: false}
+			setUserProtein(userID, proteinNull, db)
+			setUserState(userID, stateWaitingForFat, db)
+			msg := tgbotapi.NewMessage(message.Chat.ID, "Enter the fat per 100g (or send Skip to omit):")
+			msg.ReplyMarkup = skipkeyboard
+			bot.Send(msg)
         } else {
             protein, err := strconv.ParseFloat(message.Text, 64)
             if err != nil {
@@ -80,10 +83,12 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
     case stateWaitingForFat:
         // Process fat input or skip
         if message.Text == "Skip" {
-            setUserState(userID, stateWaitingForCarbs, db)
-            msg := tgbotapi.NewMessage(message.Chat.ID, "Enter the carbs per 100g (or send Skip to omit):")
+			fatNull := sql.NullFloat64{Valid: false}
+			setUserFat(userID, fatNull, db)
+			setUserState(userID, stateWaitingForCarbs, db)
+			msg := tgbotapi.NewMessage(message.Chat.ID, "Enter the carbs per 100g (or send Skip to omit):")
 			msg.ReplyMarkup = skipkeyboard
-            bot.Send(msg)
+			bot.Send(msg)
         } else {
             fat, err := strconv.ParseFloat(message.Text, 64)
             if err != nil {

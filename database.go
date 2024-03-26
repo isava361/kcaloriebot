@@ -78,7 +78,7 @@ func setUserGrams(userID int64, grams float64, db *sql.DB) error {
     return nil
 }
 
-func setUserProtein(userID int64, protein float64, db *sql.DB) error {
+func setUserProtein(userID int64, protein sql.NullFloat64, db *sql.DB) error {
     _, err := db.Exec("UPDATE food_entries SET protein = ? WHERE user_id = ? AND entry_date = DATE('now')", protein, userID)
     if err != nil {
         if err == sql.ErrNoRows {
@@ -95,22 +95,22 @@ func setUserProtein(userID int64, protein float64, db *sql.DB) error {
     return nil
 }
 
-func setUserFat(userID int64, fat float64, db *sql.DB) error {
-	_, err := db.Exec("UPDATE food_entries SET fat = ? WHERE user_id = ? AND entry_date = DATE('now')", fat, userID)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			_, err := db.Exec("INSERT INTO food_entries (user_id, entry_date, fat) VALUES (?, DATE('now'), ?)", userID, fat)
-			if err != nil {
-				log.Printf("Failed to insert fat: %v", err)
-				return err
-			}
-			return nil
-		}
-		log.Printf("Failed to update fat: %v", err)
-		return err
-	}
-	return nil
- }
+func setUserFat(userID int64, fat sql.NullFloat64, db *sql.DB) error {
+    _, err := db.Exec("UPDATE food_entries SET fat = ? WHERE user_id = ? AND entry_date = DATE('now')", fat, userID)
+    if err != nil {
+        if err == sql.ErrNoRows {
+            _, err := db.Exec("INSERT INTO food_entries (user_id, entry_date, fat) VALUES (?, DATE('now'), ?)", userID, fat)
+            if err != nil {
+                log.Printf("Failed to insert fat: %v", err)
+                return err
+            }
+            return nil
+        }
+        log.Printf("Failed to update fat: %v", err)
+        return err
+    }
+    return nil
+}
 
 func setUserCarbs(userID int64, carbs sql.NullFloat64, db *sql.DB) error {
 	_, err := db.Exec("UPDATE food_entries SET carbs = ? WHERE user_id = ? AND entry_date = DATE('now')", carbs.Float64, userID)
@@ -146,13 +146,13 @@ func setUserCarbs(userID int64, carbs sql.NullFloat64, db *sql.DB) error {
 }
 
 func addFood(userID int64, calories, grams float64, protein, fat, carbs sql.NullFloat64, db *sql.DB) error {
-	_, err := db.Exec("INSERT INTO food_entries (user_id, entry_date, calories, grams, protein, fat, carbs) VALUES (?, DATE('now'), ?, ?, ?, ?, ?)", userID, calories, grams, protein, fat, carbs)
-	if err != nil {
-		log.Printf("Failed to add food entry: %v", err)
-		return err
-	}
-	return nil
- }
+    _, err := db.Exec("INSERT INTO food_entries (user_id, entry_date, calories, grams, protein, fat, carbs) VALUES (?, DATE('now'), ?, ?, ?, ?, ?)", userID, calories, grams, protein, fat, carbs)
+    if err != nil {
+        log.Printf("Failed to add food entry: %v", err)
+        return err
+    }
+    return nil
+}
 
 func getTodayStats(userID int64, db *sql.DB) (float64, sql.NullFloat64, sql.NullFloat64, sql.NullFloat64, error) {
 	var totalCalories float64
