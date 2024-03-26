@@ -20,6 +20,8 @@ const (
     stateWaitingForFat
     stateWaitingForCarbs
     stateWaitingForTimezone
+    stateWaitingForFavoriteOption
+    stateWaitingForFavoriteSearch
 )
 
 type UserInput struct {
@@ -250,7 +252,7 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
             bot.Send(msg)
             return nil
         }
-
+    
         if message.Text == "Skip" {
             name := input.Name
             calories := input.Calories
@@ -258,17 +260,29 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
             protein := input.Protein
             fat := input.Fat
             carbsNull := sql.NullFloat64{Valid: false}
-            err := addFood(userID,name, calories*grams/100, grams, protein, fat, carbsNull, db)
+            err := addFood(userID, name, calories*grams/100, grams, protein, fat, carbsNull, db)
             if err != nil {
                 msg := tgbotapi.NewMessage(message.Chat.ID, "Failed to add food entry. Please try again.")
                 bot.Send(msg)
                 return nil
             }
             delete(userInputs, userID)
-            setUserState(userID, stateDefault, db)
-            msg := tgbotapi.NewMessage(message.Chat.ID, "Food entry added successfully!")
-            msg.ReplyMarkup = defaultkeyboard
-            bot.Send(msg)
+            if input.Name.Valid {
+                setUserState(userID, stateWaitingForFavoriteOption, db)
+                msg := tgbotapi.NewMessage(message.Chat.ID, "Do you want to save this product as a favorite?")
+                msg.ReplyMarkup = tgbotapi.NewReplyKeyboard(
+                    tgbotapi.NewKeyboardButtonRow(
+                        tgbotapi.NewKeyboardButton("Yes"),
+                        tgbotapi.NewKeyboardButton("No"),
+                    ),
+                )
+                bot.Send(msg)
+            } else {
+                setUserState(userID, stateDefault, db)
+                msg := tgbotapi.NewMessage(message.Chat.ID, "Food entry added successfully!")
+                msg.ReplyMarkup = defaultkeyboard
+                bot.Send(msg)
+            }
         } else {
             carbs, err := strconv.ParseFloat(message.Text, 64)
             if err != nil || carbs > 100 || carbs < -100 {
@@ -314,9 +328,68 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
                 return nil
             }
             delete(userInputs, userID)
+            if input.Name.Valid {
+                setUserState(userID, stateWaitingForFavoriteOption, db)
+                msg := tgbotapi.NewMessage(message.Chat.ID, "Do you want to save this product as a favorite?")
+                msg.ReplyMarkup = tgbotapi.NewReplyKeyboard(
+                    tgbotapi.NewKeyboardButtonRow(
+                        tgbotapi.NewKeyboardButton("Yes"),
+                        tgbotapi.NewKeyboardButton("No"),
+                    ),
+                )
+                bot.Send(msg)
+            } else {
+                setUserState(userID, stateDefault, db)
+                msg := tgbotapi.NewMessage(message.Chat.ID, "Food entry added successfully!")
+                msg.ReplyMarkup = defaultkeyboard
+                bot.Send(msg)
+            }
+        }
+
+        case stateWaitingForFavoriteOption:
+            if message.Text == "Yes" {
+                err := addFavoriteFood(userID, input.Name.String, input.Calories, input.Protein, input.Fat, input.Carbs, db)
+                if err != nil {
+                    msg := tgbotapi.NewMessage(message.Chat.ID, "Failed to save the product as a favorite. Please try again.")
+                    bot.Send(msg)
+                    return nil
+                }
+                msg := tgbotapi.NewMessage(message.Chat.ID, "Product saved as a favorite!")
+                bot.Send(msg)
+            }
+        
+        }
+
+    case "Search Favorites":
+        setUserState(userID, stateWaitingForFavoriteSearch, db)
+        msg := tgbotapi.NewMessage(message.Chat.ID, "Enter the name or part
+    
+     of the name of the product to search:")
+        bot.Send(msg)
+    
+    case stateWaitingForFavoriteSearch:
+        query := message.Text
+        favorites, err := searchFavoriteFoods(userID, query, db)
+        if err != nil {
+            msg := tgbotapi.NewMessage(message.Chat.ID, "Failed to search for favorite products. Please try again.")
+            bot.Send(msg)
+            return nil
+        }
+        if len(favorites) == 0 {
+            msg := tgbotapi.NewMessage(message.Chat.ID, "No matching favorite products found.")
+            bot.Send(msg)
             setUserState(userID, stateDefault, db)
-            msg := tgbotapi.NewMessage(message.Chat.ID, "Food entry added successfully!")
-            msg.ReplyMarkup = defaultkeyboard
+        } else {
+            var rows [][]tgbotapi.InlineKeyboardButton
+            for _, favorite := range favorites {
+                buttonText := fmt.Sprintf("%s - Calories: %.2f", favorite.Name, favorite.Calories)
+                button := tgbotapi.NewInlineKeyboardButtonData(buttonText, fmt.Sprintf("favorite_%d", favorite.FavoriteID))
+                row := []tgbotapi.InlineKeyboardButton{button}
+                rows = append(rows, row)
+            }
+            keyboard := tgbotapi.NewInlineKeyboardMarkup(rows...)
+            msg := tgbotapi.NewMessage(message.Chat.ID, "Select a favorite product:")
+            msg.ReplyMarkup = keyboard
             bot.Send(msg)
         }
 

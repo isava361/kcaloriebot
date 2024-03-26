@@ -267,3 +267,34 @@ func setUserTimezone(userID int64, timezone string, db *sql.DB) error {
     }
     return nil
 }
+
+func addFavoriteFood(userID int64, name string, calories float64, protein, fat, carbs sql.NullFloat64, db *sql.DB) error {
+    _, err := db.Exec("INSERT INTO favorite_foods (user_id, name, calories, protein, fat, carbs) VALUES (?, ?, ?, ?, ?, ?)", userID, name, calories, protein, fat, carbs)
+    if err != nil {
+        log.Printf("Failed to add favorite food: %v", err)
+        return err
+    }
+    return nil
+}
+
+func searchFavoriteFoods(userID int64, query string, db *sql.DB) ([]FavoriteFood, error) {
+    rows, err := db.Query("SELECT favorite_id, name, calories, protein, fat, carbs FROM favorite_foods WHERE user_id = ? AND name LIKE ?", userID, "%"+query+"%")
+    if err != nil {
+        log.Printf("Failed to search favorite foods: %v", err)
+        return nil, err
+    }
+    defer rows.Close()
+
+    var favorites []FavoriteFood
+    for rows.Next() {
+        var favorite FavoriteFood
+        err := rows.Scan(&favorite.FavoriteID, &favorite.Name, &favorite.Calories, &favorite.Protein, &favorite.Fat, &favorite.Carbs)
+        if err != nil {
+            log.Printf("Failed to scan favorite food: %v", err)
+            return nil, err
+        }
+        favorites = append(favorites, favorite)
+    }
+
+    return favorites, nil
+}

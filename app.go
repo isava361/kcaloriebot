@@ -126,6 +126,17 @@ func createTables(db *sql.DB) error {
 			name TEXT,
 			FOREIGN KEY (user_id) REFERENCES users (user_id)
 		);
+
+		CREATE TABLE IF NOT EXISTS favorite_foods (
+			favorite_id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id INTEGER NOT NULL,
+			name TEXT NOT NULL,
+			calories REAL,
+			protein REAL,
+			fat REAL,
+			carbs REAL,
+			FOREIGN KEY (user_id) REFERENCES users (user_id)
+		);
 	`)
 	if err != nil {
 		return err
