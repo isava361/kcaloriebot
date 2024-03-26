@@ -133,7 +133,7 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
             bot.Send(msg)
         } else {
             protein, err := strconv.ParseFloat(message.Text, 64)
-            if err != nil || protein > 100 {
+            if err != nil || protein > 100 || protein < -100 {
                 msg := tgbotapi.NewMessage(message.Chat.ID, "Invalid protein value. Please enter a valid number or send Skip to omit.")
                 msg.ReplyMarkup = skipkeyboard
                 bot.Send(msg)
@@ -165,7 +165,7 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
             bot.Send(msg)
         } else {
             fat, err := strconv.ParseFloat(message.Text, 64)
-            if err != nil || fat > 100 {
+            if err != nil || fat > 100 || fat < -100 {
                 msg := tgbotapi.NewMessage(message.Chat.ID, "Invalid fat value. Please enter a valid number or send Skip to omit.")
                 bot.Send(msg)
                 return nil
@@ -207,7 +207,7 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
             sendDefaultKeyboard(bot, message.Chat.ID)
         } else {
             carbs, err := strconv.ParseFloat(message.Text, 64)
-            if err != nil || carbs > 100 {
+            if err != nil || carbs > 100 || carbs < -100 {
                 msg := tgbotapi.NewMessage(message.Chat.ID, "Invalid carbs value. Please enter a valid number or send Skip to omit.")
                 msg.ReplyMarkup = skipkeyboard
                 bot.Send(msg)
