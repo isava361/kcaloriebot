@@ -22,6 +22,7 @@ const (
     stateWaitingForTimezone
     stateWaitingForFavoriteOption
     stateWaitingForFavoriteSearch
+    stateWaitingForFavoriteGrams 
 )
 
 type UserInput struct {
@@ -32,6 +33,8 @@ type UserInput struct {
     Fat      sql.NullFloat64
 }
 var userInputs = make(map[int64]*UserInput)
+
+var userFavorites = make(map[int64]FavoriteFood)
 
 func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) error {
     userID := message.From.ID
@@ -392,6 +395,42 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
             msg.ReplyMarkup = keyboard
             bot.Send(msg)
         }
+
+    case stateWaitingForFavoriteGrams:
+        grams, err := strconv.ParseFloat(message.Text, 64)
+        if err != nil {
+            msg := tgbotapi.NewMessage(message.Chat.ID, "Invalid grams value. Please enter a valid number.")
+            bot.Send(msg)
+            return nil
+        }
+    
+        favorite, ok := userFavorites[userID]
+        if !ok {
+            msg := tgbotapi.NewMessage(message.Chat.ID, "Favorite product not found. Please try again.")
+            bot.Send(msg)
+            setUserState(userID, stateDefault, db)
+            return nil
+        }
+    
+        // Calculate the calories and macronutrients based on the entered grams and the favorite product's values
+        calories := favorite.Calories * grams / 100
+        protein := sql.NullFloat64{Float64: favorite.Protein.Float64 * grams / 100, Valid: favorite.Protein.Valid}
+        fat := sql.NullFloat64{Float64: favorite.Fat.Float64 * grams / 100, Valid: favorite.Fat.Valid}
+        carbs := sql.NullFloat64{Float64: favorite.Carbs.Float64 * grams / 100, Valid: favorite.Carbs.Valid}
+    
+        // Add the food entry to the database
+        err = addFood(userID, sql.NullString{String: favorite.Name, Valid: true}, calories, grams, protein, fat, carbs, db)
+        if err != nil {
+            msg := tgbotapi.NewMessage(message.Chat.ID, "Failed to add food entry. Please try again.")
+            bot.Send(msg)
+            return nil
+        }
+    
+        delete(userFavorites, userID)
+        setUserState(userID, stateDefault, db)
+        msg := tgbotapi.NewMessage(message.Chat.ID, "Food entry added successfully!")
+        msg.ReplyMarkup = defaultkeyboard
+        bot.Send(msg)
 
     default:
         // Handle callback queries

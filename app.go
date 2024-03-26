@@ -93,6 +93,41 @@ func main() {
 				if err != nil {
 					log.Printf("Failed to fetch food entries: %v", err)
 				}
+			} else if strings.HasPrefix(update.CallbackQuery.Data, "favorite_") {
+				favoriteID, err := strconv.ParseInt(strings.TrimPrefix(update.CallbackQuery.Data, "favorite_"), 10, 64)
+				if err != nil {
+					log.Printf("Invalid favorite ID: %s", err)
+					callbackConfig := tgbotapi.NewCallback(update.CallbackQuery.ID, "Invalid favorite ID")
+					if _, err := bot.Request(callbackConfig); err != nil {
+						log.Printf("Error sending callback response: %s", err)
+					}
+					continue
+				}
+			
+				// Retrieve the favorite product details from the database
+				favorite, err := getFavoriteFood(favoriteID, db)
+				if err != nil {
+					log.Printf("Failed to retrieve favorite food: %s", err)
+					callbackConfig := tgbotapi.NewCallback(update.CallbackQuery.ID, "Failed to retrieve favorite food")
+					if _, err := bot.Request(callbackConfig); err != nil {
+						log.Printf("Error sending callback response: %s", err)
+					}
+					continue
+				}
+			
+				// Ask the user to enter the grams for the selected favorite product
+				msg := tgbotapi.NewMessage(update.CallbackQuery.Message.Chat.ID, fmt.Sprintf("Enter the grams for %s:", favorite.Name))
+				bot.Send(msg)
+			
+				// Store the selected favorite product in the user's state
+				setUserState(update.CallbackQuery.From.ID, stateWaitingForFavoriteGrams, db)
+				userFavorites[update.CallbackQuery.From.ID] = favorite
+			
+				// Answer the callback query
+				callbackConfig := tgbotapi.NewCallback(update.CallbackQuery.ID, "")
+				if _, err := bot.Request(callbackConfig); err != nil {
+					log.Printf("Error sending callback response: %s", err)
+				}
 			} else {
                 log.Printf("Unhandled callback data: %s", update.CallbackQuery.Data)
                 callbackConfig := tgbotapi.NewCallback(update.CallbackQuery.ID, "Unhandled callback data")

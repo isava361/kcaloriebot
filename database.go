@@ -298,3 +298,13 @@ func searchFavoriteFoods(userID int64, query string, db *sql.DB) ([]FavoriteFood
 
     return favorites, nil
 }
+
+func getFavoriteFood(favoriteID int64, db *sql.DB) (FavoriteFood, error) {
+    var favorite FavoriteFood
+    err := db.QueryRow("SELECT favorite_id, name, calories, protein, fat, carbs FROM favorite_foods WHERE favorite_id = ?", favoriteID).Scan(&favorite.FavoriteID, &favorite.Name, &favorite.Calories, &favorite.Protein, &favorite.Fat, &favorite.Carbs)
+    if err != nil {
+        log.Printf("Failed to get favorite food: %v", err)
+        return favorite, err
+    }
+    return favorite, nil
+}
