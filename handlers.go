@@ -18,6 +18,7 @@ const (
     stateWaitingForProtein
     stateWaitingForFat
     stateWaitingForCarbs
+    stateWaitingForTimezone
 )
 
 type UserInput struct {
@@ -68,6 +69,27 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
 
     // Check user's current state and respond accordingly
     switch getUserState(userID, db) {
+    case stateWaitingForTimezone:
+        location := message.Text
+        currentTime, err := getCurrentTimeForLocation(location)
+        if err != nil {
+            msg := tgbotapi.NewMessage(message.Chat.ID, "Invalid location. Please try a different city with the same timezone.")
+            bot.Send(msg)
+            return nil
+        }
+    
+        err = setUserTimezone(userID, location, db)
+        if err != nil {
+            msg := tgbotapi.NewMessage(message.Chat.ID, "Failed to set timezone. Please try again.")
+            bot.Send(msg)
+            return nil
+        }
+    
+        setUserState(userID, stateDefault, db)
+        msg := tgbotapi.NewMessage(message.Chat.ID, "Timezone set successfully!")
+        msg.ReplyMarkup = defaultkeyboard
+        bot.Send(msg)
+
     case stateWaitingForFoodName:
         // Process food name input or skip
         if message.Text == "Cancel" {
@@ -348,6 +370,10 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
                 log.Printf("Failed to fetch food entries: %v", err)
             } 
             return nil
+        } else if message.Text == "/updatetimezone" {
+            msg := tgbotapi.NewMessage(message.Chat.ID, "Please enter your location (e.g., 'New York'):")
+            bot.Send(msg)
+            setUserState(userID, stateWaitingForTimezone, db)
         } else {
             msg := tgbotapi.NewMessage(message.Chat.ID, "Invalid command. Please select an option from the keyboard.")
             bot.Send(msg)

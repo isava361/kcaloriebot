@@ -65,8 +65,13 @@ func addFood(userID int64, name sql.NullString, calories, grams float64, protein
 func getTodayStats(userID int64, db *sql.DB) (float64, sql.NullFloat64, sql.NullFloat64, sql.NullFloat64, error) {
 	var totalCalories float64
 	var totalProtein, totalFat, totalCarbs sql.NullFloat64
- 
-	err := db.QueryRow("SELECT SUM(calories), SUM(protein), SUM(fat), SUM(carbs) FROM food_entries WHERE user_id = ? AND DATE(entry_date) = DATE('now')", userID).Scan(&totalCalories, &totalProtein, &totalFat, &totalCarbs)
+    var timezone string
+    err := db.QueryRow("SELECT timezone FROM users WHERE user_id = ?", userID).Scan(&timezone)
+    if err != nil {
+        log.Printf("Failed to get user timezone: %v", err)
+        timezone = "UTC"
+    }
+	err := db.QueryRow("SELECT SUM(calories), SUM(protein), SUM(fat), SUM(carbs) FROM food_entries WHERE user_id = ? AND DATE(entry_date, ?) = DATE('now', ?)", userID, timezone, timezone).Scan(&totalCalories, &totalProtein, &totalFat, &totalCarbs)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return 0, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, nil
@@ -79,58 +84,85 @@ func getTodayStats(userID int64, db *sql.DB) (float64, sql.NullFloat64, sql.Null
 }
 
 func getYesterdayStats(userID int64, db *sql.DB) (float64, sql.NullFloat64, sql.NullFloat64, sql.NullFloat64, error) {
-	var totalCalories float64
-	var totalProtein, totalFat, totalCarbs sql.NullFloat64
+    var timezone string
+    err := db.QueryRow("SELECT timezone FROM users WHERE user_id = ?", userID).Scan(&timezone)
+    if err != nil {
+        log.Printf("Failed to get user timezone: %v", err)
+        timezone = "UTC"
+    }
 
-	err := db.QueryRow("SELECT SUM(calories), SUM(protein), SUM(fat), SUM(carbs) FROM food_entries WHERE user_id = ? AND DATE(entry_date) = DATE('now', '-1 day')", userID).Scan(&totalCalories, &totalProtein, &totalFat, &totalCarbs)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return 0, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, nil
-		}
-		log.Printf("Failed to get yesterday's stats: %v", err)
-		return 0, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, err
-	}
+    var totalCalories float64
+    var totalProtein, totalFat, totalCarbs sql.NullFloat64
 
-	return totalCalories, totalProtein, totalFat, totalCarbs, nil
+    err = db.QueryRow("SELECT SUM(calories), SUM(protein), SUM(fat), SUM(carbs) FROM food_entries WHERE user_id = ? AND DATE(entry_date, ?) = DATE('now', ?, '-1 day')", userID, timezone, timezone).Scan(&totalCalories, &totalProtein, &totalFat, &totalCarbs)
+    if err != nil {
+        if err == sql.ErrNoRows {
+            return 0, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, nil
+        }
+        log.Printf("Failed to get yesterday's stats: %v", err)
+        return 0, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, err
+    }
+
+    return totalCalories, totalProtein, totalFat, totalCarbs, nil
 }
 
 func getWeekStats(userID int64, db *sql.DB) (float64, sql.NullFloat64, sql.NullFloat64, sql.NullFloat64, error) {
-	var avgCalories float64
-	var avgProtein, avgFat, avgCarbs sql.NullFloat64
- 
-	err := db.QueryRow("SELECT AVG(calories), AVG(protein), AVG(fat), AVG(carbs) FROM (SELECT SUM(calories) AS calories, SUM(protein) AS protein, SUM(fat) AS fat, SUM(carbs) AS carbs FROM food_entries WHERE user_id = ? AND DATE(entry_date) BETWEEN DATE('now', '-6 days') AND DATE('now') GROUP BY DATE(entry_date))", userID).Scan(&avgCalories, &avgProtein, &avgFat, &avgCarbs)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return 0, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, nil
-		}
-		log.Printf("Failed to get week's stats: %v", err)
-		return 0, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, err
-	}
- 
-	return avgCalories, avgProtein, avgFat, avgCarbs, nil
+    var timezone string
+    err := db.QueryRow("SELECT timezone FROM users WHERE user_id = ?", userID).Scan(&timezone)
+    if err != nil {
+        log.Printf("Failed to get user timezone: %v", err)
+        timezone = "UTC"
+    }
+
+    var avgCalories float64
+    var avgProtein, avgFat, avgCarbs sql.NullFloat64
+
+    err = db.QueryRow("SELECT AVG(calories), AVG(protein), AVG(fat), AVG(carbs) FROM (SELECT SUM(calories) AS calories, SUM(protein) AS protein, SUM(fat) AS fat, SUM(carbs) AS carbs FROM food_entries WHERE user_id = ? AND DATE(entry_date, ?) BETWEEN DATE('now', ?, '-6 days') AND DATE('now', ?) GROUP BY DATE(entry_date, ?))", userID, timezone, timezone, timezone, timezone).Scan(&avgCalories, &avgProtein, &avgFat, &avgCarbs)
+    if err != nil {
+        if err == sql.ErrNoRows {
+            return 0, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, nil
+        }
+        log.Printf("Failed to get week's stats: %v", err)
+        return 0, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, err
+    }
+
+    return avgCalories, avgProtein, avgFat, avgCarbs, nil
 }
 
-
 func getMonthStats(userID int64, db *sql.DB) (float64, sql.NullFloat64, sql.NullFloat64, sql.NullFloat64, error) {
-	var avgCalories float64
-	var avgProtein, avgFat, avgCarbs sql.NullFloat64
- 
-	err := db.QueryRow("SELECT AVG(calories), AVG(protein), AVG(fat), AVG(carbs) FROM (SELECT SUM(calories) AS calories, SUM(protein) AS protein, SUM(fat) AS fat, SUM(carbs) AS carbs FROM food_entries WHERE user_id = ? AND DATE(entry_date) BETWEEN DATE('now', 'start of month') AND DATE('now') GROUP BY DATE(entry_date))", userID).Scan(&avgCalories, &avgProtein, &avgFat, &avgCarbs)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return 0, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, nil
-		}
-		log.Printf("Failed to get month's stats: %v", err)
-		return 0, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, err
-	}
- 
-	return avgCalories, avgProtein, avgFat, avgCarbs, nil
+    var timezone string
+    err := db.QueryRow("SELECT timezone FROM users WHERE user_id = ?", userID).Scan(&timezone)
+    if err != nil {
+        log.Printf("Failed to get user timezone: %v", err)
+        timezone = "UTC"
+    }
+
+    var avgCalories float64
+    var avgProtein, avgFat, avgCarbs sql.NullFloat64
+
+    err = db.QueryRow("SELECT AVG(calories), AVG(protein), AVG(fat), AVG(carbs) FROM (SELECT SUM(calories) AS calories, SUM(protein) AS protein, SUM(fat) AS fat, SUM(carbs) AS carbs FROM food_entries WHERE user_id = ? AND DATE(entry_date, ?) BETWEEN DATE('now', ?, 'start of month') AND DATE('now', ?) GROUP BY DATE(entry_date, ?))", userID, timezone, timezone, timezone, timezone).Scan(&avgCalories, &avgProtein, &avgFat, &avgCarbs)
+    if err != nil {
+        if err == sql.ErrNoRows {
+            return 0, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, nil
+        }
+        log.Printf("Failed to get month's stats: %v", err)
+        return 0, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, err
+    }
+
+    return avgCalories, avgProtein, avgFat, avgCarbs, nil
 }
 
 func getTodayFoodEntries(userID int64, db *sql.DB) ([]FoodEntry, error) {
+    var timezone string
+    err := db.QueryRow("SELECT timezone FROM users WHERE user_id = ?", userID).Scan(&timezone)
+    if err != nil {
+        log.Printf("Failed to get user timezone: %v", err)
+        timezone = "UTC"
+    }
+
     var entries []FoodEntry
 
-    rows, err := db.Query("SELECT entry_id, name, calories, grams, protein, fat, carbs FROM food_entries WHERE user_id = ? AND DATE(entry_date) = DATE('now')", userID)
+    rows, err := db.Query("SELECT entry_id, name, calories, grams, protein, fat, carbs FROM food_entries WHERE user_id = ? AND DATE(entry_date, ?) = DATE('now', ?)", userID, timezone, timezone)
     if err != nil {
         log.Printf("Failed to get today's food entries: %v", err)
         return nil, err
@@ -150,6 +182,7 @@ func getTodayFoodEntries(userID int64, db *sql.DB) ([]FoodEntry, error) {
     return entries, nil
 }
 
+
 func deleteFoodEntry(entryID int64, db *sql.DB) error {
     _, err := db.Exec("DELETE FROM food_entries WHERE entry_id = ?", entryID)
     if err != nil {
@@ -160,9 +193,16 @@ func deleteFoodEntry(entryID int64, db *sql.DB) error {
 }
 
 func getTodayFoodEntriesWithPagination(userID int64, offset int, db *sql.DB) ([]FoodEntry, error) {
+    var timezone string
+    err := db.QueryRow("SELECT timezone FROM users WHERE user_id = ?", userID).Scan(&timezone)
+    if err != nil {
+        log.Printf("Failed to get user timezone: %v", err)
+        timezone = "UTC"
+    }
+
     var entries []FoodEntry
 
-    rows, err := db.Query("SELECT entry_id, name, calories, grams, protein, fat, carbs FROM food_entries WHERE user_id = ? AND DATE(entry_date) = DATE('now') LIMIT 5 OFFSET ?", userID, offset)
+    rows, err := db.Query("SELECT entry_id, name, calories, grams, protein, fat, carbs FROM food_entries WHERE user_id = ? AND DATE(entry_date, ?) = DATE('now', ?) LIMIT 5 OFFSET ?", userID, timezone, timezone, offset)
     if err != nil {
         log.Printf("Failed to get today's food entries: %v", err)
         return nil, err
