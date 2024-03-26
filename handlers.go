@@ -332,7 +332,6 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
                 bot.Send(msg)
                 return nil
             }
-            delete(userInputs, userID)
             if input.Name.Valid {
                 setUserState(userID, stateWaitingForFavoriteOption, db)
                 msg := tgbotapi.NewMessage(message.Chat.ID, "Do you want to save this product as a favorite?")
@@ -362,6 +361,7 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
                 bot.Send(msg)
                 return nil
             }
+            delete(userInputs, userID)
             msg := tgbotapi.NewMessage(message.Chat.ID, "Product saved as a favorite!")
             bot.Send(msg)
             setUserState(userID, stateDefault, db)
@@ -369,6 +369,7 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
             msg.ReplyMarkup = defaultkeyboard
             bot.Send(msg)
         } else if message.Text == "No" {
+            delete(userInputs, userID)
             setUserState(userID, stateDefault, db)
             msg := tgbotapi.NewMessage(message.Chat.ID, "Select an option:")
             msg.ReplyMarkup = defaultkeyboard
