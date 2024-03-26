@@ -313,6 +313,19 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
 
     default:
         // Handle callback queries
+        var timezone sql.NullString
+        err := db.QueryRow("SELECT timezone FROM users WHERE user_id = ?", userID).Scan(&timezone)
+        if err != nil && err != sql.ErrNoRows {
+            log.Printf("Failed to check timezone: %v", err)
+            return err
+        }
+    
+        if !timezone.Valid {
+            msg := tgbotapi.NewMessage(message.Chat.ID, "Please enter your location or timezone (e.g., 'New York' or 'America/New_York'):")
+            bot.Send(msg)
+            setUserState(userID, stateWaitingForTimezone, db)
+            return nil
+        }
         if message.Text == "/start" {
             setUserState(userID, stateDefault, db)
             delete(userInputs, userID)
