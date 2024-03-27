@@ -224,15 +224,6 @@ func getTodayFoodEntries(userID int64, db *sql.DB) ([]FoodEntry, error) {
     return entries, nil
 }
 
-func deleteFoodEntry(entryID int64, db *sql.DB) error {
-	_, err := db.Exec("DELETE FROM food_entries WHERE entry_id = ?", entryID)
-	if err != nil {
-		log.Printf("Failed to delete food entry: %v", err)
-		return err
-	}
-	return nil
-}
-
 func getTodayFoodEntriesWithPagination(userID int64, offset int, db *sql.DB) ([]FoodEntry, error) {
     var entries []FoodEntry
     var timezone string

@@ -647,19 +647,16 @@ func fetchFoodEntries(bot *tgbotapi.BotAPI, chatID int64, userID int64, db *sql.
 
     var rows [][]tgbotapi.InlineKeyboardButton
     for _, entry := range entries {
-        var buttonText string
-        if entry.Name.Valid {
-            buttonText = fmt.Sprintf("%s - Calories: %.2f, Grams: %.2f", entry.Name.String, entry.Calories, entry.Grams)
-        } else {
-            buttonText = fmt.Sprintf("Calories: %.2f, Grams: %.2f", entry.Calories, entry.Grams)
-        }
-//        amendButton := tgbotapi.NewInlineKeyboardButtonData("Amend", fmt.Sprintf("amend_entry_%d", entry.EntryID))
+        // var buttonText string
+        // if entry.Name.Valid {
+        //     buttonText = fmt.Sprintf("%s - Calories: %.2f, Grams: %.2f", entry.Name.String, entry.Calories, entry.Grams)
+        // } else {
+        //     buttonText = fmt.Sprintf("Calories: %.2f, Grams: %.2f", entry.Calories, entry.Grams)
+        // }
         deleteButton := tgbotapi.NewInlineKeyboardButtonData("Delete", fmt.Sprintf("delete_entry_%d", entry.EntryID))
-//        row := []tgbotapi.InlineKeyboardButton{amendButton, deleteButton}
         row := []tgbotapi.InlineKeyboardButton{deleteButton}
         rows = append(rows, row)
     }
-
 
     var keyboardRows [][]tgbotapi.InlineKeyboardButton
     if offset > 0 {
