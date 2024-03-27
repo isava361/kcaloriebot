@@ -48,7 +48,7 @@ var defaultkeyboard = tgbotapi.NewReplyKeyboard(
     tgbotapi.NewKeyboardButtonRow(
         tgbotapi.NewKeyboardButton("Statistics"),
         tgbotapi.NewKeyboardButton("Search Favorites"),            
-        tgbotapi.NewKeyboardButton("Manage Favorites"),
+        tgbotapi.NewKeyboardButton("My Favorites"),
     ),
 )
 
@@ -597,7 +597,7 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
             setUserState(userID, stateWaitingForFavoriteSearch, db)
             msg := tgbotapi.NewMessage(message.Chat.ID, "Enter the name or part of the name of the product to search:")
             bot.Send(msg)
-        } else if message.Text == "Manage Favorites" {
+        } else if message.Text == "My Favorites" {
             offset := 0
             err := fetchFavoriteFoods(bot, message.Chat.ID, userID, db, offset, 0)
             if err != nil {
@@ -614,19 +614,8 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
 }
 
 func sendDefaultKeyboard(bot *tgbotapi.BotAPI, chatID int64) {
-    keyboard := tgbotapi.NewReplyKeyboard(
-        tgbotapi.NewKeyboardButtonRow(
-            tgbotapi.NewKeyboardButton("Add Food"),
-            tgbotapi.NewKeyboardButton("Food Today"),
-        ),
-        tgbotapi.NewKeyboardButtonRow(
-            tgbotapi.NewKeyboardButton("Statistics"),
-            tgbotapi.NewKeyboardButton("Search Favorites"),
-            tgbotapi.NewKeyboardButton("Manage Favorites"),
-        ),
-    )
     msg := tgbotapi.NewMessage(chatID, "Select an option:")
-    msg.ReplyMarkup = keyboard
+    msg.ReplyMarkup = defaultkeyboard
     bot.Send(msg)
 }
 
