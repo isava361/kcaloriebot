@@ -442,11 +442,13 @@ func main() {
 				)
 			
 				// Update the message with the selected favorite details and options
+				var editMsg tgbotapi.EditMessageTextConfig
 				if entry.Name.Valid {
-					editMsg := tgbotapi.NewEditMessageText(update.CallbackQuery.Message.Chat.ID, update.CallbackQuery.Message.MessageID, fmt.Sprintf("Selected entry: %s\nCalories: %.2f, Protein: %.2f, Fat: %.2f, Carbs: %.2f", entry.Name.String, entry.Calories, entry.Protein.Float64, entry.Fat.Float64, entry.Carbs.Float64))
+					editMsg = tgbotapi.NewEditMessageText(update.CallbackQuery.Message.Chat.ID, update.CallbackQuery.Message.MessageID, fmt.Sprintf("Selected entry: %s\nCalories: %.2f, Protein: %.2f, Fat: %.2f, Carbs: %.2f", entry.Name.String, entry.Calories, entry.Protein.Float64, entry.Fat.Float64, entry.Carbs.Float64))
 				} else {
-					editMsg := tgbotapi.NewEditMessageText(update.CallbackQuery.Message.Chat.ID, update.CallbackQuery.Message.MessageID, fmt.Sprintf("Selected entry: Calories: %.2f, Protein: %.2f, Fat: %.2f, Carbs: %.2f", entry.Calories, entry.Protein.Float64, entry.Fat.Float64, entry.Carbs.Float64))
+					editMsg = tgbotapi.NewEditMessageText(update.CallbackQuery.Message.Chat.ID, update.CallbackQuery.Message.MessageID, fmt.Sprintf("Selected entry: Calories: %.2f, Protein: %.2f, Fat: %.2f, Carbs: %.2f", entry.Calories, entry.Protein.Float64, entry.Fat.Float64, entry.Carbs.Float64))
 				}
+				
 				editMsg.ReplyMarkup = &keyboard
 				bot.Send(editMsg)
 			
