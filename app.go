@@ -120,7 +120,7 @@ func main() {
 				// Create the inline keyboard with options for the selected favorite
 				keyboard := tgbotapi.NewInlineKeyboardMarkup(
 					tgbotapi.NewInlineKeyboardRow(
-						tgbotapi.NewInlineKeyboardButtonData("Amend", "amend_"+strconv.FormatInt(favoriteID, 10)),
+						tgbotapi.NewInlineKeyboardButtonData("Amend", "fave_amend_"+strconv.FormatInt(favoriteID, 10)),
 						tgbotapi.NewInlineKeyboardButtonData("Delete", "favedelete_"+strconv.FormatInt(favoriteID, 10)),
 					),
 				)
@@ -135,8 +135,8 @@ func main() {
 				if _, err := bot.Request(callbackConfig); err != nil {
 					log.Printf("Error sending callback response: %s", err)
 				}
-			} else if strings.HasPrefix(update.CallbackQuery.Data, "amend_") {
-				favoriteID, err := strconv.ParseInt(strings.TrimPrefix(update.CallbackQuery.Data, "amend_"), 10, 64)
+			} else if strings.HasPrefix(update.CallbackQuery.Data, "fave_amend_") {
+				favoriteID, err := strconv.ParseInt(strings.TrimPrefix(update.CallbackQuery.Data, "fave_amend_"), 10, 64)
 				if err != nil {
 					log.Printf("Invalid favorite ID: %s", err)
 					callbackConfig := tgbotapi.NewCallback(update.CallbackQuery.ID, "Invalid favorite ID")
@@ -158,7 +158,7 @@ func main() {
 				}
 			
 				// Ask the user what they want to amend
-				msg := tgbotapi.NewMessage(update.CallbackQuery.Message.Chat.ID, "What do you want to amend?")
+				editMsg := tgbotapi.NewEditMessageText(update.CallbackQuery.Message.Chat.ID, update.CallbackQuery.Message.MessageID, "What do you want to amend?")
 				amendOptions := tgbotapi.NewInlineKeyboardMarkup(
 					tgbotapi.NewInlineKeyboardRow(
 						tgbotapi.NewInlineKeyboardButtonData("Calories", "calories_amend_"+strconv.FormatInt(favoriteID, 10)),
@@ -172,8 +172,8 @@ func main() {
 						tgbotapi.NewInlineKeyboardButtonData("Cancel", "cancel_all",),
 					),
 				)
-				msg.ReplyMarkup = amendOptions
-				bot.Send(msg)
+				editMsg.ReplyMarkup = amendOptions
+				bot.Send(editMsg)
 			
 				// Answer the callback query
 				callbackConfig := tgbotapi.NewCallback(update.CallbackQuery.ID, "")
