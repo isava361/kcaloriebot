@@ -40,6 +40,18 @@ var userFavoriteNutrients = make(map[int64]string)
 
 var userFavorites = make(map[int64]FavoriteFood)
 
+var defaultkeyboard = tgbotapi.NewReplyKeyboard(
+    tgbotapi.NewKeyboardButtonRow(
+        tgbotapi.NewKeyboardButton("Add Food"),
+        tgbotapi.NewKeyboardButton("Food Today"),
+    ),
+    tgbotapi.NewKeyboardButtonRow(
+        tgbotapi.NewKeyboardButton("Statistics"),
+        tgbotapi.NewKeyboardButton("Search Favorites"),            
+        tgbotapi.NewKeyboardButton("Manage Favorites"),
+    ),
+)
+
 func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) error {
     userID := message.From.ID
 
@@ -53,18 +65,6 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
 	cancelkeyboard := tgbotapi.NewReplyKeyboard(
         tgbotapi.NewKeyboardButtonRow(
             tgbotapi.NewKeyboardButton("Cancel"),
-        ),
-    )
-
-    defaultkeyboard := tgbotapi.NewReplyKeyboard(
-        tgbotapi.NewKeyboardButtonRow(
-            tgbotapi.NewKeyboardButton("Add Food"),
-            tgbotapi.NewKeyboardButton("Food Today"),
-        ),
-        tgbotapi.NewKeyboardButtonRow(
-            tgbotapi.NewKeyboardButton("Statistics"),
-            tgbotapi.NewKeyboardButton("Search Favorites"),            
-            tgbotapi.NewKeyboardButton("Manage Favorites"),
         ),
     )
 
