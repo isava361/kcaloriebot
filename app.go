@@ -82,8 +82,10 @@ func main() {
 				}
 			
 				// Ask the user to enter the grams for the selected favorite product
-				msg := tgbotapi.NewMessage(update.CallbackQuery.Message.Chat.ID, fmt.Sprintf("Enter the grams for %s:", favorite.Name))
-				bot.Send(msg)
+				editMsg := tgbotapi.NewEditMessageText(update.CallbackQuery.Message.Chat.ID, update.CallbackQuery.Message.MessageID, fmt.Sprintf("Enter the grams for %s:", favorite.Name))
+				keyboard := tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Cancel", "cancel_all"),),)
+				editMsg.ReplyMarkup = &keyboard
+				bot.Send(editMsg)
 			
 				// Store the selected favorite product in the user's state
 				setUserState(update.CallbackQuery.From.ID, stateWaitingForFavoriteGrams, db)
