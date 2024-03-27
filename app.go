@@ -326,8 +326,13 @@ func main() {
 					nutrient = "carbs"
 				}
 			
-				msg := tgbotapi.NewMessage(update.CallbackQuery.Message.Chat.ID, fmt.Sprintf("Enter the new value for %s:", nutrient))
-				bot.Send(msg)
+				editMsg := tgbotapi.NewEditMessageText(update.CallbackQuery.Message.Chat.ID, update.CallbackQuery.Message.MessageID, fmt.Sprintf("Enter the new value for %s:", nutrient))
+				keyboard := tgbotapi.NewInlineKeyboardMarkup(
+					tgbotapi.NewInlineKeyboardRow(
+						tgbotapi.NewInlineKeyboardButtonData("Cancel", "cancel_all"),),
+				)
+				editMsg.ReplyMarkup = &keyboardeyboard
+				bot.Send(editMsg)
 			
 				// Store the selected favorite product and nutrient in the user's state
 				setUserState(update.CallbackQuery.From.ID, stateWaitingForFavoriteAmendment, db)
