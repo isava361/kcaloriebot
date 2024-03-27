@@ -125,6 +125,7 @@ func main() {
 				// Create the inline keyboard with options for the selected favorite
 				keyboard := tgbotapi.NewInlineKeyboardMarkup(
 					tgbotapi.NewInlineKeyboardRow(
+						tgbotapi.NewInlineKeyboardButtonData("Use", "favorite_"+strconv.FormatInt(favoriteID, 10)),
 						tgbotapi.NewInlineKeyboardButtonData("Amend", "fave_amend_"+strconv.FormatInt(favoriteID, 10)),
 						tgbotapi.NewInlineKeyboardButtonData("Delete", "favedelete_"+strconv.FormatInt(favoriteID, 10)),
 					),
