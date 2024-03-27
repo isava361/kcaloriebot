@@ -393,7 +393,6 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
         if len(favorites) == 0 {
             msg := tgbotapi.NewMessage(message.Chat.ID, "No matching favorite products found.")
             bot.Send(msg)
-            setUserState(userID, stateDefault, db)
         } else {
             var rows [][]tgbotapi.InlineKeyboardButton
             for _, favorite := range favorites {
@@ -595,6 +594,8 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
         } else if message.Text == "Search Favorites" {
             setUserState(userID, stateWaitingForFavoriteSearch, db)
             msg := tgbotapi.NewMessage(message.Chat.ID, "Enter the name or part of the name of the product to search:")
+            keyboard := tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Cancel", "cancel_all"),),)
+            msg.ReplyMarkup = &keyboard
             bot.Send(msg)
         } else if message.Text == "My Favorites" {
             offset := 0
