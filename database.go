@@ -475,3 +475,13 @@ func deleteFoodEntry(entryID int64, db *sql.DB) error {
     }
     return nil
 }
+
+func getEntry(entryID int64, db *sql.DB) (FoodEntry, error) {
+    var entry FoodEntry
+    err := db.QueryRow("SELECT entry_id, name, calories, grams, protein, fat, carbs FROM food_entries WHERE entry_id = ?", entryID).Scan(&entry.EntryID, &entry.Name, &entry.Calories, &entry.Grams, &entry.Protein, &entry.Fat, &entry.Carbs)
+    if err != nil {
+        log.Printf("Failed to get food entry: %v", err)
+        return entry, err
+    }
+    return entry, nil
+}

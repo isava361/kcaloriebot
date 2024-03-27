@@ -342,8 +342,8 @@ func main() {
 				if err != nil {
 					log.Printf("Failed to fetch favorite foods: %v", err)
 				}
-			} else if strings.HasPrefix(update.CallbackQuery.Data, "delete_entry_") {
-				entryID, err := strconv.ParseInt(strings.TrimPrefix(update.CallbackQuery.Data, "delete_entry_"), 10, 64)
+			} else if strings.HasPrefix(update.CallbackQuery.Data, "entry_delete_") {
+				entryID, err := strconv.ParseInt(strings.TrimPrefix(update.CallbackQuery.Data, "entry_delete_"), 10, 64)
 				if err != nil {
 					log.Printf("Invalid food entry ID: %s", err)
 					callbackConfig := tgbotapi.NewCallback(update.CallbackQuery.ID, "Invalid food entry ID")
@@ -405,6 +405,45 @@ func main() {
 			} else if strings.HasPrefix(update.CallbackQuery.Data, "cancel_delete_entry_") {
 				// Update the message to cancel the deletion
 				editMsg := tgbotapi.NewEditMessageText(update.CallbackQuery.Message.Chat.ID, update.CallbackQuery.Message.MessageID, "Deletion cancelled.")
+				bot.Send(editMsg)
+			
+				// Answer the callback query
+				callbackConfig := tgbotapi.NewCallback(update.CallbackQuery.ID, "")
+				if _, err := bot.Request(callbackConfig); err != nil {
+					log.Printf("Error sending callback response: %s", err)
+				}
+			} else if strings.HasPrefix(update.CallbackQuery.Data, "entry_choose_") {
+				entryID, err := strconv.ParseInt(strings.TrimPrefix(update.CallbackQuery.Data, "entry_choose_"), 10, 64)
+				if err != nil {
+					log.Printf("Invalid entry ID: %s", err)
+					callbackConfig := tgbotapi.NewCallback(update.CallbackQuery.ID, "Invalid entry ID")
+					if _, err := bot.Request(callbackConfig); err != nil {
+						log.Printf("Error sending callback response: %s", err)
+					}
+					continue
+				}
+			
+				// Retrieve the entry details from the database
+				entry, err := getEntry(entryID, db)
+				if err != nil {
+					log.Printf("Failed to retrieve entry: %s", err)
+					callbackConfig := tgbotapi.NewCallback(update.CallbackQuery.ID, "Failed to retrieve entry")
+					if _, err := bot.Request(callbackConfig); err != nil {
+						log.Printf("Error sending callback response: %s", err)
+					}
+					continue
+				}
+			
+				// Create the inline keyboard with options for the selected entry
+				keyboard := tgbotapi.NewInlineKeyboardMarkup(
+					tgbotapi.NewInlineKeyboardRow(
+						tgbotapi.NewInlineKeyboardButtonData("Delete", "entry_delete_"+strconv.FormatInt(entryID, 10)),
+					),
+				)
+			
+				// Update the message with the selected favorite details and options
+				editMsg := tgbotapi.NewEditMessageText(update.CallbackQuery.Message.Chat.ID, update.CallbackQuery.Message.MessageID, fmt.Sprintf("Selected entry: %s\nCalories: %.2f, Protein: %.2f, Fat: %.2f, Carbs: %.2f", entry.Name, entry.Calories, entry.Protein.Float64, entry.Fat.Float64, entry.Carbs.Float64))
+				editMsg.ReplyMarkup = &keyboard
 				bot.Send(editMsg)
 			
 				// Answer the callback query

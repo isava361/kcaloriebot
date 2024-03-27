@@ -653,6 +653,9 @@ func fetchFoodEntries(bot *tgbotapi.BotAPI, chatID int64, userID int64, db *sql.
         } else {
             buttonText = fmt.Sprintf("Calories: %.2f, Grams: %.2f", entry.Calories, entry.Grams)
         }
+        button := tgbotapi.NewInlineKeyboardButtonData(buttonText, fmt.Sprintf("entry_choose_%d", entry.EntryID))
+        row := []tgbotapi.InlineKeyboardButton{button}
+        rows = append(rows, row)
     }
 
 
