@@ -172,7 +172,7 @@ func main() {
 						tgbotapi.NewInlineKeyboardButtonData("Cancel", "cancel_all",),
 					),
 				)
-				editMsg.ReplyMarkup = amendOptions
+				editMsg.ReplyMarkup = &amendOptions
 				bot.Send(editMsg)
 			
 				// Answer the callback query
