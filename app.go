@@ -342,6 +342,33 @@ func main() {
 				if err != nil {
 					log.Printf("Failed to fetch favorite foods: %v", err)
 				}
+			} else if strings.HasPrefix(update.CallbackQuery.Data, "amend_entry_") {
+                entryID, err := strconv.ParseInt(strings.TrimPrefix(update.CallbackQuery.Data, "amend_entry_"), 10, 64)
+                if err != nil {
+                    log.Printf("Invalid food entry ID: %s", err)
+                    callbackConfig := tgbotapi.NewCallback(update.CallbackQuery.ID, "Invalid food entry ID")
+                    if _, err := bot.Request(callbackConfig); err != nil {
+                        log.Printf("Error sending callback response: %s", err)
+                    }
+                    continue
+                }
+
+                // Implement the logic to amend the food entry with the given entryID
+                // Similar to the amend logic for favorite foods, but using updateFoodEntry function
+
+            } else if strings.HasPrefix(update.CallbackQuery.Data, "delete_entry_") {
+                entryID, err := strconv.ParseInt(strings.TrimPrefix(update.CallbackQuery.Data, "delete_entry_"), 10, 64)
+                if err != nil {
+                    log.Printf("Invalid food entry ID: %s", err)
+                    callbackConfig := tgbotapi.NewCallback(update.CallbackQuery.ID, "Invalid food entry ID")
+                    if _, err := bot.Request(callbackConfig); err != nil {
+                        log.Printf("Error sending callback response: %s", err)
+                    }
+                    continue
+                } 
+
+			// Implement the logic to delete the food entry with the given entryID
+             // Similar to the delete logic for favorite foods, but using deleteFoodEntry function
 			} else {
                 log.Printf("Unhandled callback data: %s", update.CallbackQuery.Data)
                 callbackConfig := tgbotapi.NewCallback(update.CallbackQuery.ID, "Unhandled callback data")
