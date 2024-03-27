@@ -357,8 +357,8 @@ func main() {
 				confirmationText := "Are you sure you want to delete this food entry?"
 				confirmationKeyboard := tgbotapi.NewInlineKeyboardMarkup(
 					tgbotapi.NewInlineKeyboardRow(
-						tgbotapi.NewInlineKeyboardButtonData("Yes", "confirm_delete_entry_"+strconv.FormatInt(entryID, 10)),
-						tgbotapi.NewInlineKeyboardButtonData("No", "cancel_delete_entry_"+strconv.FormatInt(entryID, 10)),
+						tgbotapi.NewInlineKeyboardButtonData("Yes", "entry_confirm_delete_"+strconv.FormatInt(entryID, 10)),
+						tgbotapi.NewInlineKeyboardButtonData("No", "entry_cancel_delete_"+strconv.FormatInt(entryID, 10)),
 					),
 				)
 			
@@ -371,8 +371,8 @@ func main() {
 				if _, err := bot.Request(callbackConfig); err != nil {
 					log.Printf("Error sending callback response: %s", err)
 				}
-			} else if strings.HasPrefix(update.CallbackQuery.Data, "confirm_delete_entry_") {
-				entryID, err := strconv.ParseInt(strings.TrimPrefix(update.CallbackQuery.Data, "confirm_delete_entry_"), 10, 64)
+			} else if strings.HasPrefix(update.CallbackQuery.Data, "entry_confirm_delete_") {
+				entryID, err := strconv.ParseInt(strings.TrimPrefix(update.CallbackQuery.Data, "entry_confirm_delete_"), 10, 64)
 				if err != nil {
 					log.Printf("Invalid food entry ID: %s", err)
 					callbackConfig := tgbotapi.NewCallback(update.CallbackQuery.ID, "Invalid food entry ID")
@@ -402,7 +402,7 @@ func main() {
 				if _, err := bot.Request(callbackConfig); err != nil {
 					log.Printf("Error sending callback response: %s", err)
 				}
-			} else if strings.HasPrefix(update.CallbackQuery.Data, "cancel_delete_entry_") {
+			} else if strings.HasPrefix(update.CallbackQuery.Data, "entry_cancel_delete_") {
 				// Update the message to cancel the deletion
 				editMsg := tgbotapi.NewEditMessageText(update.CallbackQuery.Message.Chat.ID, update.CallbackQuery.Message.MessageID, "Deletion cancelled.")
 				bot.Send(editMsg)
