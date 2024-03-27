@@ -168,6 +168,9 @@ func main() {
 						tgbotapi.NewInlineKeyboardButtonData("Fat", "fat_amend_"+strconv.FormatInt(favoriteID, 10)),
 						tgbotapi.NewInlineKeyboardButtonData("Carbs", "carbs_amend_"+strconv.FormatInt(favoriteID, 10)),
 					),
+					tgbotapi.NewInlineKeyboardRow(
+						tgbotapi.NewInlineKeyboardButtonData("Cancel", "cancel_all",),
+					),
 				)
 				msg.ReplyMarkup = amendOptions
 				bot.Send(msg)
@@ -203,8 +206,8 @@ func main() {
 				confirmationText := fmt.Sprintf("Are you sure you want to delete the favorite: %s?", favorite.Name)
 				confirmationKeyboard := tgbotapi.NewInlineKeyboardMarkup(
 					tgbotapi.NewInlineKeyboardRow(
-						tgbotapi.NewInlineKeyboardButtonData("Yes", "confirm_delete_"+strconv.FormatInt(favoriteID, 10)),
-						tgbotapi.NewInlineKeyboardButtonData("No", "cancel_delete_"+strconv.FormatInt(favoriteID, 10)),
+						tgbotapi.NewInlineKeyboardButtonData("Yes", "fave_confirm_delete_"+strconv.FormatInt(favoriteID, 10)),
+						tgbotapi.NewInlineKeyboardButtonData("No", "fave_cancel_delete_"+strconv.FormatInt(favoriteID, 10)),
 					),
 				)
 			
@@ -217,8 +220,8 @@ func main() {
 				if _, err := bot.Request(callbackConfig); err != nil {
 					log.Printf("Error sending callback response: %s", err)
 				}
-			} else if strings.HasPrefix(update.CallbackQuery.Data, "confirm_delete_") {
-				favoriteID, err := strconv.ParseInt(strings.TrimPrefix(update.CallbackQuery.Data, "confirm_delete_"), 10, 64)
+			} else if strings.HasPrefix(update.CallbackQuery.Data, "fave_confirm_delete_") {
+				favoriteID, err := strconv.ParseInt(strings.TrimPrefix(update.CallbackQuery.Data, "fave_confirm_delete_"), 10, 64)
 				if err != nil {
 					log.Printf("Invalid favorite ID: %s", err)
 					callbackConfig := tgbotapi.NewCallback(update.CallbackQuery.ID, "Invalid favorite ID")
@@ -248,7 +251,7 @@ func main() {
 				if _, err := bot.Request(callbackConfig); err != nil {
 					log.Printf("Error sending callback response: %s", err)
 				}
-			} else if strings.HasPrefix(update.CallbackQuery.Data, "cancel_delete_") {
+			} else if strings.HasPrefix(update.CallbackQuery.Data, "fave_cancel_delete_") {
 				// Update the message to cancel the deletion
 				editMsg := tgbotapi.NewEditMessageText(update.CallbackQuery.Message.Chat.ID, update.CallbackQuery.Message.MessageID, "Deletion cancelled.")
 				bot.Send(editMsg)
@@ -450,6 +453,16 @@ func main() {
 				}
 				
 				editMsg.ReplyMarkup = &keyboard
+				bot.Send(editMsg)
+			
+				// Answer the callback query
+				callbackConfig := tgbotapi.NewCallback(update.CallbackQuery.ID, "")
+				if _, err := bot.Request(callbackConfig); err != nil {
+					log.Printf("Error sending callback response: %s", err)
+				}
+			} else if update.CallbackQuery.Data == "cancel_all" {
+				// Update the message to cancel the deletion
+				editMsg := tgbotapi.NewEditMessageText(update.CallbackQuery.Message.Chat.ID, update.CallbackQuery.Message.MessageID, "Cancelled.")
 				bot.Send(editMsg)
 			
 				// Answer the callback query
