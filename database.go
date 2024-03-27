@@ -392,7 +392,7 @@ func fetchFavoriteFoods(bot *tgbotapi.BotAPI, chatID int64, userID int64, db *sq
     var rows [][]tgbotapi.InlineKeyboardButton
     for _, favorite := range favorites {
         buttonText := fmt.Sprintf("%s - Calories: %.2f, Protein: %.2f, Fat: %.2f, Carbs: %.2f", favorite.Name, favorite.Calories, favorite.Protein.Float64, favorite.Fat.Float64, favorite.Carbs.Float64)
-        button := tgbotapi.NewInlineKeyboardButtonData(buttonText, fmt.Sprintf("favorite_%d", favorite.FavoriteID))
+        button := tgbotapi.NewInlineKeyboardButtonData(buttonText, fmt.Sprintf("choose_favorite_%d", favorite.FavoriteID))
         row := []tgbotapi.InlineKeyboardButton{button}
         rows = append(rows, row)
     }

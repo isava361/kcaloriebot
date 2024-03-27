@@ -100,8 +100,8 @@ func main() {
 				if err != nil {
 					log.Printf("Failed to fetch food entries: %v", err)
 				}
-			} else if strings.HasPrefix(update.CallbackQuery.Data, "favorite_") {
-				favoriteID, err := strconv.ParseInt(strings.TrimPrefix(update.CallbackQuery.Data, "favorite_"), 10, 64)
+			} else if strings.HasPrefix(update.CallbackQuery.Data, "choose_favorite_") {
+				favoriteID, err := strconv.ParseInt(strings.TrimPrefix(update.CallbackQuery.Data, "choose_favorite_"), 10, 64)
 				if err != nil {
 					log.Printf("Invalid favorite ID: %s", err)
 					callbackConfig := tgbotapi.NewCallback(update.CallbackQuery.ID, "Invalid favorite ID")
