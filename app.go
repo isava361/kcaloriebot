@@ -331,7 +331,7 @@ func main() {
 					tgbotapi.NewInlineKeyboardRow(
 						tgbotapi.NewInlineKeyboardButtonData("Cancel", "cancel_all"),),
 				)
-				editMsg.ReplyMarkup = &keyboardeyboard
+				editMsg.ReplyMarkup = &keyboard
 				bot.Send(editMsg)
 			
 				// Store the selected favorite product and nutrient in the user's state
