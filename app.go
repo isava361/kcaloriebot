@@ -466,7 +466,7 @@ func main() {
 					log.Printf("Error sending callback response: %s", err)
 				}
 			} else if update.CallbackQuery.Data == "cancel_all" {
-				setUserState(update.CallbackQuery.Message.UserID, stateDefault, db)
+				setUserState(update.CallbackQuery.From.ID, stateDefault, db)
 				// Update the message to cancel the deletion
 				editMsg := tgbotapi.NewEditMessageText(update.CallbackQuery.Message.Chat.ID, update.CallbackQuery.Message.MessageID, "Cancelled.")
 				editMsg.ReplyMarkup = &defaultkeyboard
