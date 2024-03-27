@@ -6,7 +6,6 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	_ "github.com/mattn/go-sqlite3"
     "fmt"
-    "strings"
 )
 
 type FoodEntry struct {
@@ -280,7 +279,7 @@ func addFavoriteFood(userID int64, name string, calories float64, protein, fat, 
 }
 
 func searchFavoriteFoods(userID int64, query string, db *sql.DB) ([]FavoriteFood, error) {
-    rows, err := db.Query("SELECT favorite_id, name, calories, protein, fat, carbs FROM favorite_foods WHERE user_id = ? AND LOWER(name) LIKE ?", userID, "%"+strings.ToLower(query)+"%")
+    rows, err := db.Query("SELECT favorite_id, name, calories, protein, fat, carbs FROM favorite_foods WHERE user_id = ? AND name LIKE ?", userID, "%"+query+"%")
     if err != nil {
         log.Printf("Failed to search favorite foods: %v", err)
         return nil, err
