@@ -278,8 +278,8 @@ func addFavoriteFood(userID int64, name string, calories float64, protein, fat, 
     return nil
 }
 func searchFavoriteFoods(userID int64, query string, db *sql.DB) ([]FavoriteFood, error) {
-    log.Printf("Searching favorite foods: userID=%d, query=%q", userID, query)
-    rows, err := db.Query("SELECT favorite_id, name, calories, protein, fat, carbs FROM favorite_foods WHERE user_id = ? AND LOWER(name) LIKE LOWER(?)", userID, "%"+query+"%")
+    query = "%" + strings.ToLower(query) + "%"
+    rows, err := db.Query("SELECT favorite_id, name, calories, protein, fat, carbs FROM favorite_foods WHERE user_id = ? AND name LIKE ?", userID, query)
     if err != nil {
         log.Printf("Failed to search favorite foods: %v", err)
         return nil, err
@@ -294,13 +294,13 @@ func searchFavoriteFoods(userID int64, query string, db *sql.DB) ([]FavoriteFood
             log.Printf("Failed to scan favorite food: %v", err)
             return nil, err
         }
-        favorites = append(favorites, favorite)
+        if strings.Contains(strings.ToLower(favorite.Name), strings.ToLower(query[1:len(query)-1])) {
+            favorites = append(favorites, favorite)
+        }
     }
 
-    log.Printf("Search results: %+v", favorites)
     return favorites, nil
 }
-
 func getFavoriteFood(favoriteID int64, db *sql.DB) (FavoriteFood, error) {
     var favorite FavoriteFood
     err := db.QueryRow("SELECT favorite_id, name, calories, protein, fat, carbs FROM favorite_foods WHERE favorite_id = ?", favoriteID).Scan(&favorite.FavoriteID, &favorite.Name, &favorite.Calories, &favorite.Protein, &favorite.Fat, &favorite.Carbs)
