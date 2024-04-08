@@ -358,7 +358,25 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
 
     case stateWaitingForFavoriteOption:
         if message.Text == "Yes" {
-            err := addFavoriteFood(userID, input.Name.String, input.Calories, input.Protein, input.Fat, carbsNull, db)
+            if input.Protein.Valid{
+                favouriteProtein := ql.NullFloat64{Float64: input.Protein.Float64 / grams * 100, Valid: true}
+                } else {
+                favouriteProtein := ql.NullFloat64{Valid: false}
+            }
+
+            if input.Fat.Valid{
+                favouriteFat := ql.NullFloat64{Float64: input.Fat.Float64 / grams * 100, Valid: true}
+            } else {
+                favouriteFat := ql.NullFloat64{Valid: false}
+            }
+            if carbsNull.Valid{
+                favouriteCarbs := ql.NullFloat64{Float64: carbsNull.Float64 / grams * 100, Valid: true}
+            } else {
+                favouriteCarbs := ql.NullFloat64{Valid: false}
+            }
+            
+        
+            err := addFavoriteFood(userID, input.Name.String, input.Calories, favouriteProtein, favouriteFat, favouriteCarbs, db)
             if err != nil {
                 msg := tgbotapi.NewMessage(message.Chat.ID, "Failed to save the product as a favorite. Please try again.")
                 bot.Send(msg)
