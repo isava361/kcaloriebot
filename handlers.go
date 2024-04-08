@@ -40,6 +40,8 @@ var userFavoriteNutrients = make(map[int64]string)
 
 var userFavorites = make(map[int64]FavoriteFood)
 
+var carbsNull = sql.NullFloat64{Valid: false}
+
 var defaultkeyboard = tgbotapi.NewReplyKeyboard(
     tgbotapi.NewKeyboardButtonRow(
         tgbotapi.NewKeyboardButton("Add Food"),
@@ -268,7 +270,7 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
             grams := input.Grams
             protein := input.Protein
             fat := input.Fat
-            carbsNull := sql.NullFloat64{Valid: false}
+            carbsNull = sql.NullFloat64{Valid: false}
             err := addFood(userID, name, calories*grams/100, grams, protein, fat, carbsNull, db)
             if err != nil {
                 msg := tgbotapi.NewMessage(message.Chat.ID, "Failed to add food entry. Please try again.")
@@ -329,7 +331,7 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
                 setUserState(userID, stateDefault, db)
                 return nil
             }
-            carbsNull := sql.NullFloat64{Float64: carbs * input.Grams / 100, Valid: true}
+            carbsNull = sql.NullFloat64{Float64: carbs * input.Grams / 100, Valid: true}
             err = addFood(userID, name, calories*grams/100, grams, protein, fat, carbsNull, db)
             if err != nil {
                 msg := tgbotapi.NewMessage(message.Chat.ID, "Failed to add food entry. Please try again.")
@@ -358,21 +360,25 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
 
     case stateWaitingForFavoriteOption:
         if message.Text == "Yes" {
+            var favouriteProtein = sql.NullFloat64{Valid: false}
+            var favouriteFat = sql.NullFloat64{Valid: false}
+            var favouriteCarbs = sql.NullFloat64{Valid: false}
+        
             if input.Protein.Valid{
-                favouriteProtein := sql.NullFloat64{Float64: input.Protein.Float64 / input.Grams * 100, Valid: true}
+                favouriteProtein = sql.NullFloat64{Float64: input.Protein.Float64 / input.Grams * 100, Valid: true}
                 } else {
-                favouriteProtein := sql.NullFloat64{Valid: false}
+                favouriteProtein = sql.NullFloat64{Valid: false}
             }
 
             if input.Fat.Valid{
-                favouriteFat := sql.NullFloat64{Float64: input.Fat.Float64 / input.Grams * 100, Valid: true}
+                favouriteFat = sql.NullFloat64{Float64: input.Fat.Float64 / input.Grams * 100, Valid: true}
             } else {
-                favouriteFat := sql.NullFloat64{Valid: false}
+                favouriteFat = sql.NullFloat64{Valid: false}
             }
             if carbsNull.Valid{
-                favouriteCarbs := sql.NullFloat64{Float64: carbsNull.Float64 / input.Grams * 100, Valid: true}
+                favouriteCarbs = sql.NullFloat64{Float64: carbsNull.Float64 / input.Grams * 100, Valid: true}
             } else {
-                favouriteCarbs := sql.NullFloat64{Valid: false}
+                favouriteCarbs = sql.NullFloat64{Valid: false}
             }
             
         
