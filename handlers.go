@@ -358,7 +358,7 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
 
     case stateWaitingForFavoriteOption:
         if message.Text == "Yes" {
-            err := addFavoriteFood(userID, input.Name.String, input.Calories, input.Protein, input.Fat, input.Carbs, db)
+            err := addFavoriteFood(userID, input.Name.String, input.Calories, input.Protein, input.Fat, carbsNull, db)
             if err != nil {
                 msg := tgbotapi.NewMessage(message.Chat.ID, "Failed to save the product as a favorite. Please try again.")
                 bot.Send(msg)
