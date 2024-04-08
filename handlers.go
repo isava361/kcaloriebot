@@ -359,20 +359,20 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, db *sql.DB) 
     case stateWaitingForFavoriteOption:
         if message.Text == "Yes" {
             if input.Protein.Valid{
-                favouriteProtein := ql.NullFloat64{Float64: input.Protein.Float64 / grams * 100, Valid: true}
+                favouriteProtein := sql.NullFloat64{Float64: input.Protein.Float64 / input.Grams * 100, Valid: true}
                 } else {
-                favouriteProtein := ql.NullFloat64{Valid: false}
+                favouriteProtein := sql.NullFloat64{Valid: false}
             }
 
             if input.Fat.Valid{
-                favouriteFat := ql.NullFloat64{Float64: input.Fat.Float64 / grams * 100, Valid: true}
+                favouriteFat := sql.NullFloat64{Float64: input.Fat.Float64 / input.Grams * 100, Valid: true}
             } else {
-                favouriteFat := ql.NullFloat64{Valid: false}
+                favouriteFat := sql.NullFloat64{Valid: false}
             }
             if carbsNull.Valid{
-                favouriteCarbs := ql.NullFloat64{Float64: carbsNull.Float64 / grams * 100, Valid: true}
+                favouriteCarbs := sql.NullFloat64{Float64: carbsNull.Float64 / input.Grams * 100, Valid: true}
             } else {
-                favouriteCarbs := ql.NullFloat64{Valid: false}
+                favouriteCarbs := sql.NullFloat64{Valid: false}
             }
             
         
