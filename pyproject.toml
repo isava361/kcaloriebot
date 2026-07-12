@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kcaloriebot"
+version = "1.0.0"
+description = "A private Telegram calorie and macronutrient tracker"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "python-telegram-bot==22.8",
+    "tzdata>=2025.2; sys_platform == 'win32'",
+]
+
+[project.optional-dependencies]
+dev = ["ruff==0.15.21"]
+
+[project.scripts]
+kcaloriebot = "kcaloriebot.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["kcaloriebot*"]
