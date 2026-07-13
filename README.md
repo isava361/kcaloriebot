@@ -81,10 +81,10 @@ separate.
 
 ### 4. Create the systemd service
 
-Create `/etc/systemd/system/kcaloriebot.service`:
+Create `/etc/systemd/system/kcalculatorbot.service`:
 
 ```bash
-sudoedit /etc/systemd/system/kcaloriebot.service
+sudoedit /etc/systemd/system/kcalculatorbot.service
 ```
 
 Use this unit definition:
@@ -121,12 +121,18 @@ ReadWritePaths=/var/lib/kcaloriebot
 WantedBy=multi-user.target
 ```
 
+Note the naming: only the systemd unit is called `kcalculatorbot.service`, so
+`systemctl` and `journalctl` commands use `kcalculatorbot`. The service
+account, the install paths, the environment file, and the Python package that
+`ExecStart` runs are all `kcaloriebot` and must not be renamed to match the
+unit.
+
 Load the unit and start the bot:
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now kcaloriebot
-sudo systemctl status kcaloriebot --no-pager
+sudo systemctl enable --now kcalculatorbot
+sudo systemctl status kcalculatorbot --no-pager
 ```
 
 The database directory and schema are created automatically. SQLite foreign
@@ -138,7 +144,7 @@ are enabled at startup.
 Follow the service logs:
 
 ```bash
-sudo journalctl -u kcaloriebot -f
+sudo journalctl -u kcalculatorbot -f
 ```
 
 Then open a private chat with the bot and send `/start`. Stop following logs
@@ -147,10 +153,10 @@ with `Ctrl+C`; this does not stop the service.
 Useful service commands:
 
 ```bash
-sudo systemctl is-active kcaloriebot
-sudo systemctl restart kcaloriebot
-sudo systemctl stop kcaloriebot
-sudo journalctl -u kcaloriebot -n 100 --no-pager
+sudo systemctl is-active kcalculatorbot
+sudo systemctl restart kcalculatorbot
+sudo systemctl stop kcalculatorbot
+sudo journalctl -u kcalculatorbot -n 100 --no-pager
 ```
 
 ## Updating the Server
@@ -167,14 +173,14 @@ sudo -u kcaloriebot sqlite3 /var/lib/kcaloriebot/kcaloriebot.db \
 test "$(sudo -u kcaloriebot sqlite3 "$BACKUP_PATH" \
   "PRAGMA integrity_check;")" = "ok" && \
 sudo chmod 600 "$BACKUP_PATH" && \
-sudo systemctl stop kcaloriebot && \
+sudo systemctl stop kcalculatorbot && \
 sudo -u kcaloriebot -H git -C /opt/kcaloriebot/app pull --ff-only && \
 sudo -u kcaloriebot -H /opt/kcaloriebot/.venv/bin/python -m pip install \
   -e /opt/kcaloriebot/app && \
 sudo -u kcaloriebot -H /opt/kcaloriebot/.venv/bin/python -m unittest \
   discover -s /opt/kcaloriebot/app/tests -v && \
-sudo systemctl start kcaloriebot && \
-sudo systemctl status kcaloriebot --no-pager
+sudo systemctl start kcalculatorbot && \
+sudo systemctl status kcalculatorbot --no-pager
 ```
 
 The `&&` chain stops immediately if backup creation, integrity verification,
@@ -210,13 +216,13 @@ backup, stop the bot so it cannot write during the operation:
 export RESTORE_PATH="/var/backups/kcaloriebot/backup-file.db"
 test "$(sudo -u kcaloriebot sqlite3 "$RESTORE_PATH" \
   "PRAGMA integrity_check;")" = "ok" && \
-sudo systemctl stop kcaloriebot && \
+sudo systemctl stop kcalculatorbot && \
 sudo -u kcaloriebot sqlite3 /var/lib/kcaloriebot/kcaloriebot.db \
   ".restore '$RESTORE_PATH'" && \
 test "$(sudo -u kcaloriebot sqlite3 \
   /var/lib/kcaloriebot/kcaloriebot.db "PRAGMA integrity_check;")" = "ok" && \
-sudo systemctl start kcaloriebot && \
-sudo systemctl status kcaloriebot --no-pager
+sudo systemctl start kcalculatorbot && \
+sudo systemctl status kcalculatorbot --no-pager
 ```
 
 If validation or restore fails, the command chain does not start the service.
@@ -231,7 +237,7 @@ Resolve the error and check the database before starting it manually.
 - Polling conflict errors: stop any other process or server using the same bot
   token.
 - The service repeatedly restarts: inspect
-  `sudo journalctl -u kcaloriebot -n 100 --no-pager`.
+  `sudo journalctl -u kcalculatorbot -n 100 --no-pager`.
 - Changes are not active after `git pull`: reinstall the project in the virtual
   environment and restart the service as shown in the update procedure.
 
