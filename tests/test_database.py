@@ -7,7 +7,7 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
-from kcaloriebot.database import Database
+from kcaloriebot.database import SCHEMA, Database
 from kcaloriebot.domain import NotFound, SessionState, StateConflict, ValidationError
 
 
@@ -108,6 +108,7 @@ class SessionAndTransactionTests(DatabaseTestCase):
         self.assertAlmostEqual(12.0, entry.nutrition.carbs)
         self.assertEqual(SessionState.WAIT_SAVE_FAVORITE, stored_session.state)
         self.assertEqual(30.0, stored_session.carbs_per_100g)
+        self.assertGreater(stored_session.updated_at_utc, entry.eaten_at_utc)
 
     def test_food_completion_reloads_persisted_draft_fields(self) -> None:
         session = self.ready_food_session(name="Rice")
@@ -294,6 +295,39 @@ class PaginationAndStatsTests(DatabaseTestCase):
         self.assertIsNone(stats.fat)
         self.assertIsNone(stats.carbs)
 
+    def test_daily_average_excludes_day_with_partial_macro_coverage(self) -> None:
+        first = self.database.start_session(
+            1,
+            31,
+            SessionState.WAIT_CARBS,
+            now_utc=1,
+            calories_per_100g=100.0,
+            serving_grams=100.0,
+            protein_per_100g=10.0,
+        )
+        second = self.database.start_session(
+            1,
+            32,
+            SessionState.WAIT_CARBS,
+            now_utc=1,
+            calories_per_100g=100.0,
+            serving_grams=100.0,
+        )
+        self.database.complete_food_draft(first, 1_704_067_200)
+        self.database.complete_food_draft(second, 1_704_067_201)
+
+        stats = self.database.stats(
+            1,
+            1_704_067_200,
+            1_704_153_600,
+            "UTC",
+            average_by_logged_day=True,
+        )
+
+        self.assertIsNone(stats.protein)
+        self.assertEqual(0, stats.protein_coverage)
+        self.assertEqual(1, stats.coverage_total)
+
 
 class SchemaTests(DatabaseTestCase):
     def test_foreign_keys_are_enabled_for_every_connection(self) -> None:
@@ -304,6 +338,60 @@ class SchemaTests(DatabaseTestCase):
     def test_schema_initialization_is_idempotent(self) -> None:
         self.database.initialize()
         self.assertTrue(self.database.foreign_keys_enabled())
+
+    def test_version_one_sessions_are_migrated_with_delivery_fields(self) -> None:
+        version_one_path = Path(self.temporary_directory.name) / "version-one.db"
+        version_one_schema = (
+            SCHEMA.replace(
+                "    prompt_pending INTEGER NOT NULL DEFAULT 0 CHECK (prompt_pending IN (0, 1)),\n",
+                "",
+            )
+            .replace("    last_message_id INTEGER NULL,\n", "")
+            .replace("PRAGMA user_version = 2;", "PRAGMA user_version = 1;")
+        )
+        with sqlite3.connect(version_one_path) as connection:
+            connection.executescript(version_one_schema)
+            connection.execute(
+                """
+                INSERT INTO users(user_id, created_at_utc, updated_at_utc)
+                VALUES (1, 1, 1)
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO sessions(user_id, chat_id, state, updated_at_utc)
+                VALUES (1, 10, 'wait_calories', 1)
+                """
+            )
+
+        migrated = Database(version_one_path)
+        migrated.initialize()
+        session = migrated.get_session(1, 10)
+
+        self.assertFalse(session.prompt_pending)
+        self.assertIsNone(session.last_message_id)
+
+    def test_partially_applied_version_one_migration_is_recovered(self) -> None:
+        version_one_path = (
+            Path(self.temporary_directory.name) / "partial-version-one.db"
+        )
+        partial_schema = SCHEMA.replace(
+            "    last_message_id INTEGER NULL,\n", ""
+        ).replace("PRAGMA user_version = 2;", "PRAGMA user_version = 1;")
+        with sqlite3.connect(version_one_path) as connection:
+            connection.executescript(partial_schema)
+
+        migrated = Database(version_one_path)
+        migrated.initialize()
+        with sqlite3.connect(version_one_path) as connection:
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+            columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(sessions)")
+            }
+
+        self.assertEqual(2, version)
+        self.assertIn("prompt_pending", columns)
+        self.assertIn("last_message_id", columns)
 
     def test_nan_favorite_macro_is_rejected(self) -> None:
         with self.assertRaises(ValidationError):

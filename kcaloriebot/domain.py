@@ -11,6 +11,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 
 UTC = timezone.utc
 SQLITE_REAL_LIMIT = 1e308
+MAX_CALORIES_PER_100G = 10_000.0
+MAX_SERVING_GRAMS = 100_000.0
 
 
 class ValidationError(ValueError):
@@ -59,6 +61,8 @@ class Session:
     carbs_per_100g: Optional[float] = None
     selected_favorite_id: Optional[int] = None
     selected_nutrient: Optional[str] = None
+    prompt_pending: bool = False
+    last_message_id: Optional[int] = None
     revision: int = 0
     updated_at_utc: int = 0
 
@@ -100,6 +104,10 @@ class Stats:
     fat: Optional[float]
     carbs: Optional[float]
     logged_days: int = 0
+    coverage_total: int = 0
+    protein_coverage: int = 0
+    fat_coverage: int = 0
+    carbs_coverage: int = 0
 
 
 T = TypeVar("T")
@@ -140,6 +148,10 @@ def parse_calories(text: str) -> float:
         raise ValidationError("Calories cannot be negative.")
     if value >= SQLITE_REAL_LIMIT:
         raise ValidationError("Calories are too large to store.")
+    if value > MAX_CALORIES_PER_100G:
+        raise ValidationError(
+            f"Calories must be no more than {MAX_CALORIES_PER_100G:.0f} per 100g."
+        )
     return value
 
 
@@ -149,6 +161,10 @@ def parse_grams(text: str) -> float:
         raise ValidationError("Grams must be greater than zero.")
     if value >= SQLITE_REAL_LIMIT:
         raise ValidationError("Grams are too large to store.")
+    if value > MAX_SERVING_GRAMS:
+        raise ValidationError(
+            f"Serving weight must be no more than {MAX_SERVING_GRAMS:.0f} grams."
+        )
     return value
 
 

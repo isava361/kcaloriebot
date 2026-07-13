@@ -25,7 +25,7 @@ from .domain import (
 )
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 BEGIN;
@@ -90,6 +90,8 @@ CREATE TABLE sessions (
     selected_favorite_id INTEGER NULL,
     selected_nutrient TEXT NULL
         CHECK (selected_nutrient IS NULL OR selected_nutrient IN ('calories', 'protein', 'fat', 'carbs')),
+    prompt_pending INTEGER NOT NULL DEFAULT 0 CHECK (prompt_pending IN (0, 1)),
+    last_message_id INTEGER NULL,
     revision INTEGER NOT NULL DEFAULT 0,
     updated_at_utc INTEGER NOT NULL,
     PRIMARY KEY (user_id, chat_id),
@@ -110,7 +112,7 @@ CREATE INDEX favorites_user_name_idx
     ON favorite_foods(user_id, name_key, favorite_id DESC);
 CREATE INDEX sessions_updated_idx ON sessions(updated_at_utc);
 
-PRAGMA user_version = 1;
+PRAGMA user_version = 2;
 COMMIT;
 """
 
@@ -146,6 +148,27 @@ class Database:
                         "Back it up and use a new DATABASE_PATH for the Python version."
                     )
                 connection.executescript(SCHEMA)
+            elif version == 1:
+                try:
+                    connection.execute("BEGIN IMMEDIATE")
+                    columns = {
+                        row[1]
+                        for row in connection.execute("PRAGMA table_info(sessions)")
+                    }
+                    if "prompt_pending" not in columns:
+                        connection.execute(
+                            "ALTER TABLE sessions ADD COLUMN prompt_pending INTEGER "
+                            "NOT NULL DEFAULT 0 CHECK (prompt_pending IN (0, 1))"
+                        )
+                    if "last_message_id" not in columns:
+                        connection.execute(
+                            "ALTER TABLE sessions ADD COLUMN last_message_id INTEGER NULL"
+                        )
+                    connection.execute("PRAGMA user_version = 2")
+                    connection.commit()
+                except Exception:
+                    connection.rollback()
+                    raise
             elif version != SCHEMA_VERSION:
                 raise RuntimeError(
                     f"Unsupported database schema version {version}; expected {SCHEMA_VERSION}."
@@ -258,8 +281,9 @@ class Database:
                     INSERT INTO sessions(
                         user_id, chat_id, state, draft_name, calories_per_100g,
                         serving_grams, protein_per_100g, fat_per_100g, carbs_per_100g,
-                        selected_favorite_id, selected_nutrient, revision, updated_at_utc
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+                        selected_favorite_id, selected_nutrient, prompt_pending,
+                        last_message_id, revision, updated_at_utc
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
                     ON CONFLICT(user_id, chat_id) DO UPDATE SET
                         state = excluded.state,
                         draft_name = excluded.draft_name,
@@ -270,6 +294,8 @@ class Database:
                         carbs_per_100g = excluded.carbs_per_100g,
                         selected_favorite_id = excluded.selected_favorite_id,
                         selected_nutrient = excluded.selected_nutrient,
+                        prompt_pending = excluded.prompt_pending,
+                        last_message_id = excluded.last_message_id,
                         revision = sessions.revision + 1,
                         updated_at_utc = excluded.updated_at_utc
                     """,
@@ -314,6 +340,8 @@ class Database:
             updated.carbs_per_100g,
             updated.selected_favorite_id,
             updated.selected_nutrient,
+            int(updated.prompt_pending),
+            updated.last_message_id,
             now,
             previous.user_id,
             previous.chat_id,
@@ -327,6 +355,7 @@ class Database:
                     state = ?, draft_name = ?, calories_per_100g = ?, serving_grams = ?,
                     protein_per_100g = ?, fat_per_100g = ?, carbs_per_100g = ?,
                     selected_favorite_id = ?, selected_nutrient = ?,
+                    prompt_pending = ?, last_message_id = ?,
                     revision = revision + 1, updated_at_utc = ?
                 WHERE user_id = ? AND chat_id = ? AND state = ? AND revision = ?
                 """,
@@ -348,6 +377,7 @@ class Database:
     def complete_food_draft(self, session: Session, eaten_at_utc: int) -> FoodEntry:
         if session.state != SessionState.WAIT_CARBS:
             raise StateConflict("Food draft is not ready to complete")
+        workflow_now = self.now_epoch()
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
@@ -368,7 +398,9 @@ class Database:
                     "The workflow changed; please use the latest prompt."
                 )
             persisted = replace(
-                self._row_to_session(row), carbs_per_100g=session.carbs_per_100g
+                self._row_to_session(row),
+                carbs_per_100g=session.carbs_per_100g,
+                last_message_id=session.last_message_id,
             )
             if persisted.calories_per_100g is None or persisted.serving_grams is None:
                 raise StateConflict("Food draft is incomplete")
@@ -403,13 +435,15 @@ class Database:
                 cursor = connection.execute(
                     """
                     UPDATE sessions SET state = ?, carbs_per_100g = ?,
+                        prompt_pending = 1, last_message_id = ?,
                         revision = revision + 1, updated_at_utc = ?
                     WHERE user_id = ? AND chat_id = ? AND state = ? AND revision = ?
                     """,
                     (
                         SessionState.WAIT_SAVE_FAVORITE.value,
                         persisted.carbs_per_100g,
-                        eaten_at_utc,
+                        persisted.last_message_id,
+                        workflow_now,
                         persisted.user_id,
                         persisted.chat_id,
                         persisted.state.value,
@@ -762,34 +796,68 @@ class Database:
                 (user_id, start_utc, end_utc),
             ).fetchall()
         if not rows:
-            return Stats(0, 0.0, None, None, None, 0)
+            return Stats(0, 0.0, None, None, None)
 
-        totals = [0.0, 0.0, 0.0, 0.0]
-        days = set()
-        known_macro_days = [set(), set(), set()]
+        macro_columns = ("protein", "fat", "carbs")
+        totals = {"calories": 0.0, **{column: 0.0 for column in macro_columns}}
+        known_macro_entries = {column: 0 for column in macro_columns}
+        daily: dict[object, dict[str, float]] = {}
         for row in rows:
-            totals[0] += row["calories"]
             entry_day = local_date(row["eaten_at_utc"], timezone_name)
-            days.add(entry_day)
-            for index, column in enumerate(("protein", "fat", "carbs"), start=1):
+            bucket = daily.setdefault(
+                entry_day,
+                {
+                    "entries": 0,
+                    "calories": 0.0,
+                    **{column: 0.0 for column in macro_columns},
+                    **{f"{column}_known": 0 for column in macro_columns},
+                },
+            )
+            bucket["entries"] += 1
+            bucket["calories"] += row["calories"]
+            totals["calories"] += row["calories"]
+            for column in macro_columns:
                 if row[column] is not None:
-                    totals[index] += row[column]
-                    known_macro_days[index - 1].add(entry_day)
-        calorie_divisor = len(days) if average_by_logged_day else 1
+                    bucket[column] += row[column]
+                    bucket[f"{column}_known"] += 1
+                    totals[column] += row[column]
+                    known_macro_entries[column] += 1
+
         macro_values: list[Optional[float]] = []
-        for index, known_days in enumerate(known_macro_days, start=1):
-            if not known_days:
-                macro_values.append(None)
-            else:
-                divisor = len(known_days) if average_by_logged_day else 1
-                macro_values.append(totals[index] / divisor)
+        macro_coverage: list[int] = []
+        if average_by_logged_day:
+            for column in macro_columns:
+                complete_days = [
+                    bucket
+                    for bucket in daily.values()
+                    if bucket[f"{column}_known"] == bucket["entries"]
+                ]
+                macro_coverage.append(len(complete_days))
+                macro_values.append(
+                    None
+                    if not complete_days
+                    else sum(bucket[column] for bucket in complete_days)
+                    / len(complete_days)
+                )
+            calories = totals["calories"] / len(daily)
+        else:
+            for column in macro_columns:
+                coverage = known_macro_entries[column]
+                macro_coverage.append(coverage)
+                macro_values.append(None if coverage == 0 else totals[column])
+            calories = totals["calories"]
+
         return Stats(
             entry_count=len(rows),
-            calories=totals[0] / calorie_divisor,
+            calories=calories,
             protein=macro_values[0],
             fat=macro_values[1],
             carbs=macro_values[2],
-            logged_days=len(days),
+            logged_days=len(daily),
+            coverage_total=len(daily) if average_by_logged_day else len(rows),
+            protein_coverage=macro_coverage[0],
+            fat_coverage=macro_coverage[1],
+            carbs_coverage=macro_coverage[2],
         )
 
     @staticmethod
@@ -813,6 +881,8 @@ class Database:
             session.carbs_per_100g,
             session.selected_favorite_id,
             session.selected_nutrient,
+            int(session.prompt_pending),
+            session.last_message_id,
             session.updated_at_utc,
         )
 
@@ -830,6 +900,8 @@ class Database:
             carbs_per_100g=row["carbs_per_100g"],
             selected_favorite_id=row["selected_favorite_id"],
             selected_nutrient=row["selected_nutrient"],
+            prompt_pending=bool(row["prompt_pending"]),
+            last_message_id=row["last_message_id"],
             revision=row["revision"],
             updated_at_utc=row["updated_at_utc"],
         )

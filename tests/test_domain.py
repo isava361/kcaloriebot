@@ -25,14 +25,22 @@ class NumericParsingTests(unittest.TestCase):
                 self.assertEqual(parse_calories(text), expected)
 
     def test_calories_reject_invalid_values(self) -> None:
-        for text in ("", "not-a-number", "-0.01", "nan", "inf", "-inf"):
+        for text in (
+            "",
+            "not-a-number",
+            "-0.01",
+            "10000.01",
+            "nan",
+            "inf",
+            "-inf",
+        ):
             with self.subTest(text=text):
                 with self.assertRaises(ValidationError):
                     parse_calories(text)
 
     def test_grams_must_be_strictly_positive_and_finite(self) -> None:
         self.assertEqual(parse_grams("0.01"), 0.01)
-        for text in ("", "0", "-1", "nan", "inf", "-inf"):
+        for text in ("", "0", "-1", "100000.01", "nan", "inf", "-inf"):
             with self.subTest(text=text):
                 with self.assertRaises(ValidationError):
                     parse_grams(text)
