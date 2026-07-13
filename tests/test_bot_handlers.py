@@ -736,6 +736,43 @@ class NewFeatureTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("2000 goal (1900 left)", update.effective_message.replies[-1][0])
 
+    async def test_week_stats_show_daily_breakdown_with_pagination(self) -> None:
+        now = self.database.now_epoch()
+        for day in range(7):
+            self.database.add_entry(
+                1, now - day * 86_400, "Rice", 250.0, 40.0, 10.0, 20.0, 30.0
+            )
+
+        update = make_update("Week Stats")
+        await handle_text(update, self.context)
+
+        text, keyboard = update.effective_message.replies[-1]
+        self.assertIn("Last 7 days", text)
+        self.assertEqual(5, text.count("kcal"))
+        self.assertIn("Protein: 4.00g", text)
+        buttons = keyboard.inline_keyboard[0]
+        self.assertEqual(["Next"], [button.text for button in buttons])
+        self.assertEqual("stats:week:5", buttons[0].callback_data)
+
+        query = FakeQuery("stats:week:5", FakeMessage())
+        await handle_callback(make_update(query=query), self.context)
+
+        text, keyboard = query.edits[-1]
+        self.assertEqual(2, text.count("kcal"))
+        buttons = keyboard.inline_keyboard[0]
+        self.assertEqual(["Previous"], [button.text for button in buttons])
+        self.assertEqual("stats:week:0", buttons[0].callback_data)
+
+    async def test_week_stats_without_entries_report_empty_period(self) -> None:
+        update = make_update("Week Stats")
+
+        await handle_text(update, self.context)
+
+        self.assertIn(
+            "No food entries found for week",
+            update.effective_message.replies[-1][0],
+        )
+
     async def test_recent_foods_flow_repeats_the_last_serving(self) -> None:
         source = self.database.add_entry(
             1, self.database.now_epoch(), "Rice", 250.0, 40.0, 10.0, 20.0, 30.0

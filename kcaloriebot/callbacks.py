@@ -18,6 +18,7 @@ class CallbackAction:
     offset: int = 0
     nutrient: Optional[str] = None
     issued_at: Optional[int] = None
+    period: Optional[str] = None
 
 
 def parse_callback(data: str) -> Optional[CallbackAction]:
@@ -34,6 +35,10 @@ def parse_callback(data: str) -> Optional[CallbackAction]:
             return CallbackAction("favorite_list", offset=_parse_offset(parts[2]))
         if len(parts) == 3 and parts[:2] == ["recent", "use"]:
             return CallbackAction("recent_use", record_id=_parse_id(parts[2]))
+        if len(parts) == 3 and parts[0] == "stats" and parts[1] in {"week", "month"}:
+            return CallbackAction(
+                "stats_page", period=parts[1], offset=_parse_offset(parts[2])
+            )
         if len(parts) == 3 and parts[0] == "entry":
             kinds = {
                 "view": "entry_view",

@@ -5,6 +5,7 @@ import math
 import tempfile
 import unittest
 from dataclasses import replace
+from datetime import date
 from pathlib import Path
 
 from kcaloriebot.database import SCHEMA, Database
@@ -264,19 +265,6 @@ class PaginationAndStatsTests(DatabaseTestCase):
             tuple(x.favorite_id for x in self.database.search_favorites(1, "йогурт")),
         )
 
-    def test_stats_average_only_logged_days(self) -> None:
-        first = self.ready_food_session(chat_id=20, name=None)
-        second = self.ready_food_session(chat_id=21, name=None)
-        self.database.complete_food_draft(first, 1_704_067_200)  # 2024-01-01 UTC
-        self.database.complete_food_draft(second, 1_704_240_000)  # 2024-01-03 UTC
-
-        stats = self.database.stats(
-            1, 1_704_067_200, 1_704_326_400, "UTC", average_by_logged_day=True
-        )
-
-        self.assertEqual(2, stats.logged_days)
-        self.assertAlmostEqual(100.0, stats.calories)
-
     def test_stats_preserve_unknown_macros(self) -> None:
         session = self.database.start_session(
             1,
@@ -289,13 +277,56 @@ class PaginationAndStatsTests(DatabaseTestCase):
         )
         self.database.complete_food_draft(session, 1_704_067_200)
 
-        stats = self.database.stats(1, 1_704_067_200, 1_704_153_600, "UTC")
+        stats = self.database.stats(1, 1_704_067_200, 1_704_153_600)
 
         self.assertIsNone(stats.protein)
         self.assertIsNone(stats.fat)
         self.assertIsNone(stats.carbs)
 
-    def test_daily_average_excludes_day_with_partial_macro_coverage(self) -> None:
+    def test_daily_breakdown_groups_by_local_day_newest_first(self) -> None:
+        first = self.ready_food_session(chat_id=20, name=None)
+        second = self.ready_food_session(chat_id=21, name=None)
+        self.database.complete_food_draft(first, 1_704_067_200)  # 2024-01-01 UTC
+        self.database.complete_food_draft(second, 1_704_240_000)  # 2024-01-03 UTC
+
+        page = self.database.daily_breakdown(1, 1_704_067_200, 1_704_326_400, "UTC")
+
+        self.assertEqual(
+            (date(2024, 1, 3), date(2024, 1, 1)),
+            tuple(item.day for item in page.items),
+        )
+        self.assertAlmostEqual(100.0, page.items[0].calories)
+        self.assertAlmostEqual(4.0, page.items[0].protein)
+        self.assertAlmostEqual(8.0, page.items[0].fat)
+        self.assertAlmostEqual(12.0, page.items[0].carbs)
+        self.assertFalse(page.has_previous)
+        self.assertFalse(page.has_next)
+
+    def test_daily_breakdown_paginates_logged_days(self) -> None:
+        for day in range(7):  # 2024-01-01 .. 2024-01-07 UTC
+            self.database.add_entry(
+                1, 1_704_067_200 + day * 86_400, "Rice", 250.0, 40.0
+            )
+
+        first = self.database.daily_breakdown(
+            1, 1_704_067_200, 1_704_672_000, "UTC", 0, 5
+        )
+        second = self.database.daily_breakdown(
+            1, 1_704_067_200, 1_704_672_000, "UTC", 5, 5
+        )
+
+        self.assertEqual(5, len(first.items))
+        self.assertEqual(date(2024, 1, 7), first.items[0].day)
+        self.assertFalse(first.has_previous)
+        self.assertTrue(first.has_next)
+        self.assertEqual(
+            (date(2024, 1, 2), date(2024, 1, 1)),
+            tuple(item.day for item in second.items),
+        )
+        self.assertTrue(second.has_previous)
+        self.assertFalse(second.has_next)
+
+    def test_daily_breakdown_marks_partial_macro_coverage(self) -> None:
         first = self.database.start_session(
             1,
             31,
@@ -316,17 +347,15 @@ class PaginationAndStatsTests(DatabaseTestCase):
         self.database.complete_food_draft(first, 1_704_067_200)
         self.database.complete_food_draft(second, 1_704_067_201)
 
-        stats = self.database.stats(
-            1,
-            1_704_067_200,
-            1_704_153_600,
-            "UTC",
-            average_by_logged_day=True,
-        )
+        page = self.database.daily_breakdown(1, 1_704_067_200, 1_704_153_600, "UTC")
 
-        self.assertIsNone(stats.protein)
-        self.assertEqual(0, stats.protein_coverage)
-        self.assertEqual(1, stats.coverage_total)
+        day = page.items[0]
+        self.assertEqual(2, day.entry_count)
+        self.assertAlmostEqual(200.0, day.calories)
+        self.assertAlmostEqual(10.0, day.protein)
+        self.assertEqual(1, day.protein_coverage)
+        self.assertIsNone(day.fat)
+        self.assertEqual(0, day.fat_coverage)
 
 
 class DailyGoalTests(DatabaseTestCase):

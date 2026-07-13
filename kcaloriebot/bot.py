@@ -66,6 +66,7 @@ from .render import (
     TIMEZONE_ONBOARDING_PROMPT,
     TIMEZONE_REQUIRED_MARKUP,
     TIMEZONE_SETUP_REQUIRED_PROMPT,
+    day_stats_block,
     entry_button_text,
     entry_details,
     favorite_button_text,
@@ -343,9 +344,7 @@ async def _today_progress(database: Database, user_id: int) -> str:
     if timezone_name is None:
         return ""
     bounds = period_bounds(Period.TODAY, timezone_name)
-    stats = await _call(
-        database.stats, user_id, bounds.start_utc, bounds.end_utc, timezone_name, False
-    )
+    stats = await _call(database.stats, user_id, bounds.start_utc, bounds.end_utc)
     goal = await _call(database.get_daily_goal, user_id)
     total = stats.calories
     if goal is None:
@@ -450,9 +449,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     elif text == "Yesterday Stats":
         await _show_stats(update, context, Period.YESTERDAY)
     elif text == "Week Stats":
-        await _show_stats(update, context, Period.WEEK)
+        await _show_daily_stats(update, context, Period.WEEK, 0)
     elif text == "Month Stats":
-        await _show_stats(update, context, Period.MONTH)
+        await _show_daily_stats(update, context, Period.MONTH, 0)
     elif text == "Search Favorites":
         await _start_with_prompt(
             database,
@@ -870,25 +869,14 @@ async def _show_stats(
         await message.reply_text("Set your timezone first with /updatetimezone.")
         return
     bounds = period_bounds(period, timezone_name)
-    average = period in {Period.WEEK, Period.MONTH}
-    stats = await _call(
-        database.stats,
-        user_id,
-        bounds.start_utc,
-        bounds.end_utc,
-        timezone_name,
-        average,
-    )
+    stats = await _call(database.stats, user_id, bounds.start_utc, bounds.end_utc)
     if stats.entry_count == 0:
         await message.reply_text(f"No food entries found for {period.value}.")
         return
     title = {
         Period.TODAY: "Today's totals",
         Period.YESTERDAY: "Yesterday's totals",
-        Period.WEEK: "7-day logged-day average",
-        Period.MONTH: "Month-to-date logged-day average",
     }[period]
-    coverage_unit = "days" if average else "entries"
     goal = (
         await _call(database.get_daily_goal, user_id)
         if period == Period.TODAY
@@ -905,10 +893,63 @@ async def _show_stats(
     await message.reply_text(
         f"{title}:\n"
         f"{calories_line}\n"
-        f"{stat_macro_line('Protein', stats.protein, stats.protein_coverage, stats.coverage_total, coverage_unit)}\n"
-        f"{stat_macro_line('Fat', stats.fat, stats.fat_coverage, stats.coverage_total, coverage_unit)}\n"
-        f"{stat_macro_line('Carbs', stats.carbs, stats.carbs_coverage, stats.coverage_total, coverage_unit)}"
+        f"{stat_macro_line('Protein', stats.protein, stats.protein_coverage, stats.coverage_total, 'entries')}\n"
+        f"{stat_macro_line('Fat', stats.fat, stats.fat_coverage, stats.coverage_total, 'entries')}\n"
+        f"{stat_macro_line('Carbs', stats.carbs, stats.carbs_coverage, stats.coverage_total, 'entries')}"
     )
+
+
+async def _show_daily_stats(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    period: Period,
+    offset: int,
+    edit: bool = False,
+) -> None:
+    user_id, _ = _identity(update)
+    database = _db(context)
+    timezone_name = await _call(database.get_timezone, user_id)
+    if timezone_name is None:
+        if update.effective_message is not None:
+            await update.effective_message.reply_text(
+                "Set your timezone first with /updatetimezone."
+            )
+        return
+    bounds = period_bounds(period, timezone_name)
+    page = await _call(
+        database.daily_breakdown,
+        user_id,
+        bounds.start_utc,
+        bounds.end_utc,
+        timezone_name,
+        offset,
+        PAGE_SIZE,
+    )
+    if not page.items and offset > 0:
+        page = await _call(
+            database.daily_breakdown,
+            user_id,
+            bounds.start_utc,
+            bounds.end_utc,
+            timezone_name,
+            0,
+            PAGE_SIZE,
+        )
+    if not page.items:
+        text, keyboard = f"No food entries found for {period.value}.", None
+    else:
+        title = {
+            Period.WEEK: "Last 7 days, logged days",
+            Period.MONTH: "This month, logged days",
+        }[period]
+        blocks = "\n\n".join(day_stats_block(day) for day in page.items)
+        text = f"{title}:\n\n{blocks}"
+        navigation = navigation_row(page, f"stats:{period.value}")
+        keyboard = InlineKeyboardMarkup([navigation]) if navigation else None
+    if edit and update.callback_query is not None:
+        await update.callback_query.edit_message_text(text, reply_markup=keyboard)
+    elif update.effective_message is not None:
+        await update.effective_message.reply_text(text, reply_markup=keyboard)
 
 
 async def _show_entries(
@@ -1088,6 +1129,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.edit_message_text("No changes made.")
         elif action.kind == "entry_list":
             await _show_entries(update, context, action.offset, edit=True)
+        elif action.kind == "stats_page" and action.period is not None:
+            await _show_daily_stats(
+                update, context, Period(action.period), action.offset, edit=True
+            )
         elif action.kind == "favorite_list":
             await _show_favorites(update, context, action.offset, edit=True)
         elif action.kind == "entry_view" and action.record_id is not None:

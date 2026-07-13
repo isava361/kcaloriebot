@@ -283,10 +283,12 @@ Future timestamps and dates more than a year old are rejected.
 The bot intentionally declines group-chat use because food history and inline
 button contents are personal data.
 
-Week and month statistics are averages across days on which at least one entry
-was recorded. Unknown macronutrients remain unknown and are excluded from their
-individual averages; the bot marks aggregates as partial when only some entries
-contain a nutrient. Entries use the timestamp of the user's Telegram message,
+Week and month statistics are a per-day breakdown of days on which at least one
+entry was recorded, newest day first, paginated five days per page with inline
+`Previous`/`Next` buttons. Each day shows its calories, protein, fat, and
+carbs. Unknown macronutrients remain unknown; the bot marks a day's nutrient as
+partial when only some of its entries contain it. Entries use the timestamp of
+the user's Telegram message,
 not a delayed processing time. Today, yesterday, week, and month boundaries are
 calculated as local calendar boundaries and converted to UTC, including DST
 transitions. Changing the profile timezone can therefore regroup historical

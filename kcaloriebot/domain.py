@@ -112,8 +112,22 @@ class Stats:
     protein: Optional[float]
     fat: Optional[float]
     carbs: Optional[float]
-    logged_days: int = 0
     coverage_total: int = 0
+    protein_coverage: int = 0
+    fat_coverage: int = 0
+    carbs_coverage: int = 0
+
+
+@dataclass(frozen=True)
+class DayStats:
+    """Nutrition totals for one local calendar day that has entries."""
+
+    day: date
+    entry_count: int
+    calories: float
+    protein: Optional[float]
+    fat: Optional[float]
+    carbs: Optional[float]
     protein_coverage: int = 0
     fat_coverage: int = 0
     carbs_coverage: int = 0

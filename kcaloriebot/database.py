@@ -3,10 +3,12 @@ from __future__ import annotations
 import sqlite3
 import time
 from dataclasses import replace
+from datetime import date
 from pathlib import Path
 from typing import Optional
 
 from .domain import (
+    DayStats,
     FavoriteFood,
     FoodEntry,
     NotFound,
@@ -1084,14 +1086,43 @@ class Database:
                 break
         return tuple(templates)
 
-    def stats(
+    def stats(self, user_id: int, start_utc: int, end_utc: int) -> Stats:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*) AS entry_count,
+                       COALESCE(SUM(calories), 0.0) AS calories,
+                       SUM(protein) AS protein, COUNT(protein) AS protein_coverage,
+                       SUM(fat) AS fat, COUNT(fat) AS fat_coverage,
+                       SUM(carbs) AS carbs, COUNT(carbs) AS carbs_coverage
+                FROM food_entries
+                WHERE user_id = ? AND eaten_at_utc >= ? AND eaten_at_utc < ?
+                """,
+                (user_id, start_utc, end_utc),
+            ).fetchone()
+        return Stats(
+            entry_count=row["entry_count"],
+            calories=row["calories"],
+            protein=row["protein"],
+            fat=row["fat"],
+            carbs=row["carbs"],
+            coverage_total=row["entry_count"],
+            protein_coverage=row["protein_coverage"],
+            fat_coverage=row["fat_coverage"],
+            carbs_coverage=row["carbs_coverage"],
+        )
+
+    def daily_breakdown(
         self,
         user_id: int,
         start_utc: int,
         end_utc: int,
         timezone_name: str,
-        average_by_logged_day: bool = False,
-    ) -> Stats:
+        offset: int = 0,
+        limit: int = 5,
+    ) -> Page[DayStats]:
+        """Per-day totals for local days that have entries, newest day first."""
+        self._validate_page(offset, limit)
         with self._connect() as connection:
             rows = connection.execute(
                 """
@@ -1102,13 +1133,8 @@ class Database:
                 """,
                 (user_id, start_utc, end_utc),
             ).fetchall()
-        if not rows:
-            return Stats(0, 0.0, None, None, None)
-
         macro_columns = ("protein", "fat", "carbs")
-        totals = {"calories": 0.0, **{column: 0.0 for column in macro_columns}}
-        known_macro_entries = {column: 0 for column in macro_columns}
-        daily: dict[object, dict[str, float]] = {}
+        daily: dict[date, dict[str, float]] = {}
         for row in rows:
             entry_day = local_date(row["eaten_at_utc"], timezone_name)
             bucket = daily.setdefault(
@@ -1122,50 +1148,26 @@ class Database:
             )
             bucket["entries"] += 1
             bucket["calories"] += row["calories"]
-            totals["calories"] += row["calories"]
             for column in macro_columns:
                 if row[column] is not None:
                     bucket[column] += row[column]
                     bucket[f"{column}_known"] += 1
-                    totals[column] += row[column]
-                    known_macro_entries[column] += 1
-
-        macro_values: list[Optional[float]] = []
-        macro_coverage: list[int] = []
-        if average_by_logged_day:
-            for column in macro_columns:
-                complete_days = [
-                    bucket
-                    for bucket in daily.values()
-                    if bucket[f"{column}_known"] == bucket["entries"]
-                ]
-                macro_coverage.append(len(complete_days))
-                macro_values.append(
-                    None
-                    if not complete_days
-                    else sum(bucket[column] for bucket in complete_days)
-                    / len(complete_days)
-                )
-            calories = totals["calories"] / len(daily)
-        else:
-            for column in macro_columns:
-                coverage = known_macro_entries[column]
-                macro_coverage.append(coverage)
-                macro_values.append(None if coverage == 0 else totals[column])
-            calories = totals["calories"]
-
-        return Stats(
-            entry_count=len(rows),
-            calories=calories,
-            protein=macro_values[0],
-            fat=macro_values[1],
-            carbs=macro_values[2],
-            logged_days=len(daily),
-            coverage_total=len(daily) if average_by_logged_day else len(rows),
-            protein_coverage=macro_coverage[0],
-            fat_coverage=macro_coverage[1],
-            carbs_coverage=macro_coverage[2],
+        days = sorted(daily, reverse=True)
+        items = tuple(
+            DayStats(
+                day=day,
+                entry_count=int(daily[day]["entries"]),
+                calories=daily[day]["calories"],
+                protein=daily[day]["protein"] if daily[day]["protein_known"] else None,
+                fat=daily[day]["fat"] if daily[day]["fat_known"] else None,
+                carbs=daily[day]["carbs"] if daily[day]["carbs_known"] else None,
+                protein_coverage=int(daily[day]["protein_known"]),
+                fat_coverage=int(daily[day]["fat_known"]),
+                carbs_coverage=int(daily[day]["carbs_known"]),
+            )
+            for day in days[offset : offset + limit]
         )
+        return Page(items, offset, offset > 0, len(days) > offset + limit)
 
     @staticmethod
     def _validate_page(offset: int, limit: int) -> None:

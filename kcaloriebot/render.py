@@ -12,7 +12,7 @@ from telegram import (
 )
 
 from .callbacks import PAGE_SIZE
-from .domain import FavoriteFood, FoodEntry, Page, Session, SessionState
+from .domain import DayStats, FavoriteFood, FoodEntry, Page, Session, SessionState
 
 
 Markup = Union[ReplyKeyboardMarkup, ReplyKeyboardRemove]
@@ -182,6 +182,27 @@ def stat_macro_line(
     if coverage < coverage_total:
         rendered += f" (partial: {coverage}/{coverage_total} {coverage_unit})"
     return rendered
+
+
+def _day_macro(
+    label: str, value: Optional[float], coverage: int, entry_count: int
+) -> str:
+    rendered = f"{label}: {optional_grams(value)}"
+    if 0 < coverage < entry_count:
+        rendered += f" (partial: {coverage}/{entry_count})"
+    return rendered
+
+
+def day_stats_block(stats: DayStats) -> str:
+    macros = " | ".join(
+        _day_macro(label, value, coverage, stats.entry_count)
+        for label, value, coverage in (
+            ("Protein", stats.protein, stats.protein_coverage),
+            ("Fat", stats.fat, stats.fat_coverage),
+            ("Carbs", stats.carbs, stats.carbs_coverage),
+        )
+    )
+    return f"{stats.day.isoformat()} — {stats.calories:.2f} kcal\n{macros}"
 
 
 def entry_button_text(entry: FoodEntry) -> str:
