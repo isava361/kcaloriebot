@@ -3,7 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from itertools import count
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -15,6 +15,7 @@ from kcaloriebot.bot import (
     CANCEL_KEYBOARD,
     MAIN_KEYBOARD,
     _show_entries,
+    add_command,
     handle_callback,
     handle_text,
     start,
@@ -593,6 +594,222 @@ class BotHandlerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(self.database.get_favorite(1, favorite.favorite_id))
         self.assertIn("expired", query.edits[-1][0])
+
+
+class NewFeatureTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.database = Database(Path(self.temporary_directory.name) / "bot.db")
+        self.database.initialize()
+        self.database.ensure_user(1, 1)
+        self.database.set_timezone(1, "UTC", 1)
+        self.context = SimpleNamespace(
+            application=SimpleNamespace(bot_data={"database": self.database})
+        )
+
+    def tearDown(self) -> None:
+        self.temporary_directory.cleanup()
+
+    def entries(self):
+        return self.database.page_entries(1, 0, 4_000_000_000).items
+
+    async def test_quick_add_message_logs_entry_with_progress(self) -> None:
+        update = make_update("Rice 250 40")
+
+        await handle_text(update, self.context)
+
+        entries = self.entries()
+        self.assertEqual(1, len(entries))
+        self.assertEqual("Rice", entries[0].name)
+        self.assertAlmostEqual(100.0, entries[0].nutrition.calories)
+        reply = update.effective_message.replies[-1]
+        self.assertIn("Today: 100", reply[0])
+        self.assertIs(MAIN_KEYBOARD, reply[1])
+
+    async def test_quick_add_reports_remaining_goal(self) -> None:
+        self.database.set_daily_goal(1, 2000.0, 2)
+
+        update = make_update("Rice 250 40")
+        await handle_text(update, self.context)
+
+        self.assertIn("2000 kcal (1900 left)", update.effective_message.replies[-1][0])
+
+    async def test_quick_add_validation_error_is_reported(self) -> None:
+        update = make_update("Rice 20000 40")
+
+        await handle_text(update, self.context)
+
+        self.assertEqual(0, len(self.entries()))
+        self.assertIn("no more than", update.effective_message.replies[-1][0])
+
+    async def test_non_food_text_falls_back_to_menu_hint(self) -> None:
+        update = make_update("hello there")
+
+        await handle_text(update, self.context)
+
+        self.assertEqual(0, len(self.entries()))
+        self.assertIn("keyboard", update.effective_message.replies[-1][0])
+
+    async def test_add_command_logs_entry(self) -> None:
+        update = make_update("/add Rice 250 40")
+
+        await add_command(update, self.context)
+
+        entries = self.entries()
+        self.assertEqual(1, len(entries))
+        self.assertEqual("Rice", entries[0].name)
+
+    async def test_add_command_without_payload_shows_usage(self) -> None:
+        update = make_update("/add")
+
+        await add_command(update, self.context)
+
+        self.assertEqual(0, len(self.entries()))
+        self.assertIn("Example", update.effective_message.replies[-1][0])
+
+    async def test_add_command_is_blocked_by_an_active_workflow(self) -> None:
+        self.database.start_session(
+            1,
+            10,
+            SessionState.WAIT_CALORIES,
+            now_utc=self.database.now_epoch(),
+            draft_name="Soup",
+        )
+
+        update = make_update("/add Rice 250 40")
+        await add_command(update, self.context)
+
+        self.assertEqual(0, len(self.entries()))
+        self.assertIn("Finish or cancel", update.effective_message.replies[-1][0])
+
+    async def test_add_food_matches_a_saved_favorite(self) -> None:
+        favorite = self.database.add_favorite(1, "Rice", 250, 10, 20, 30, 2)
+        await handle_text(make_update("Add Food"), self.context)
+
+        name_update = make_update("rice")
+        await handle_text(name_update, self.context)
+
+        session = self.database.get_session(1, 10)
+        self.assertEqual(SessionState.WAIT_FAVORITE_GRAMS, session.state)
+        self.assertEqual(favorite.favorite_id, session.selected_favorite_id)
+        self.assertIn(
+            "Found favorite Rice", name_update.effective_message.replies[-1][0]
+        )
+
+        await handle_text(make_update("40"), self.context)
+
+        entries = self.entries()
+        self.assertEqual(1, len(entries))
+        self.assertAlmostEqual(100.0, entries[0].nutrition.calories)
+        self.assertIsNone(self.database.get_session(1, 10))
+
+    async def test_favorite_match_allows_manual_entry_override(self) -> None:
+        self.database.add_favorite(1, "Rice", 250, 10, 20, 30, 2)
+        await handle_text(make_update("Add Food"), self.context)
+        await handle_text(make_update("Rice"), self.context)
+
+        await handle_text(make_update("Enter Manually"), self.context)
+
+        session = self.database.get_session(1, 10)
+        self.assertEqual(SessionState.WAIT_CALORIES, session.state)
+        self.assertEqual("Rice", session.draft_name)
+        self.assertIsNone(session.selected_favorite_id)
+
+    async def test_daily_goal_menu_sets_and_removes_the_goal(self) -> None:
+        await handle_text(make_update("Daily Goal"), self.context)
+        self.assertEqual(SessionState.WAIT_GOAL, self.database.get_session(1, 10).state)
+
+        await handle_text(make_update("2000"), self.context)
+        self.assertEqual(2000.0, self.database.get_daily_goal(1))
+        self.assertIsNone(self.database.get_session(1, 10))
+
+        await handle_text(make_update("Daily Goal"), self.context)
+        await handle_text(make_update("Remove"), self.context)
+        self.assertIsNone(self.database.get_daily_goal(1))
+
+    async def test_today_stats_show_goal_progress(self) -> None:
+        self.database.set_daily_goal(1, 2000.0, 2)
+        self.database.add_entry(1, self.database.now_epoch(), "Rice", 250.0, 40.0)
+
+        update = make_update("Today Stats")
+        await handle_text(update, self.context)
+
+        self.assertIn("2000 goal (1900 left)", update.effective_message.replies[-1][0])
+
+    async def test_recent_foods_flow_repeats_the_last_serving(self) -> None:
+        source = self.database.add_entry(
+            1, self.database.now_epoch(), "Rice", 250.0, 40.0, 10.0, 20.0, 30.0
+        )
+
+        menu_update = make_update("Recent Foods")
+        await handle_text(menu_update, self.context)
+        self.assertIn("recent", menu_update.effective_message.replies[-1][0].lower())
+
+        query = FakeQuery(f"recent:use:{source.entry_id}", FakeMessage())
+        await handle_callback(make_update(query=query), self.context)
+        self.assertEqual(
+            SessionState.WAIT_RECENT_GRAMS, self.database.get_session(1, 10).state
+        )
+
+        await handle_text(make_update("Same as last time"), self.context)
+
+        entries = self.entries()
+        self.assertEqual(2, len(entries))
+        self.assertAlmostEqual(40.0, entries[0].nutrition.grams)
+        self.assertIsNone(self.database.get_session(1, 10))
+
+    async def test_entry_grams_edit_recomputes_totals(self) -> None:
+        entry = self.database.add_entry(
+            1, self.database.now_epoch(), "Rice", 250.0, 40.0, 10.0, 20.0, 30.0
+        )
+
+        query = FakeQuery(f"entry:grams:{entry.entry_id}", FakeMessage())
+        await handle_callback(make_update(query=query), self.context)
+        self.assertEqual(
+            SessionState.WAIT_ENTRY_GRAMS, self.database.get_session(1, 10).state
+        )
+
+        grams_update = make_update("80")
+        await handle_text(grams_update, self.context)
+
+        stored = self.database.get_entry(1, entry.entry_id)
+        self.assertAlmostEqual(80.0, stored.nutrition.grams)
+        self.assertAlmostEqual(200.0, stored.nutrition.calories)
+        self.assertIn("updated", grams_update.effective_message.replies[-1][0])
+
+    async def test_entry_time_edit_backdates_the_entry(self) -> None:
+        entry = self.database.add_entry(
+            1, self.database.now_epoch(), "Rice", 250.0, 40.0
+        )
+        yesterday = datetime.now(timezone.utc) - timedelta(days=1)
+        text = yesterday.strftime("%Y-%m-%d") + " 12:00"
+        expected = int(
+            yesterday.replace(hour=12, minute=0, second=0, microsecond=0).timestamp()
+        )
+
+        query = FakeQuery(f"entry:time:{entry.entry_id}", FakeMessage())
+        await handle_callback(make_update(query=query), self.context)
+        await handle_text(make_update(text), self.context)
+
+        stored = self.database.get_entry(1, entry.entry_id)
+        self.assertEqual(expected, stored.eaten_at_utc)
+        self.assertIsNone(self.database.get_session(1, 10))
+
+    async def test_future_entry_time_keeps_the_session_for_retry(self) -> None:
+        entry = self.database.add_entry(
+            1, self.database.now_epoch(), "Rice", 250.0, 40.0
+        )
+        tomorrow = datetime.now(timezone.utc) + timedelta(days=1)
+
+        query = FakeQuery(f"entry:time:{entry.entry_id}", FakeMessage())
+        await handle_callback(make_update(query=query), self.context)
+        rejected = make_update(tomorrow.strftime("%Y-%m-%d") + " 12:00")
+        await handle_text(rejected, self.context)
+
+        self.assertEqual(
+            SessionState.WAIT_ENTRY_TIME, self.database.get_session(1, 10).state
+        )
+        self.assertIn("future", rejected.effective_message.replies[-1][0])
 
 
 if __name__ == "__main__":

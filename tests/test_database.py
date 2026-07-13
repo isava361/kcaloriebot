@@ -329,6 +329,195 @@ class PaginationAndStatsTests(DatabaseTestCase):
         self.assertEqual(1, stats.coverage_total)
 
 
+class DailyGoalTests(DatabaseTestCase):
+    def test_daily_goal_roundtrip_and_removal(self) -> None:
+        self.assertIsNone(self.database.get_daily_goal(1))
+        self.database.set_daily_goal(1, 2000.0, 2)
+        self.assertEqual(2000.0, self.database.get_daily_goal(1))
+        self.database.set_daily_goal(1, None, 3)
+        self.assertIsNone(self.database.get_daily_goal(1))
+
+    def test_goal_session_completion_is_atomic(self) -> None:
+        session = self.database.start_session(
+            1, 10, SessionState.WAIT_GOAL, now_utc=1_700_000_100
+        )
+
+        self.database.complete_goal_session(session, 1800.0, 1_700_000_101)
+
+        self.assertEqual(1800.0, self.database.get_daily_goal(1))
+        self.assertIsNone(self.database.get_session(1, 10))
+
+    def test_invalid_goals_are_rejected_before_storage(self) -> None:
+        for goal in (0.0, -1.0, 50_001.0, math.nan):
+            with self.subTest(goal=goal):
+                with self.assertRaises(ValidationError):
+                    self.database.set_daily_goal(1, goal, 2)
+        self.assertIsNone(self.database.get_daily_goal(1))
+
+    def test_goal_for_unknown_user_raises(self) -> None:
+        with self.assertRaises(NotFound):
+            self.database.set_daily_goal(999, 2000.0, 2)
+
+
+class QuickEntryTests(DatabaseTestCase):
+    def test_add_entry_scales_and_stores(self) -> None:
+        entry = self.database.add_entry(
+            1, 1_700_000_100, "Rice", 250.0, 40.0, 10.0, 20.0, 30.0
+        )
+
+        stored = self.database.get_entry(1, entry.entry_id)
+
+        self.assertEqual("Rice", stored.name)
+        self.assertAlmostEqual(100.0, stored.nutrition.calories)
+        self.assertAlmostEqual(4.0, stored.nutrition.protein)
+        self.assertEqual(1_700_000_100, stored.eaten_at_utc)
+
+    def test_add_entry_rejects_invalid_nutrition(self) -> None:
+        with self.assertRaises(ValidationError):
+            self.database.add_entry(1, 1_700_000_100, "Rice", -1.0, 40.0)
+
+    def test_find_favorite_by_name_casefolds_and_scopes_to_owner(self) -> None:
+        self.database.add_favorite(1, "Гречка", 313.0, 12.0, 3.0, 62.0, 1)
+
+        self.assertIsNotNone(self.database.find_favorite_by_name(1, "  гречка "))
+        self.assertIsNone(self.database.find_favorite_by_name(2, "гречка"))
+        self.assertIsNone(self.database.find_favorite_by_name(1, "рис"))
+
+    def test_find_favorite_by_name_prefers_the_newest_duplicate(self) -> None:
+        self.database.add_favorite(1, "Rice", 200.0, None, None, None, 1)
+        newest = self.database.add_favorite(1, "rice", 250.0, None, None, None, 2)
+
+        found = self.database.find_favorite_by_name(1, "RICE")
+
+        self.assertEqual(newest.favorite_id, found.favorite_id)
+
+    def test_recent_templates_deduplicate_names_case_insensitively(self) -> None:
+        self.database.add_entry(1, 100, "Rice", 250.0, 40.0)
+        self.database.add_entry(1, 200, "Buckwheat", 313.0, 50.0)
+        self.database.add_entry(1, 300, None, 100.0, 100.0)
+        latest_rice = self.database.add_entry(1, 400, "rice", 250.0, 80.0)
+
+        templates = self.database.recent_entry_templates(1, 10)
+
+        self.assertEqual(
+            (latest_rice.entry_id,),
+            tuple(t.entry_id for t in templates if (t.name or "").casefold() == "rice"),
+        )
+        self.assertEqual(["rice", "Buckwheat"], [t.name for t in templates])
+
+
+class RecentAndEditTests(DatabaseTestCase):
+    def make_entry(self, **overrides: object):
+        values = {
+            "user_id": 1,
+            "eaten_at_utc": 1_700_000_100,
+            "name": "Rice",
+            "calories_per_100g": 250.0,
+            "grams": 40.0,
+            "protein_per_100g": 10.0,
+            "fat_per_100g": 20.0,
+            "carbs_per_100g": 30.0,
+        }
+        values.update(overrides)
+        return self.database.add_entry(**values)
+
+    def test_use_selected_entry_repeats_with_new_grams(self) -> None:
+        source = self.make_entry()
+        self.database.start_session(
+            1,
+            10,
+            SessionState.WAIT_RECENT_GRAMS,
+            now_utc=1_700_000_101,
+            selected_entry_id=source.entry_id,
+        )
+
+        entry = self.database.use_selected_entry(1, 10, 80.0, 1_700_000_102)
+
+        self.assertEqual("Rice", entry.name)
+        self.assertAlmostEqual(200.0, entry.nutrition.calories)
+        self.assertAlmostEqual(8.0, entry.nutrition.protein)
+        self.assertIsNone(self.database.get_session(1, 10))
+
+    def test_use_selected_entry_defaults_to_the_source_serving(self) -> None:
+        source = self.make_entry()
+        self.database.start_session(
+            1,
+            10,
+            SessionState.WAIT_RECENT_GRAMS,
+            now_utc=1_700_000_101,
+            selected_entry_id=source.entry_id,
+        )
+
+        entry = self.database.use_selected_entry(1, 10, None, 1_700_000_102)
+
+        self.assertAlmostEqual(40.0, entry.nutrition.grams)
+        self.assertAlmostEqual(100.0, entry.nutrition.calories)
+
+    def test_update_entry_grams_recomputes_totals(self) -> None:
+        source = self.make_entry()
+        self.database.start_session(
+            1,
+            10,
+            SessionState.WAIT_ENTRY_GRAMS,
+            now_utc=1_700_000_101,
+            selected_entry_id=source.entry_id,
+        )
+
+        self.database.update_entry_grams(1, 10, 80.0, 1_700_000_102)
+
+        stored = self.database.get_entry(1, source.entry_id)
+        self.assertAlmostEqual(80.0, stored.nutrition.grams)
+        self.assertAlmostEqual(200.0, stored.nutrition.calories)
+        self.assertAlmostEqual(8.0, stored.nutrition.protein)
+        self.assertIsNone(self.database.get_session(1, 10))
+
+    def test_update_entry_time_moves_the_entry(self) -> None:
+        source = self.make_entry()
+        self.database.start_session(
+            1,
+            10,
+            SessionState.WAIT_ENTRY_TIME,
+            now_utc=1_700_000_101,
+            selected_entry_id=source.entry_id,
+        )
+
+        self.database.update_entry_time(1, 10, 1_600_000_000, 1_700_000_102)
+
+        stored = self.database.get_entry(1, source.entry_id)
+        self.assertEqual(1_600_000_000, stored.eaten_at_utc)
+        self.assertAlmostEqual(100.0, stored.nutrition.calories)
+        self.assertIsNone(self.database.get_session(1, 10))
+
+    def test_entry_amendments_require_the_matching_owner(self) -> None:
+        source = self.make_entry()
+        self.database.start_session(
+            2,
+            20,
+            SessionState.WAIT_ENTRY_GRAMS,
+            now_utc=1_700_000_101,
+            selected_entry_id=source.entry_id,
+        )
+
+        with self.assertRaises(NotFound):
+            self.database.update_entry_grams(2, 20, 80.0, 1_700_000_102)
+
+        stored = self.database.get_entry(1, source.entry_id)
+        self.assertAlmostEqual(40.0, stored.nutrition.grams)
+
+    def test_wrong_session_state_blocks_entry_amendments(self) -> None:
+        source = self.make_entry()
+        self.database.start_session(
+            1,
+            10,
+            SessionState.WAIT_ENTRY_TIME,
+            now_utc=1_700_000_101,
+            selected_entry_id=source.entry_id,
+        )
+
+        with self.assertRaises(StateConflict):
+            self.database.update_entry_grams(1, 10, 80.0, 1_700_000_102)
+
+
 class SchemaTests(DatabaseTestCase):
     def test_foreign_keys_are_enabled_for_every_connection(self) -> None:
         self.assertTrue(self.database.foreign_keys_enabled())
@@ -339,15 +528,34 @@ class SchemaTests(DatabaseTestCase):
         self.database.initialize()
         self.assertTrue(self.database.foreign_keys_enabled())
 
+    GOAL_COLUMN_LINE = (
+        "    daily_calorie_goal REAL NULL CHECK (daily_calorie_goal IS NULL "
+        "OR (daily_calorie_goal > 0 AND daily_calorie_goal <= 50000)),\n"
+    )
+    ENTRY_COLUMN_LINE = "    selected_entry_id INTEGER NULL,\n"
+    PROMPT_COLUMN_LINE = (
+        "    prompt_pending INTEGER NOT NULL DEFAULT 0 "
+        "CHECK (prompt_pending IN (0, 1)),\n"
+    )
+    MESSAGE_COLUMN_LINE = "    last_message_id INTEGER NULL,\n"
+
+    def _historic_schema(self, version: int, *removed_lines: str) -> str:
+        schema = SCHEMA.replace(
+            "PRAGMA user_version = 3;", f"PRAGMA user_version = {version};"
+        )
+        for line in removed_lines:
+            self.assertIn(line, schema)
+            schema = schema.replace(line, "")
+        return schema
+
     def test_version_one_sessions_are_migrated_with_delivery_fields(self) -> None:
         version_one_path = Path(self.temporary_directory.name) / "version-one.db"
-        version_one_schema = (
-            SCHEMA.replace(
-                "    prompt_pending INTEGER NOT NULL DEFAULT 0 CHECK (prompt_pending IN (0, 1)),\n",
-                "",
-            )
-            .replace("    last_message_id INTEGER NULL,\n", "")
-            .replace("PRAGMA user_version = 2;", "PRAGMA user_version = 1;")
+        version_one_schema = self._historic_schema(
+            1,
+            self.PROMPT_COLUMN_LINE,
+            self.MESSAGE_COLUMN_LINE,
+            self.ENTRY_COLUMN_LINE,
+            self.GOAL_COLUMN_LINE,
         )
         with sqlite3.connect(version_one_path) as connection:
             connection.executescript(version_one_schema)
@@ -370,14 +578,49 @@ class SchemaTests(DatabaseTestCase):
 
         self.assertFalse(session.prompt_pending)
         self.assertIsNone(session.last_message_id)
+        self.assertIsNone(session.selected_entry_id)
+        self.assertIsNone(migrated.get_daily_goal(1))
+
+    def test_version_two_schema_gains_goal_and_entry_columns(self) -> None:
+        version_two_path = Path(self.temporary_directory.name) / "version-two.db"
+        version_two_schema = self._historic_schema(
+            2, self.ENTRY_COLUMN_LINE, self.GOAL_COLUMN_LINE
+        )
+        with sqlite3.connect(version_two_path) as connection:
+            connection.executescript(version_two_schema)
+            connection.execute(
+                """
+                INSERT INTO users(user_id, created_at_utc, updated_at_utc)
+                VALUES (1, 1, 1)
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO sessions(user_id, chat_id, state, updated_at_utc)
+                VALUES (1, 10, 'wait_grams', 1)
+                """
+            )
+
+        migrated = Database(version_two_path)
+        migrated.initialize()
+        with sqlite3.connect(version_two_path) as connection:
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+
+        self.assertEqual(3, version)
+        self.assertEqual("wait_grams", migrated.get_session(1, 10).state.value)
+        migrated.set_daily_goal(1, 2000.0, 2)
+        self.assertEqual(2000.0, migrated.get_daily_goal(1))
 
     def test_partially_applied_version_one_migration_is_recovered(self) -> None:
         version_one_path = (
             Path(self.temporary_directory.name) / "partial-version-one.db"
         )
-        partial_schema = SCHEMA.replace(
-            "    last_message_id INTEGER NULL,\n", ""
-        ).replace("PRAGMA user_version = 2;", "PRAGMA user_version = 1;")
+        partial_schema = self._historic_schema(
+            1,
+            self.MESSAGE_COLUMN_LINE,
+            self.ENTRY_COLUMN_LINE,
+            self.GOAL_COLUMN_LINE,
+        )
         with sqlite3.connect(version_one_path) as connection:
             connection.executescript(partial_schema)
 
@@ -385,13 +628,18 @@ class SchemaTests(DatabaseTestCase):
         migrated.initialize()
         with sqlite3.connect(version_one_path) as connection:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            columns = {
+            session_columns = {
                 row[1] for row in connection.execute("PRAGMA table_info(sessions)")
             }
+            user_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(users)")
+            }
 
-        self.assertEqual(2, version)
-        self.assertIn("prompt_pending", columns)
-        self.assertIn("last_message_id", columns)
+        self.assertEqual(3, version)
+        self.assertIn("prompt_pending", session_columns)
+        self.assertIn("last_message_id", session_columns)
+        self.assertIn("selected_entry_id", session_columns)
+        self.assertIn("daily_calorie_goal", user_columns)
 
     def test_nan_favorite_macro_is_rejected(self) -> None:
         with self.assertRaises(ValidationError):

@@ -1,56 +1,6 @@
-import importlib
-import sys
 import unittest
-from types import ModuleType, SimpleNamespace
-from unittest.mock import patch
 
-
-class _TelegramStub:
-    def __init__(self, *args: object, **kwargs: object) -> None:
-        pass
-
-
-def _load_callback_parser():
-    """Load parser code without requiring Telegram's transport modules."""
-    telegram = ModuleType("telegram")
-    for name in (
-        "InlineKeyboardButton",
-        "InlineKeyboardMarkup",
-        "KeyboardButton",
-        "ReplyKeyboardMarkup",
-        "Update",
-    ):
-        setattr(telegram, name, _TelegramStub)
-
-    constants = ModuleType("telegram.constants")
-    constants.ChatType = SimpleNamespace(PRIVATE="private")
-    errors = ModuleType("telegram.error")
-    errors.TelegramError = type("TelegramError", (Exception,), {})
-    extensions = ModuleType("telegram.ext")
-    for name in (
-        "Application",
-        "ApplicationBuilder",
-        "CallbackQueryHandler",
-        "CommandHandler",
-        "ContextTypes",
-        "MessageHandler",
-    ):
-        setattr(extensions, name, _TelegramStub)
-    extensions.filters = SimpleNamespace(TEXT=None, COMMAND=None)
-
-    modules = {
-        "telegram": telegram,
-        "telegram.constants": constants,
-        "telegram.error": errors,
-        "telegram.ext": extensions,
-    }
-    with patch.dict(sys.modules, modules):
-        return importlib.import_module("kcaloriebot.bot")
-
-
-_bot = _load_callback_parser()
-CallbackAction = _bot.CallbackAction
-parse_callback = _bot.parse_callback
+from kcaloriebot.callbacks import CallbackAction, parse_callback
 
 
 class CallbackParsingTests(unittest.TestCase):
@@ -84,6 +34,9 @@ class CallbackParsingTests(unittest.TestCase):
             "fav:field:11:carbs": CallbackAction(
                 "favorite_field", record_id=11, nutrient="carbs"
             ),
+            "entry:grams:7": CallbackAction("entry_grams", record_id=7),
+            "entry:time:7": CallbackAction("entry_time", record_id=7),
+            "recent:use:4": CallbackAction("recent_use", record_id=4),
         }
         for data, expected in cases.items():
             with self.subTest(data=data):
@@ -133,6 +86,8 @@ class CallbackParsingTests(unittest.TestCase):
             "fav:use:0",
             "fav:field:-1:protein",
             "favorite_0",
+            "recent:use:0",
+            "entry:grams:-2",
         ):
             with self.subTest(data=data):
                 self.assertIsNone(parse_callback(data))

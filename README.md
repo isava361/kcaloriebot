@@ -247,6 +247,33 @@ records an IANA timezone such as `Europe/Moscow`; an unambiguous city such as
 `/start` resumes an unfinished prompt instead of silently discarding it. Drafts
 that have been inactive for seven days expire automatically.
 
+### Logging food
+
+The fastest way to log is a single message: a name, calories per 100g, and the
+serving weight in grams, for example `oatmeal 370 60` or
+`буханка 250 ккал 150 г`. Units (`kcal`/`g` and their Russian forms) are
+optional and may fix the value order; without units the first number is
+calories and the second is grams. Optional macro tokens add protein, fat, and
+carbs per 100g: `bread 250 150 p8 f3 c47` (or `б`/`ж`/`у`). The `/add` command
+accepts the same format.
+
+The `Add Food` menu starts the step-by-step wizard instead. If the entered
+food name matches a saved favorite, the bot offers to reuse its nutrition
+values and asks only for the serving weight; choose `Enter Manually` to type
+new values. `Recent Foods` lists the latest distinct foods so a repeated meal
+is two taps: pick the food, then send the grams or choose `Same as last time`.
+
+### Goals, editing, and statistics
+
+`Daily Goal` stores a calorie target; every logged entry replies with today's
+total and the remaining budget, and `Today Stats` shows progress against the
+goal. Choose `Remove` in the goal prompt to clear it.
+
+Entries in `Food Today` can be corrected after logging: `Edit Grams` re-scales
+the stored nutrition to a new serving weight, and `Edit Time` moves the entry,
+including backdating with `HH:MM` (today, local time) or `YYYY-MM-DD HH:MM`.
+Future timestamps and dates more than a year old are rejected.
+
 The bot intentionally declines group-chat use because food history and inline
 button contents are personal data.
 

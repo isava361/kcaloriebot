@@ -5,14 +5,7 @@ import logging
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Optional, TypeVar
 
-from telegram import (
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    KeyboardButton,
-    ReplyKeyboardMarkup,
-    ReplyKeyboardRemove,
-    Update,
-)
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatType
 from telegram.error import TelegramError
 from telegram.ext import (
@@ -25,13 +18,16 @@ from telegram.ext import (
     filters,
 )
 
+from .callbacks import (
+    CallbackAction,
+    PAGE_SIZE,
+    confirmation_expired,
+    parse_callback,
+)
 from .config import Settings
 from .database import Database
 from .domain import (
-    FavoriteFood,
-    FoodEntry,
     NotFound,
-    Page,
     Period,
     Session,
     SessionState,
@@ -41,64 +37,82 @@ from .domain import (
     normalize_food_name,
     normalize_search_query,
     parse_calories,
+    parse_daily_goal,
+    parse_entry_time,
     parse_grams,
     parse_macro,
+    parse_quick_add,
     period_bounds,
     validate_macro_sum,
 )
+from .render import (
+    CANCEL_KEYBOARD,
+    ENTRY_GRAMS_PROMPT,
+    ENTRY_TIME_PROMPT,
+    FAVORITE_DECISION_KEYBOARD,
+    FAVORITE_MATCH_GRAMS_PROMPT,
+    FAVORITE_SEARCH_PROMPT,
+    FOOD_NAME_PROMPT,
+    GOAL_KEYBOARD,
+    GOAL_PROMPT,
+    MAIN_KEYBOARD,
+    MANUAL_ENTRY_KEYBOARD,
+    Markup,
+    QUICK_ADD_USAGE,
+    REPEAT_KEYBOARD,
+    SKIP_KEYBOARD,
+    STATS_KEYBOARD,
+    TIMEZONE_CHANGE_PROMPT,
+    TIMEZONE_ONBOARDING_PROMPT,
+    TIMEZONE_REQUIRED_MARKUP,
+    TIMEZONE_SETUP_REQUIRED_PROMPT,
+    entry_button_text,
+    entry_details,
+    favorite_button_text,
+    favorite_details,
+    navigation_row,
+    session_prompt,
+    stat_macro_line,
+)
 
+
+__all__ = [
+    "CallbackAction",
+    "parse_callback",
+    "PAGE_SIZE",
+    "MAIN_KEYBOARD",
+    "STATS_KEYBOARD",
+    "CANCEL_KEYBOARD",
+    "SKIP_KEYBOARD",
+    "FAVORITE_DECISION_KEYBOARD",
+    "TIMEZONE_REQUIRED_MARKUP",
+    "start",
+    "cancel",
+    "update_timezone",
+    "add_command",
+    "handle_text",
+    "handle_callback",
+    "unknown_command",
+    "handle_non_text",
+    "handle_error",
+    "build_application",
+]
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
-PAGE_SIZE = 5
 SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
 
 
-MAIN_KEYBOARD = ReplyKeyboardMarkup(
-    [
-        [KeyboardButton("Add Food"), KeyboardButton("Food Today")],
-        [
-            KeyboardButton("Statistics"),
-            KeyboardButton("Search Favorites"),
-            KeyboardButton("My Favorites"),
-        ],
-        [KeyboardButton("Update Timezone")],
-    ],
-    resize_keyboard=True,
-)
+@dataclass
+class Turn:
+    """Everything the shared handler preamble established for one update."""
 
-STATS_KEYBOARD = ReplyKeyboardMarkup(
-    [
-        [KeyboardButton("Today Stats"), KeyboardButton("Yesterday Stats")],
-        [KeyboardButton("Week Stats"), KeyboardButton("Month Stats")],
-        [KeyboardButton("Back")],
-    ],
-    resize_keyboard=True,
-)
-
-CANCEL_KEYBOARD = ReplyKeyboardMarkup(
-    [[KeyboardButton("Cancel")]], resize_keyboard=True
-)
-
-SKIP_KEYBOARD = ReplyKeyboardMarkup(
-    [[KeyboardButton("Skip"), KeyboardButton("Cancel")]], resize_keyboard=True
-)
-
-FAVORITE_DECISION_KEYBOARD = ReplyKeyboardMarkup(
-    [[KeyboardButton("Yes"), KeyboardButton("No")]],
-    resize_keyboard=True,
-)
-
-TIMEZONE_REQUIRED_MARKUP = ReplyKeyboardRemove()
-
-
-@dataclass(frozen=True)
-class CallbackAction:
-    kind: str
-    record_id: Optional[int] = None
-    offset: int = 0
-    nutrient: Optional[str] = None
-    issued_at: Optional[int] = None
+    database: Database
+    user_id: int
+    chat_id: int
+    message: Any
+    session: Optional[Session]
+    session_expired: bool
 
 
 def _db(context: ContextTypes.DEFAULT_TYPE) -> Database:
@@ -134,89 +148,112 @@ async def _require_private(update: Update) -> bool:
     return False
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def _active_session(
+    database: Database, user_id: int, chat_id: int
+) -> tuple[Optional[Session], bool]:
+    """Fetch the current session, clearing and flagging it when expired."""
+    session = await _call(database.get_session, user_id, chat_id)
+    if session is None or not _session_expired(session, database.now_epoch()):
+        return session, False
+    await _call(database.clear_session, user_id, chat_id)
+    return None, True
+
+
+async def _begin(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    register_user: bool = False,
+) -> Optional[Turn]:
+    """Shared message-handler preamble; returns None when the update is ignored."""
     if not await _require_private(update) or update.effective_message is None:
-        return
+        return None
     user_id, chat_id = _identity(update)
     database = _db(context)
-    await _call(database.ensure_user, user_id)
-    session = await _call(database.get_session, user_id, chat_id)
-    if session is not None and _session_expired(session, database.now_epoch()):
-        await _call(database.clear_session, user_id, chat_id)
-        session = None
-    timezone_name = await _call(database.get_timezone, user_id)
+    if register_user:
+        await _call(database.ensure_user, user_id)
+    session, expired = await _active_session(database, user_id, chat_id)
+    return Turn(database, user_id, chat_id, update.effective_message, session, expired)
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    turn = await _begin(update, context, register_user=True)
+    if turn is None:
+        return
+    database = turn.database
+    timezone_name = await _call(database.get_timezone, turn.user_id)
+    session = turn.session
     if session is not None:
         if timezone_name is None and session.state != SessionState.WAIT_TIMEZONE:
             session = await _call(
                 database.start_session,
-                user_id,
-                chat_id,
+                turn.user_id,
+                turn.chat_id,
                 SessionState.WAIT_TIMEZONE,
                 prompt_pending=True,
             )
         else:
             refreshed = replace(session, updated_at_utc=database.now_epoch())
             session = await _call(database.update_session, session, refreshed)
-        prompt, markup = _session_prompt(session, timezone_name is not None)
-        await update.effective_message.reply_text(prompt, reply_markup=markup)
+        prompt, markup = session_prompt(session, timezone_name is not None)
+        await turn.message.reply_text(prompt, reply_markup=markup)
         if session.prompt_pending:
             await _mark_prompt_delivered(database, session)
         return
     if timezone_name is None:
         await _start_with_prompt(
             database,
-            user_id,
-            chat_id,
+            turn.user_id,
+            turn.chat_id,
             SessionState.WAIT_TIMEZONE,
-            update.effective_message,
-            "Enter your IANA timezone or city, for example Europe/Moscow or New York:",
+            turn.message,
+            TIMEZONE_ONBOARDING_PROMPT,
             TIMEZONE_REQUIRED_MARKUP,
         )
         return
-    await update.effective_message.reply_text(
+    await turn.message.reply_text(
         "Welcome to the Calorie Calculator Bot.", reply_markup=MAIN_KEYBOARD
     )
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _require_private(update) or update.effective_message is None:
+    turn = await _begin(update, context)
+    if turn is None:
         return
-    user_id, chat_id = _identity(update)
-    database = _db(context)
-    timezone_name = await _call(database.get_timezone, user_id)
+    database = turn.database
+    timezone_name = await _call(database.get_timezone, turn.user_id)
     if timezone_name is None:
         await _start_with_prompt(
             database,
-            user_id,
-            chat_id,
+            turn.user_id,
+            turn.chat_id,
             SessionState.WAIT_TIMEZONE,
-            update.effective_message,
-            "Timezone setup is required. Enter an IANA timezone such as Europe/Moscow.",
+            turn.message,
+            TIMEZONE_SETUP_REQUIRED_PROMPT,
             TIMEZONE_REQUIRED_MARKUP,
         )
         return
-    active = await _call(database.get_session, user_id, chat_id)
-    await _call(database.clear_session, user_id, chat_id)
+    await _call(database.clear_session, turn.user_id, turn.chat_id)
     text = (
         "Favorite was not saved. The food entry remains in your diary."
-        if active is not None and active.state == SessionState.WAIT_SAVE_FAVORITE
+        if turn.session is not None
+        and turn.session.state == SessionState.WAIT_SAVE_FAVORITE
         else "Cancelled."
     )
-    await update.effective_message.reply_text(text, reply_markup=MAIN_KEYBOARD)
+    await turn.message.reply_text(text, reply_markup=MAIN_KEYBOARD)
 
 
 async def update_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _require_private(update) or update.effective_message is None:
+    turn = await _begin(update, context, register_user=True)
+    if turn is None:
         return
-    user_id, chat_id = _identity(update)
-    database = _db(context)
-    await _call(database.ensure_user, user_id)
-    active = await _call(database.get_session, user_id, chat_id)
+    database = turn.database
+    active = turn.session
     if active is not None and active.state != SessionState.WAIT_TIMEZONE:
-        prompt, markup = _session_prompt(
-            active, await _call(database.get_timezone, user_id) is not None
+        prompt, markup = session_prompt(
+            active, await _call(database.get_timezone, turn.user_id) is not None
         )
-        await update.effective_message.reply_text(
+        await turn.message.reply_text(
             "Finish or cancel the current input before changing timezone.\n\n" + prompt,
             reply_markup=markup,
         )
@@ -224,32 +261,115 @@ async def update_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     await _start_with_prompt(
         database,
-        user_id,
-        chat_id,
+        turn.user_id,
+        turn.chat_id,
         SessionState.WAIT_TIMEZONE,
-        update.effective_message,
-        "Enter your new IANA timezone or city. Changing it also changes how existing "
-        "entries near midnight are grouped into calendar days:",
+        turn.message,
+        TIMEZONE_CHANGE_PROMPT,
         CANCEL_KEYBOARD,
     )
 
 
+async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    turn = await _begin(update, context, register_user=True)
+    if turn is None or turn.message.text is None:
+        return
+    database = turn.database
+    if turn.session is not None:
+        prompt, markup = session_prompt(
+            turn.session, await _call(database.get_timezone, turn.user_id) is not None
+        )
+        await turn.message.reply_text(
+            "Finish or cancel the current input before adding food.\n\n" + prompt,
+            reply_markup=markup,
+        )
+        await _mark_prompt_delivered(database, turn.session)
+        return
+    if await _call(database.get_timezone, turn.user_id) is None:
+        await _start_with_prompt(
+            database,
+            turn.user_id,
+            turn.chat_id,
+            SessionState.WAIT_TIMEZONE,
+            turn.message,
+            TIMEZONE_ONBOARDING_PROMPT,
+            TIMEZONE_REQUIRED_MARKUP,
+        )
+        return
+    parts = turn.message.text.split(maxsplit=1)
+    payload = parts[1].strip() if len(parts) > 1 else ""
+    if not payload or not await _log_quick_add(turn, payload):
+        await turn.message.reply_text(QUICK_ADD_USAGE, reply_markup=MAIN_KEYBOARD)
+
+
+async def _log_quick_add(turn: Turn, text: str) -> bool:
+    """Try to log the text as a one-message food entry; True when handled."""
+    try:
+        quick = parse_quick_add(text)
+    except ValidationError as exc:
+        await turn.message.reply_text(str(exc), reply_markup=MAIN_KEYBOARD)
+        return True
+    if quick is None:
+        return False
+    message_date = getattr(turn.message, "date", None)
+    event_epoch = (
+        int(message_date.timestamp())
+        if message_date is not None
+        else turn.database.now_epoch()
+    )
+    entry = await _call(
+        turn.database.add_entry,
+        turn.user_id,
+        event_epoch,
+        quick.name,
+        quick.calories_per_100g,
+        quick.serving_grams,
+        quick.protein_per_100g,
+        quick.fat_per_100g,
+        quick.carbs_per_100g,
+    )
+    progress = await _today_progress(turn.database, turn.user_id)
+    await turn.message.reply_text(
+        f"Added {entry.name}: {entry.nutrition.calories:.2f} kcal, "
+        f"{entry.nutrition.grams:.2f}g. {progress}",
+        reply_markup=MAIN_KEYBOARD,
+    )
+    return True
+
+
+async def _today_progress(database: Database, user_id: int) -> str:
+    """One-line calorie total for the user's local today, with goal if set."""
+    timezone_name = await _call(database.get_timezone, user_id)
+    if timezone_name is None:
+        return ""
+    bounds = period_bounds(Period.TODAY, timezone_name)
+    stats = await _call(
+        database.stats, user_id, bounds.start_utc, bounds.end_utc, timezone_name, False
+    )
+    goal = await _call(database.get_daily_goal, user_id)
+    total = stats.calories
+    if goal is None:
+        return f"Today: {total:.0f} kcal."
+    remaining = goal - total
+    if remaining >= 0:
+        return f"Today: {total:.0f} / {goal:.0f} kcal ({remaining:.0f} left)."
+    return f"Today: {total:.0f} / {goal:.0f} kcal ({-remaining:.0f} over)."
+
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _require_private(update) or update.effective_message is None:
+    turn = await _begin(update, context, register_user=True)
+    if turn is None or turn.message.text is None:
         return
-    message = update.effective_message
-    if message.text is None:
-        return
-    text = message.text.strip()
-    user_id, chat_id = _identity(update)
-    database = _db(context)
-    await _call(database.ensure_user, user_id)
+    text = turn.message.text.strip()
+    database = turn.database
 
     if text == "Cancel":
-        active = await _call(database.get_session, user_id, chat_id)
-        if active is not None and active.state == SessionState.WAIT_SAVE_FAVORITE:
-            await _call(database.clear_session, user_id, chat_id)
-            await message.reply_text(
+        if (
+            turn.session is not None
+            and turn.session.state == SessionState.WAIT_SAVE_FAVORITE
+        ):
+            await _call(database.clear_session, turn.user_id, turn.chat_id)
+            await turn.message.reply_text(
                 "Favorite was not saved. The food entry remains in your diary.",
                 reply_markup=MAIN_KEYBOARD,
             )
@@ -257,38 +377,37 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await cancel(update, context)
         return
 
-    session = await _call(database.get_session, user_id, chat_id)
-    timezone_name = await _call(database.get_timezone, user_id)
-    if session is not None and _session_expired(session, database.now_epoch()):
-        await _call(database.clear_session, user_id, chat_id)
+    session = turn.session
+    timezone_name = await _call(database.get_timezone, turn.user_id)
+    if turn.session_expired:
         if timezone_name is None:
             await _start_with_prompt(
                 database,
-                user_id,
-                chat_id,
+                turn.user_id,
+                turn.chat_id,
                 SessionState.WAIT_TIMEZONE,
-                message,
+                turn.message,
                 "The previous input expired. Enter your timezone to continue:",
                 TIMEZONE_REQUIRED_MARKUP,
             )
         else:
-            await message.reply_text(
+            await turn.message.reply_text(
                 "The previous input expired. Choose an option again.",
                 reply_markup=MAIN_KEYBOARD,
             )
         return
-    message_id = getattr(message, "message_id", None)
+    message_id = getattr(turn.message, "message_id", None)
     if session is not None and (
         session.prompt_pending
         or (message_id is not None and message_id == session.last_message_id)
     ):
-        prompt, markup = _session_prompt(session, timezone_name is not None)
+        prompt, markup = session_prompt(session, timezone_name is not None)
         prefix = (
             "The previous prompt was not confirmed."
             if session.prompt_pending
             else "That message was already processed."
         )
-        await message.reply_text(f"{prefix}\n\n{prompt}", reply_markup=markup)
+        await turn.message.reply_text(f"{prefix}\n\n{prompt}", reply_markup=markup)
         if session.prompt_pending:
             await _mark_prompt_delivered(database, session)
         return
@@ -297,11 +416,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     ):
         await _start_with_prompt(
             database,
-            user_id,
-            chat_id,
+            turn.user_id,
+            turn.chat_id,
             SessionState.WAIT_TIMEZONE,
-            message,
-            "Enter your IANA timezone or city, for example Europe/Moscow or New York:",
+            turn.message,
+            TIMEZONE_ONBOARDING_PROMPT,
             TIMEZONE_REQUIRED_MARKUP,
         )
         return
@@ -313,17 +432,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if text == "Add Food":
         await _start_with_prompt(
             database,
-            user_id,
-            chat_id,
+            turn.user_id,
+            turn.chat_id,
             SessionState.WAIT_FOOD_NAME,
-            message,
-            "Enter the food name, or choose Skip:",
+            turn.message,
+            FOOD_NAME_PROMPT,
             SKIP_KEYBOARD,
         )
     elif text == "Food Today":
         await _show_entries(update, context, 0)
     elif text == "Statistics":
-        await message.reply_text(
+        await turn.message.reply_text(
             "Select a statistics period:", reply_markup=STATS_KEYBOARD
         )
     elif text == "Today Stats":
@@ -337,31 +456,50 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     elif text == "Search Favorites":
         await _start_with_prompt(
             database,
-            user_id,
-            chat_id,
+            turn.user_id,
+            turn.chat_id,
             SessionState.WAIT_FAVORITE_SEARCH,
-            message,
-            "Enter a favorite food name to search:",
+            turn.message,
+            FAVORITE_SEARCH_PROMPT,
             CANCEL_KEYBOARD,
         )
     elif text == "My Favorites":
         await _show_favorites(update, context, 0)
+    elif text == "Recent Foods":
+        await _show_recent(update, context)
+    elif text == "Daily Goal":
+        goal = await _call(database.get_daily_goal, turn.user_id)
+        prompt = (
+            f"Your daily goal is {goal:.0f} kcal. {GOAL_PROMPT}"
+            if goal is not None
+            else GOAL_PROMPT
+        )
+        await _start_with_prompt(
+            database,
+            turn.user_id,
+            turn.chat_id,
+            SessionState.WAIT_GOAL,
+            turn.message,
+            prompt,
+            GOAL_KEYBOARD,
+        )
     elif text == "Update Timezone":
         await _start_with_prompt(
             database,
-            user_id,
-            chat_id,
+            turn.user_id,
+            turn.chat_id,
             SessionState.WAIT_TIMEZONE,
-            message,
-            "Enter your new IANA timezone or city. Changing it also changes how existing "
-            "entries near midnight are grouped into calendar days:",
+            turn.message,
+            TIMEZONE_CHANGE_PROMPT,
             CANCEL_KEYBOARD,
         )
     elif text == "Back":
-        await message.reply_text("Select an option:", reply_markup=MAIN_KEYBOARD)
-    else:
-        await message.reply_text(
-            "Choose an option from the keyboard.", reply_markup=MAIN_KEYBOARD
+        await turn.message.reply_text("Select an option:", reply_markup=MAIN_KEYBOARD)
+    elif not await _log_quick_add(turn, text):
+        await turn.message.reply_text(
+            "Choose an option from the keyboard, or log a food in one message, "
+            "for example: oatmeal 370 60.",
+            reply_markup=MAIN_KEYBOARD,
         )
 
 
@@ -390,16 +528,36 @@ async def _handle_session_text(
             )
         elif session.state == SessionState.WAIT_FOOD_NAME:
             name = None if text == "Skip" else normalize_food_name(text)
-            await _advance_with_prompt(
-                database,
-                session,
-                SessionState.WAIT_CALORIES,
-                message,
-                "Enter calories per 100g:",
-                CANCEL_KEYBOARD,
-                message_id,
-                draft_name=name,
+            favorite = (
+                None
+                if name is None
+                else await _call(database.find_favorite_by_name, session.user_id, name)
             )
+            if favorite is None:
+                await _advance_with_prompt(
+                    database,
+                    session,
+                    SessionState.WAIT_CALORIES,
+                    message,
+                    message_id,
+                    draft_name=name,
+                )
+            else:
+                advanced = await _transition(
+                    database,
+                    session,
+                    SessionState.WAIT_FAVORITE_GRAMS,
+                    message_id,
+                    draft_name=name,
+                    selected_favorite_id=favorite.favorite_id,
+                )
+                await message.reply_text(
+                    f"Found favorite {favorite.name} "
+                    f"({favorite.calories_per_100g:.2f} kcal/100g). "
+                    f"{FAVORITE_MATCH_GRAMS_PROMPT}",
+                    reply_markup=MANUAL_ENTRY_KEYBOARD,
+                )
+                await _mark_prompt_delivered(database, advanced)
         elif session.state == SessionState.WAIT_CALORIES:
             calories = parse_calories(text)
             await _advance_with_prompt(
@@ -407,8 +565,6 @@ async def _handle_session_text(
                 session,
                 SessionState.WAIT_GRAMS,
                 message,
-                "Enter the serving weight in grams:",
-                CANCEL_KEYBOARD,
                 message_id,
                 calories_per_100g=calories,
             )
@@ -419,8 +575,6 @@ async def _handle_session_text(
                 session,
                 SessionState.WAIT_PROTEIN,
                 message,
-                "Enter protein per 100g, or choose Skip:",
-                SKIP_KEYBOARD,
                 message_id,
                 serving_grams=grams,
             )
@@ -432,8 +586,6 @@ async def _handle_session_text(
                 session,
                 SessionState.WAIT_FAT,
                 message,
-                "Enter fat per 100g, or choose Skip:",
-                SKIP_KEYBOARD,
                 message_id,
                 protein_per_100g=protein,
             )
@@ -445,8 +597,6 @@ async def _handle_session_text(
                 session,
                 SessionState.WAIT_CARBS,
                 message,
-                "Enter carbs per 100g, or choose Skip:",
-                SKIP_KEYBOARD,
                 message_id,
                 fat_per_100g=fat,
             )
@@ -457,13 +607,14 @@ async def _handle_session_text(
                 session, carbs_per_100g=carbs, last_message_id=message_id
             )
             await _call(database.complete_food_draft, completed, event_epoch)
+            progress = await _today_progress(database, session.user_id)
             if session.draft_name is None:
                 await message.reply_text(
-                    "Food entry added.", reply_markup=MAIN_KEYBOARD
+                    f"Food entry added. {progress}", reply_markup=MAIN_KEYBOARD
                 )
             else:
                 await message.reply_text(
-                    "Food entry added. Save this product as a favorite?",
+                    f"Food entry added. {progress}\nSave this product as a favorite?",
                     reply_markup=FAVORITE_DECISION_KEYBOARD,
                 )
                 pending = await _call(
@@ -503,7 +654,7 @@ async def _handle_session_text(
                     [
                         [
                             InlineKeyboardButton(
-                                _favorite_button_text(favorite),
+                                favorite_button_text(favorite),
                                 callback_data=f"fav:use:{favorite.favorite_id}",
                             )
                         ]
@@ -521,15 +672,77 @@ async def _handle_session_text(
                 )
             await _call(database.clear_session, session.user_id, session.chat_id)
         elif session.state == SessionState.WAIT_FAVORITE_GRAMS:
-            grams = parse_grams(text)
+            if text == "Enter Manually" and session.draft_name is not None:
+                await _advance_with_prompt(
+                    database,
+                    session,
+                    SessionState.WAIT_CALORIES,
+                    message,
+                    message_id,
+                    selected_favorite_id=None,
+                )
+            else:
+                grams = parse_grams(text)
+                await _call(
+                    database.use_selected_favorite,
+                    session.user_id,
+                    session.chat_id,
+                    grams,
+                    event_epoch,
+                )
+                progress = await _today_progress(database, session.user_id)
+                await message.reply_text(
+                    f"Food entry added. {progress}", reply_markup=MAIN_KEYBOARD
+                )
+        elif session.state == SessionState.WAIT_RECENT_GRAMS:
+            grams = None if text == "Same as last time" else parse_grams(text)
             await _call(
-                database.use_selected_favorite,
+                database.use_selected_entry,
                 session.user_id,
                 session.chat_id,
                 grams,
                 event_epoch,
             )
-            await message.reply_text("Food entry added.", reply_markup=MAIN_KEYBOARD)
+            progress = await _today_progress(database, session.user_id)
+            await message.reply_text(
+                f"Food entry added. {progress}", reply_markup=MAIN_KEYBOARD
+            )
+        elif session.state == SessionState.WAIT_GOAL:
+            goal = None if text == "Remove" else parse_daily_goal(text)
+            await _call(database.complete_goal_session, session, goal, now)
+            await message.reply_text(
+                "Daily goal removed."
+                if goal is None
+                else f"Daily goal set to {goal:.0f} kcal.",
+                reply_markup=MAIN_KEYBOARD,
+            )
+        elif session.state == SessionState.WAIT_ENTRY_GRAMS:
+            grams = parse_grams(text)
+            entry = await _call(
+                database.update_entry_grams,
+                session.user_id,
+                session.chat_id,
+                grams,
+                now,
+            )
+            await message.reply_text(
+                f"Serving weight updated to {entry.nutrition.grams:.2f}g "
+                f"({entry.nutrition.calories:.2f} kcal).",
+                reply_markup=MAIN_KEYBOARD,
+            )
+        elif session.state == SessionState.WAIT_ENTRY_TIME:
+            timezone_name = await _call(database.get_timezone, session.user_id)
+            if timezone_name is None:
+                raise StateConflict("Timezone is required to edit entry time")
+            eaten_at = parse_entry_time(text, timezone_name, now)
+            await _call(
+                database.update_entry_time,
+                session.user_id,
+                session.chat_id,
+                eaten_at,
+                now,
+            )
+            await message.reply_text("Entry time updated.", reply_markup=MAIN_KEYBOARD)
         elif session.state == SessionState.WAIT_FAVORITE_AMENDMENT:
             if session.selected_nutrient == "calories":
                 value = parse_calories(text)
@@ -595,14 +808,13 @@ async def _advance_with_prompt(
     session: Session,
     state: SessionState,
     message: Any,
-    prompt: str,
-    markup: ReplyKeyboardMarkup | ReplyKeyboardRemove,
     message_id: Optional[int],
     **changes: object,
 ) -> Session:
     advanced = await _transition(
         database, session, state, message_id=message_id, **changes
     )
+    prompt, markup = session_prompt(advanced, True)
     await message.reply_text(prompt, reply_markup=markup)
     return await _mark_prompt_delivered(database, advanced)
 
@@ -614,7 +826,7 @@ async def _start_with_prompt(
     state: SessionState,
     message: Any,
     prompt: str,
-    markup: ReplyKeyboardMarkup | ReplyKeyboardRemove,
+    markup: Markup,
     **values: object,
 ) -> Session:
     values.setdefault("last_message_id", getattr(message, "message_id", None))
@@ -634,60 +846,15 @@ def _session_expired(session: Session, now_utc: int) -> bool:
     return session.updated_at_utc < now_utc - SESSION_TTL_SECONDS
 
 
-def _session_prompt(
-    session: Session, has_timezone: bool
-) -> tuple[str, ReplyKeyboardMarkup | ReplyKeyboardRemove]:
-    prompts: dict[
-        SessionState, tuple[str, ReplyKeyboardMarkup | ReplyKeyboardRemove]
-    ] = {
-        SessionState.WAIT_TIMEZONE: (
-            "Enter your new IANA timezone or city:"
-            if has_timezone
-            else "Enter your IANA timezone or city, for example Europe/Moscow:",
-            CANCEL_KEYBOARD if has_timezone else TIMEZONE_REQUIRED_MARKUP,
-        ),
-        SessionState.WAIT_FOOD_NAME: (
-            "Enter the food name, or choose Skip:",
-            SKIP_KEYBOARD,
-        ),
-        SessionState.WAIT_CALORIES: (
-            "Enter calories per 100g:",
-            CANCEL_KEYBOARD,
-        ),
-        SessionState.WAIT_GRAMS: (
-            "Enter the serving weight in grams:",
-            CANCEL_KEYBOARD,
-        ),
-        SessionState.WAIT_PROTEIN: (
-            "Enter protein per 100g, or choose Skip:",
-            SKIP_KEYBOARD,
-        ),
-        SessionState.WAIT_FAT: (
-            "Enter fat per 100g, or choose Skip:",
-            SKIP_KEYBOARD,
-        ),
-        SessionState.WAIT_CARBS: (
-            "Enter carbs per 100g, or choose Skip:",
-            SKIP_KEYBOARD,
-        ),
-        SessionState.WAIT_SAVE_FAVORITE: (
-            "The food entry is already saved. Save this product as a favorite?",
-            FAVORITE_DECISION_KEYBOARD,
-        ),
-        SessionState.WAIT_FAVORITE_SEARCH: (
-            "Enter a favorite food name to search:",
-            CANCEL_KEYBOARD,
-        ),
-        SessionState.WAIT_FAVORITE_GRAMS: (
-            "Enter the serving weight in grams for the selected favorite:",
-            CANCEL_KEYBOARD,
-        ),
-        SessionState.WAIT_FAVORITE_AMENDMENT: (
-            f"Enter the new {session.selected_nutrient or 'nutrient'} value per 100g:",
-            CANCEL_KEYBOARD,
-        ),
-    }
-    return prompts[session.state]
+async def _reprompt(turn: Turn, prefix: str) -> None:
+    """Repeat the active session's prompt below a short explanation."""
+    session = turn.session
+    if session is None:
+        return
+    has_timezone = await _call(turn.database.get_timezone, turn.user_id) is not None
+    prompt, markup = session_prompt(session, has_timezone)
+    await turn.message.reply_text(f"{prefix}\n\n{prompt}", reply_markup=markup)
+    await _mark_prompt_delivered(turn.database, session)
 
 
 async def _show_stats(
@@ -722,12 +889,25 @@ async def _show_stats(
         Period.MONTH: "Month-to-date logged-day average",
     }[period]
     coverage_unit = "days" if average else "entries"
+    goal = (
+        await _call(database.get_daily_goal, user_id)
+        if period == Period.TODAY
+        else None
+    )
+    calories_line = f"Calories: {stats.calories:.2f}"
+    if goal is not None:
+        remaining = goal - stats.calories
+        calories_line += (
+            f" / {goal:.0f} goal ({remaining:.0f} left)"
+            if remaining >= 0
+            else f" / {goal:.0f} goal ({-remaining:.0f} over)"
+        )
     await message.reply_text(
         f"{title}:\n"
-        f"Calories: {stats.calories:.2f}\n"
-        f"{_stat_macro_line('Protein', stats.protein, stats.protein_coverage, stats.coverage_total, coverage_unit)}\n"
-        f"{_stat_macro_line('Fat', stats.fat, stats.fat_coverage, stats.coverage_total, coverage_unit)}\n"
-        f"{_stat_macro_line('Carbs', stats.carbs, stats.carbs_coverage, stats.coverage_total, coverage_unit)}"
+        f"{calories_line}\n"
+        f"{stat_macro_line('Protein', stats.protein, stats.protein_coverage, stats.coverage_total, coverage_unit)}\n"
+        f"{stat_macro_line('Fat', stats.fat, stats.fat_coverage, stats.coverage_total, coverage_unit)}\n"
+        f"{stat_macro_line('Carbs', stats.carbs, stats.carbs_coverage, stats.coverage_total, coverage_unit)}"
     )
 
 
@@ -770,13 +950,13 @@ async def _show_entries(
         rows = [
             [
                 InlineKeyboardButton(
-                    _entry_button_text(entry),
+                    entry_button_text(entry),
                     callback_data=f"entry:view:{entry.entry_id}:{page.offset}",
                 )
             ]
             for entry in page.items
         ]
-        navigation = _navigation_row(page, "entry:list")
+        navigation = navigation_row(page, "entry:list")
         if navigation:
             rows.append(navigation)
         text, keyboard = "Today's food entries:", InlineKeyboardMarkup(rows)
@@ -803,13 +983,13 @@ async def _show_favorites(
         rows = [
             [
                 InlineKeyboardButton(
-                    _favorite_button_text(favorite),
+                    favorite_button_text(favorite),
                     callback_data=f"fav:view:{favorite.favorite_id}:{page.offset}",
                 )
             ]
             for favorite in page.items
         ]
-        navigation = _navigation_row(page, "fav:list")
+        navigation = navigation_row(page, "fav:list")
         if navigation:
             rows.append(navigation)
         text, keyboard = "Your favorite foods:", InlineKeyboardMarkup(rows)
@@ -819,21 +999,32 @@ async def _show_favorites(
         await update.effective_message.reply_text(text, reply_markup=keyboard)
 
 
-def _navigation_row(page: Page[Any], prefix: str) -> list[InlineKeyboardButton]:
-    row: list[InlineKeyboardButton] = []
-    if page.has_previous:
-        row.append(
-            InlineKeyboardButton(
-                "Previous", callback_data=f"{prefix}:{max(0, page.offset - PAGE_SIZE)}"
-            )
+async def _show_recent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if message is None:
+        return
+    user_id, _ = _identity(update)
+    database = _db(context)
+    templates = await _call(database.recent_entry_templates, user_id, 10)
+    if not templates:
+        await message.reply_text(
+            "No recent foods yet. Log a food first.", reply_markup=MAIN_KEYBOARD
         )
-    if page.has_next:
-        row.append(
-            InlineKeyboardButton(
-                "Next", callback_data=f"{prefix}:{page.offset + PAGE_SIZE}"
-            )
-        )
-    return row
+        return
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    entry_button_text(entry),
+                    callback_data=f"recent:use:{entry.entry_id}",
+                )
+            ]
+            for entry in templates
+        ]
+    )
+    await message.reply_text(
+        "Select a recent food to log again:", reply_markup=keyboard
+    )
 
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -853,15 +1044,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     user_id, chat_id = _identity(update)
     database = _db(context)
-    active_session = await _call(database.get_session, user_id, chat_id)
-    if active_session is not None and _session_expired(
-        active_session, database.now_epoch()
-    ):
-        await _call(database.clear_session, user_id, chat_id)
-        active_session = None
+    active_session, _ = await _active_session(database, user_id, chat_id)
     if active_session is not None and action.kind not in {"cancel", "dismiss"}:
         has_timezone = await _call(database.get_timezone, user_id) is not None
-        prompt, markup = _session_prompt(active_session, has_timezone)
+        prompt, markup = session_prompt(active_session, has_timezone)
         await query.message.reply_text(
             f"Finish the current input first, or choose Cancel.\n\n{prompt}",
             reply_markup=markup,
@@ -879,13 +1065,17 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     chat_id,
                     SessionState.WAIT_TIMEZONE,
                     query.message,
-                    "Enter your IANA timezone or city:",
+                    TIMEZONE_ONBOARDING_PROMPT,
                     TIMEZONE_REQUIRED_MARKUP,
                 )
             elif active_session is None or active_session.state not in {
                 SessionState.WAIT_FAVORITE_SEARCH,
                 SessionState.WAIT_FAVORITE_GRAMS,
                 SessionState.WAIT_FAVORITE_AMENDMENT,
+                SessionState.WAIT_RECENT_GRAMS,
+                SessionState.WAIT_ENTRY_GRAMS,
+                SessionState.WAIT_ENTRY_TIME,
+                SessionState.WAIT_GOAL,
             }:
                 await query.edit_message_text("This prompt has expired.")
             else:
@@ -908,15 +1098,83 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 [
                     [
                         InlineKeyboardButton(
+                            "Edit Grams",
+                            callback_data=f"entry:grams:{entry.entry_id}",
+                        ),
+                        InlineKeyboardButton(
+                            "Edit Time", callback_data=f"entry:time:{entry.entry_id}"
+                        ),
+                    ],
+                    [
+                        InlineKeyboardButton(
                             "Delete", callback_data=f"entry:delete:{entry.entry_id}"
                         ),
                         InlineKeyboardButton(
                             "Back", callback_data=f"entry:list:{action.offset}"
                         ),
-                    ]
+                    ],
                 ]
             )
-            await query.edit_message_text(_entry_details(entry), reply_markup=keyboard)
+            await query.edit_message_text(entry_details(entry), reply_markup=keyboard)
+        elif action.kind == "entry_grams" and action.record_id is not None:
+            entry = await _call(database.get_entry, user_id, action.record_id)
+            if entry is None:
+                raise NotFound("Food entry not found")
+            started = await _call(
+                database.start_session,
+                user_id,
+                chat_id,
+                SessionState.WAIT_ENTRY_GRAMS,
+                selected_entry_id=entry.entry_id,
+                prompt_pending=True,
+            )
+            await query.edit_message_text(
+                f"Editing serving weight for {entry.name or 'Unnamed food'} "
+                f"(currently {entry.nutrition.grams:.2f}g)."
+            )
+            await query.message.reply_text(
+                ENTRY_GRAMS_PROMPT, reply_markup=CANCEL_KEYBOARD
+            )
+            await _mark_prompt_delivered(database, started)
+        elif action.kind == "entry_time" and action.record_id is not None:
+            entry = await _call(database.get_entry, user_id, action.record_id)
+            if entry is None:
+                raise NotFound("Food entry not found")
+            started = await _call(
+                database.start_session,
+                user_id,
+                chat_id,
+                SessionState.WAIT_ENTRY_TIME,
+                selected_entry_id=entry.entry_id,
+                prompt_pending=True,
+            )
+            await query.edit_message_text(
+                f"Editing time for {entry.name or 'Unnamed food'}."
+            )
+            await query.message.reply_text(
+                ENTRY_TIME_PROMPT, reply_markup=CANCEL_KEYBOARD
+            )
+            await _mark_prompt_delivered(database, started)
+        elif action.kind == "recent_use" and action.record_id is not None:
+            entry = await _call(database.get_entry, user_id, action.record_id)
+            if entry is None:
+                raise NotFound("Food entry not found")
+            started = await _call(
+                database.start_session,
+                user_id,
+                chat_id,
+                SessionState.WAIT_RECENT_GRAMS,
+                selected_entry_id=entry.entry_id,
+                prompt_pending=True,
+            )
+            name = entry.name or "Unnamed food"
+            await query.edit_message_text(f"Selected: {name}")
+            await query.message.reply_text(
+                f"Enter the serving weight in grams for {name}, or choose "
+                f"Same as last time ({entry.nutrition.grams:.0f}g):",
+                reply_markup=REPEAT_KEYBOARD,
+            )
+            await _mark_prompt_delivered(database, started)
         elif action.kind == "entry_delete" and action.record_id is not None:
             entry = await _call(database.get_entry, user_id, action.record_id)
             if entry is None:
@@ -939,7 +1197,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 "Delete this food entry?", reply_markup=keyboard
             )
         elif action.kind == "entry_delete_confirm" and action.record_id is not None:
-            if _confirmation_expired(action, database.now_epoch()):
+            if confirmation_expired(action, database.now_epoch()):
                 await query.edit_message_text("This delete confirmation has expired.")
                 return
             await _call(database.delete_entry, user_id, action.record_id)
@@ -978,7 +1236,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 ]
             )
             await query.edit_message_text(
-                _favorite_details(favorite), reply_markup=keyboard
+                favorite_details(favorite), reply_markup=keyboard
             )
         elif action.kind == "favorite_use" and action.record_id is not None:
             favorite = await _call(database.get_favorite, user_id, action.record_id)
@@ -1076,7 +1334,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 f"Delete favorite {favorite.name}?", reply_markup=keyboard
             )
         elif action.kind == "favorite_delete_confirm" and action.record_id is not None:
-            if _confirmation_expired(action, database.now_epoch()):
+            if confirmation_expired(action, database.now_epoch()):
                 await query.edit_message_text("This delete confirmation has expired.")
                 return
             await _call(database.delete_favorite, user_id, action.record_id)
@@ -1096,234 +1354,29 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.edit_message_text(str(exc))
 
 
-def parse_callback(data: str) -> Optional[CallbackAction]:
-    if data in {"cancel", "cancel_all"}:
-        return CallbackAction("cancel")
-    if data == "dismiss":
-        return CallbackAction("dismiss")
-
-    parts = data.split(":")
-    try:
-        if len(parts) == 3 and parts[:2] == ["entry", "list"]:
-            return CallbackAction("entry_list", offset=_parse_offset(parts[2]))
-        if len(parts) == 3 and parts[:2] == ["fav", "list"]:
-            return CallbackAction("favorite_list", offset=_parse_offset(parts[2]))
-        if len(parts) == 3 and parts[0] == "entry":
-            kinds = {
-                "view": "entry_view",
-                "delete": "entry_delete",
-                "delete-confirm": "entry_delete_confirm",
-            }
-            if parts[1] in kinds:
-                return CallbackAction(kinds[parts[1]], record_id=_parse_id(parts[2]))
-        if len(parts) == 4 and parts[:2] == ["entry", "view"]:
-            return CallbackAction(
-                "entry_view",
-                record_id=_parse_id(parts[2]),
-                offset=_parse_offset(parts[3]),
-            )
-        if len(parts) == 4 and parts[:2] == ["entry", "delete-confirm"]:
-            return CallbackAction(
-                "entry_delete_confirm",
-                record_id=_parse_id(parts[2]),
-                issued_at=_parse_timestamp(parts[3]),
-            )
-        if len(parts) == 3 and parts[0] == "fav":
-            kinds = {
-                "view": "favorite_view",
-                "use": "favorite_use",
-                "edit": "favorite_edit",
-                "delete": "favorite_delete",
-                "delete-confirm": "favorite_delete_confirm",
-            }
-            if parts[1] in kinds:
-                return CallbackAction(kinds[parts[1]], record_id=_parse_id(parts[2]))
-        if len(parts) == 4 and parts[:2] == ["fav", "view"]:
-            return CallbackAction(
-                "favorite_view",
-                record_id=_parse_id(parts[2]),
-                offset=_parse_offset(parts[3]),
-            )
-        if len(parts) == 4 and parts[:2] == ["fav", "delete-confirm"]:
-            return CallbackAction(
-                "favorite_delete_confirm",
-                record_id=_parse_id(parts[2]),
-                issued_at=_parse_timestamp(parts[3]),
-            )
-        if len(parts) == 4 and parts[:2] == ["fav", "field"]:
-            if parts[3] not in {"calories", "protein", "fat", "carbs"}:
-                return None
-            return CallbackAction(
-                "favorite_field", record_id=_parse_id(parts[2]), nutrient=parts[3]
-            )
-
-        legacy_offset_prefixes = {
-            "previous:": "entry_list",
-            "next:": "entry_list",
-            "previous_fav:": "favorite_list",
-            "next_fav:": "favorite_list",
-        }
-        for prefix, kind in legacy_offset_prefixes.items():
-            if data.startswith(prefix):
-                return CallbackAction(kind, offset=_parse_offset(data[len(prefix) :]))
-
-        legacy_id_prefixes = (
-            ("entry_confirm_delete_", "entry_delete_confirm", None),
-            ("entry_cancel_delete_", "dismiss", None),
-            ("entry_delete_", "entry_delete", None),
-            ("entry_choose_", "entry_view", None),
-            ("fave_confirm_delete_", "favorite_delete_confirm", None),
-            ("fave_cancel_delete_", "dismiss", None),
-            ("favedelete_", "favorite_delete", None),
-            ("fave_amend_", "favorite_edit", None),
-            ("choose_favorite_", "favorite_view", None),
-            ("calories_amend_", "favorite_field", "calories"),
-            ("protein_amend_", "favorite_field", "protein"),
-            ("fat_amend_", "favorite_field", "fat"),
-            ("carbs_amend_", "favorite_field", "carbs"),
-            ("favorite_", "favorite_use", None),
-        )
-        for prefix, kind, nutrient in legacy_id_prefixes:
-            if data.startswith(prefix):
-                return CallbackAction(
-                    kind, record_id=_parse_id(data[len(prefix) :]), nutrient=nutrient
-                )
-    except ValueError:
-        return None
-    return None
-
-
-def _parse_id(value: str) -> int:
-    record_id = int(value)
-    if record_id <= 0:
-        raise ValueError("record ID must be positive")
-    return record_id
-
-
-def _parse_offset(value: str) -> int:
-    offset = int(value)
-    if offset < 0 or offset > 10_000 or offset % PAGE_SIZE != 0:
-        raise ValueError("invalid page offset")
-    return offset
-
-
-def _parse_timestamp(value: str) -> int:
-    timestamp = int(value)
-    if timestamp <= 0:
-        raise ValueError("invalid timestamp")
-    return timestamp
-
-
-def _confirmation_expired(action: CallbackAction, now_utc: int) -> bool:
-    return action.issued_at is None or abs(now_utc - action.issued_at) > 15 * 60
-
-
-def _short(value: str, limit: int = 42) -> str:
-    return value if len(value) <= limit else value[: limit - 3] + "..."
-
-
-def _optional_grams(value: Optional[float]) -> str:
-    return "not set" if value is None else f"{value:.2f}g"
-
-
-def _stat_macro_line(
-    label: str,
-    value: Optional[float],
-    coverage: int,
-    coverage_total: int,
-    coverage_unit: str,
-) -> str:
-    rendered = f"{label}: {_optional_grams(value)}"
-    if coverage < coverage_total:
-        rendered += f" (partial: {coverage}/{coverage_total} {coverage_unit})"
-    return rendered
-
-
-def _entry_button_text(entry: FoodEntry) -> str:
-    name = _short(entry.name or "Unnamed food", 30)
-    return f"{name} - {entry.nutrition.calories:.2f} kcal, {entry.nutrition.grams:.2f}g"
-
-
-def _favorite_button_text(favorite: FavoriteFood) -> str:
-    return f"{_short(favorite.name, 30)} - {favorite.calories_per_100g:.2f} kcal/100g"
-
-
-def _entry_details(entry: FoodEntry) -> str:
-    return (
-        f"{entry.name or 'Unnamed food'}\n"
-        f"Calories: {entry.nutrition.calories:.2f}\n"
-        f"Serving: {entry.nutrition.grams:.2f}g\n"
-        f"Protein: {_optional_grams(entry.nutrition.protein)}\n"
-        f"Fat: {_optional_grams(entry.nutrition.fat)}\n"
-        f"Carbs: {_optional_grams(entry.nutrition.carbs)}"
-    )
-
-
-def _favorite_details(favorite: FavoriteFood) -> str:
-    return (
-        f"{favorite.name} per 100g\n"
-        f"Calories: {favorite.calories_per_100g:.2f}\n"
-        f"Protein: {_optional_grams(favorite.protein_per_100g)}\n"
-        f"Fat: {_optional_grams(favorite.fat_per_100g)}\n"
-        f"Carbs: {_optional_grams(favorite.carbs_per_100g)}"
-    )
-
-
 async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _require_private(update) or update.effective_message is None:
+    turn = await _begin(update, context)
+    if turn is None:
         return
-    user_id, chat_id = _identity(update)
-    database = _db(context)
-    session = await _call(database.get_session, user_id, chat_id)
-    if session is not None and _session_expired(session, database.now_epoch()):
-        await _call(database.clear_session, user_id, chat_id)
-        session = None
-    if session is None:
-        await update.effective_message.reply_text(
+    if turn.session is None:
+        await turn.message.reply_text(
             "Unknown command. Use /start or choose an option from the keyboard.",
             reply_markup=MAIN_KEYBOARD,
         )
         return
-    prompt, markup = _session_prompt(
-        session, await _call(database.get_timezone, user_id) is not None
-    )
-    await update.effective_message.reply_text(
-        f"Unknown command.\n\n{prompt}", reply_markup=markup
-    )
-    refreshed = replace(
-        session,
-        prompt_pending=False,
-        updated_at_utc=database.now_epoch(),
-    )
-    await _call(database.update_session, session, refreshed)
+    await _reprompt(turn, "Unknown command.")
 
 
 async def handle_non_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _require_private(update) or update.effective_message is None:
+    turn = await _begin(update, context)
+    if turn is None:
         return
-    user_id, chat_id = _identity(update)
-    database = _db(context)
-    session = await _call(database.get_session, user_id, chat_id)
-    if session is not None and _session_expired(session, database.now_epoch()):
-        await _call(database.clear_session, user_id, chat_id)
-        session = None
-    if session is not None:
-        prompt, markup = _session_prompt(
-            session, await _call(database.get_timezone, user_id) is not None
-        )
-        await update.effective_message.reply_text(
-            f"Please send a text value.\n\n{prompt}", reply_markup=markup
-        )
-        refreshed = replace(
-            session,
-            prompt_pending=False,
-            updated_at_utc=database.now_epoch(),
-        )
-        await _call(database.update_session, session, refreshed)
-    else:
-        await update.effective_message.reply_text(
+    if turn.session is None:
+        await turn.message.reply_text(
             "Choose a text command from the keyboard.", reply_markup=MAIN_KEYBOARD
         )
+        return
+    await _reprompt(turn, "Please send a text value.")
 
 
 async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1386,6 +1439,7 @@ def build_application(
     application.add_handler(
         CommandHandler("updatetimezone", update_timezone, filters=new_messages)
     )
+    application.add_handler(CommandHandler("add", add_command, filters=new_messages))
     application.add_handler(CallbackQueryHandler(handle_callback))
     application.add_handler(
         MessageHandler(new_messages & filters.TEXT & ~filters.COMMAND, handle_text)

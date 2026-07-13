@@ -18,14 +18,16 @@ from .domain import (
     Stats,
     ValidationError,
     canonical_timezone,
+    check_daily_goal,
     local_date,
     normalize_food_name,
+    per_100_from_totals,
     scale_per_100,
     validate_macro_sum,
 )
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 BEGIN;
@@ -33,6 +35,7 @@ BEGIN;
 CREATE TABLE users (
     user_id INTEGER PRIMARY KEY,
     timezone TEXT NULL CHECK (timezone IS NULL OR length(timezone) BETWEEN 1 AND 128),
+    daily_calorie_goal REAL NULL CHECK (daily_calorie_goal IS NULL OR (daily_calorie_goal > 0 AND daily_calorie_goal <= 50000)),
     created_at_utc INTEGER NOT NULL,
     updated_at_utc INTEGER NOT NULL
 );
@@ -90,6 +93,7 @@ CREATE TABLE sessions (
     selected_favorite_id INTEGER NULL,
     selected_nutrient TEXT NULL
         CHECK (selected_nutrient IS NULL OR selected_nutrient IN ('calories', 'protein', 'fat', 'carbs')),
+    selected_entry_id INTEGER NULL,
     prompt_pending INTEGER NOT NULL DEFAULT 0 CHECK (prompt_pending IN (0, 1)),
     last_message_id INTEGER NULL,
     revision INTEGER NOT NULL DEFAULT 0,
@@ -112,7 +116,7 @@ CREATE INDEX favorites_user_name_idx
     ON favorite_foods(user_id, name_key, favorite_id DESC);
 CREATE INDEX sessions_updated_idx ON sessions(updated_at_utc);
 
-PRAGMA user_version = 2;
+PRAGMA user_version = 3;
 COMMIT;
 """
 
@@ -148,23 +152,36 @@ class Database:
                         "Back it up and use a new DATABASE_PATH for the Python version."
                     )
                 connection.executescript(SCHEMA)
-            elif version == 1:
+            elif version in (1, 2):
                 try:
                     connection.execute("BEGIN IMMEDIATE")
-                    columns = {
+                    session_columns = {
                         row[1]
                         for row in connection.execute("PRAGMA table_info(sessions)")
                     }
-                    if "prompt_pending" not in columns:
+                    if "prompt_pending" not in session_columns:
                         connection.execute(
                             "ALTER TABLE sessions ADD COLUMN prompt_pending INTEGER "
                             "NOT NULL DEFAULT 0 CHECK (prompt_pending IN (0, 1))"
                         )
-                    if "last_message_id" not in columns:
+                    if "last_message_id" not in session_columns:
                         connection.execute(
                             "ALTER TABLE sessions ADD COLUMN last_message_id INTEGER NULL"
                         )
-                    connection.execute("PRAGMA user_version = 2")
+                    if "selected_entry_id" not in session_columns:
+                        connection.execute(
+                            "ALTER TABLE sessions ADD COLUMN selected_entry_id INTEGER NULL"
+                        )
+                    user_columns = {
+                        row[1] for row in connection.execute("PRAGMA table_info(users)")
+                    }
+                    if "daily_calorie_goal" not in user_columns:
+                        connection.execute(
+                            "ALTER TABLE users ADD COLUMN daily_calorie_goal REAL "
+                            "NULL CHECK (daily_calorie_goal IS NULL OR "
+                            "(daily_calorie_goal > 0 AND daily_calorie_goal <= 50000))"
+                        )
+                    connection.execute("PRAGMA user_version = 3")
                     connection.commit()
                 except Exception:
                     connection.rollback()
@@ -256,6 +273,58 @@ class Database:
         finally:
             connection.close()
 
+    def get_daily_goal(self, user_id: int) -> Optional[float]:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT daily_calorie_goal FROM users WHERE user_id = ?", (user_id,)
+            ).fetchone()
+        return None if row is None else row["daily_calorie_goal"]
+
+    def set_daily_goal(
+        self, user_id: int, goal: Optional[float], now_utc: Optional[int] = None
+    ) -> None:
+        if goal is not None:
+            check_daily_goal(goal)
+        now = self.now_epoch() if now_utc is None else now_utc
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE users SET daily_calorie_goal = ?, updated_at_utc = ? "
+                "WHERE user_id = ?",
+                (goal, now, user_id),
+            )
+            if cursor.rowcount != 1:
+                raise NotFound("User not found")
+
+    def complete_goal_session(
+        self,
+        session: Session,
+        goal: Optional[float],
+        now_utc: Optional[int] = None,
+    ) -> None:
+        if session.state != SessionState.WAIT_GOAL:
+            raise StateConflict("Goal workflow is not active")
+        if goal is not None:
+            check_daily_goal(goal)
+        now = self.now_epoch() if now_utc is None else now_utc
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            self._assert_session(connection, session)
+            cursor = connection.execute(
+                "UPDATE users SET daily_calorie_goal = ?, updated_at_utc = ? "
+                "WHERE user_id = ?",
+                (goal, now, session.user_id),
+            )
+            if cursor.rowcount != 1:
+                raise NotFound("User not found")
+            self._delete_exact_session(connection, session)
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
     def start_session(
         self,
         user_id: int,
@@ -281,9 +350,9 @@ class Database:
                     INSERT INTO sessions(
                         user_id, chat_id, state, draft_name, calories_per_100g,
                         serving_grams, protein_per_100g, fat_per_100g, carbs_per_100g,
-                        selected_favorite_id, selected_nutrient, prompt_pending,
-                        last_message_id, revision, updated_at_utc
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+                        selected_favorite_id, selected_nutrient, selected_entry_id,
+                        prompt_pending, last_message_id, revision, updated_at_utc
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
                     ON CONFLICT(user_id, chat_id) DO UPDATE SET
                         state = excluded.state,
                         draft_name = excluded.draft_name,
@@ -294,6 +363,7 @@ class Database:
                         carbs_per_100g = excluded.carbs_per_100g,
                         selected_favorite_id = excluded.selected_favorite_id,
                         selected_nutrient = excluded.selected_nutrient,
+                        selected_entry_id = excluded.selected_entry_id,
                         prompt_pending = excluded.prompt_pending,
                         last_message_id = excluded.last_message_id,
                         revision = sessions.revision + 1,
@@ -340,6 +410,7 @@ class Database:
             updated.carbs_per_100g,
             updated.selected_favorite_id,
             updated.selected_nutrient,
+            updated.selected_entry_id,
             int(updated.prompt_pending),
             updated.last_message_id,
             now,
@@ -355,7 +426,7 @@ class Database:
                     state = ?, draft_name = ?, calories_per_100g = ?, serving_grams = ?,
                     protein_per_100g = ?, fat_per_100g = ?, carbs_per_100g = ?,
                     selected_favorite_id = ?, selected_nutrient = ?,
-                    prompt_pending = ?, last_message_id = ?,
+                    selected_entry_id = ?, prompt_pending = ?, last_message_id = ?,
                     revision = revision + 1, updated_at_utc = ?
                 WHERE user_id = ? AND chat_id = ? AND state = ? AND revision = ?
                 """,
@@ -566,6 +637,63 @@ class Database:
             connection.close()
         return FoodEntry(entry_id, user_id, eaten_at_utc, favorite.name, totals)
 
+    def use_selected_entry(
+        self,
+        user_id: int,
+        chat_id: int,
+        grams: Optional[float],
+        eaten_at_utc: int,
+    ) -> FoodEntry:
+        """Log the session's selected entry again; None grams repeats the serving."""
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM sessions WHERE user_id = ? AND chat_id = ?",
+                (user_id, chat_id),
+            ).fetchone()
+            if row is None or row["state"] != SessionState.WAIT_RECENT_GRAMS.value:
+                raise StateConflict("Selected food is no longer available")
+            session = self._row_to_session(row)
+            if session.selected_entry_id is None:
+                raise StateConflict("Selected food is missing")
+            source_row = connection.execute(
+                "SELECT * FROM food_entries WHERE user_id = ? AND entry_id = ?",
+                (user_id, session.selected_entry_id),
+            ).fetchone()
+            if source_row is None:
+                raise NotFound("Food entry not found")
+            source = self._row_to_entry(source_row)
+            serving = source.nutrition.grams if grams is None else grams
+            calories, protein, fat, carbs = per_100_from_totals(source.nutrition)
+            totals = scale_per_100(calories, serving, protein, fat, carbs)
+            cursor = connection.execute(
+                """
+                INSERT INTO food_entries(
+                    user_id, eaten_at_utc, name, grams, calories, protein, fat, carbs
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    user_id,
+                    eaten_at_utc,
+                    source.name,
+                    totals.grams,
+                    totals.calories,
+                    totals.protein,
+                    totals.fat,
+                    totals.carbs,
+                ),
+            )
+            entry_id = int(cursor.lastrowid)
+            self._delete_exact_session(connection, session)
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        return FoodEntry(entry_id, user_id, eaten_at_utc, source.name, totals)
+
     def complete_favorite_amendment(
         self, user_id: int, chat_id: int, value: float, now_utc: Optional[int] = None
     ) -> FavoriteFood:
@@ -689,6 +817,21 @@ class Database:
             ).fetchone()
         return None if row is None else self._row_to_favorite(row)
 
+    def find_favorite_by_name(self, user_id: int, name: str) -> Optional[FavoriteFood]:
+        """Return the newest favorite whose name matches, ignoring case."""
+        key = normalize_food_name(name).casefold()
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM favorite_foods
+                WHERE user_id = ? AND name_key = ?
+                ORDER BY favorite_id DESC
+                LIMIT 1
+                """,
+                (user_id, key),
+            ).fetchone()
+        return None if row is None else self._row_to_favorite(row)
+
     def delete_favorite(self, user_id: int, favorite_id: int) -> None:
         with self._connect() as connection:
             cursor = connection.execute(
@@ -738,6 +881,42 @@ class Database:
             ).fetchall()
         return tuple(self._row_to_favorite(row) for row in rows)
 
+    def add_entry(
+        self,
+        user_id: int,
+        eaten_at_utc: int,
+        name: Optional[str],
+        calories_per_100g: float,
+        grams: float,
+        protein_per_100g: Optional[float] = None,
+        fat_per_100g: Optional[float] = None,
+        carbs_per_100g: Optional[float] = None,
+    ) -> FoodEntry:
+        clean_name = None if name is None else normalize_food_name(name)
+        totals = scale_per_100(
+            calories_per_100g, grams, protein_per_100g, fat_per_100g, carbs_per_100g
+        )
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO food_entries(
+                    user_id, eaten_at_utc, name, grams, calories, protein, fat, carbs
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    user_id,
+                    eaten_at_utc,
+                    clean_name,
+                    totals.grams,
+                    totals.calories,
+                    totals.protein,
+                    totals.fat,
+                    totals.carbs,
+                ),
+            )
+            entry_id = int(cursor.lastrowid)
+        return FoodEntry(entry_id, user_id, eaten_at_utc, clean_name, totals)
+
     def get_entry(self, user_id: int, entry_id: int) -> Optional[FoodEntry]:
         with self._connect() as connection:
             row = connection.execute(
@@ -754,6 +933,105 @@ class Database:
             )
             if cursor.rowcount != 1:
                 raise NotFound("Food entry not found")
+
+    def update_entry_grams(
+        self, user_id: int, chat_id: int, grams: float, now_utc: Optional[int] = None
+    ) -> FoodEntry:
+        """Re-scale the session's selected entry to a new serving weight."""
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            session, entry = self._selected_entry_session(
+                connection, user_id, chat_id, SessionState.WAIT_ENTRY_GRAMS
+            )
+            calories, protein, fat, carbs = per_100_from_totals(entry.nutrition)
+            totals = scale_per_100(calories, grams, protein, fat, carbs)
+            cursor = connection.execute(
+                """
+                UPDATE food_entries
+                SET grams = ?, calories = ?, protein = ?, fat = ?, carbs = ?
+                WHERE user_id = ? AND entry_id = ?
+                """,
+                (
+                    totals.grams,
+                    totals.calories,
+                    totals.protein,
+                    totals.fat,
+                    totals.carbs,
+                    user_id,
+                    entry.entry_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise NotFound("Food entry not found")
+            self._delete_exact_session(connection, session)
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        return FoodEntry(
+            entry.entry_id, user_id, entry.eaten_at_utc, entry.name, totals
+        )
+
+    def update_entry_time(
+        self,
+        user_id: int,
+        chat_id: int,
+        eaten_at_utc: int,
+        now_utc: Optional[int] = None,
+    ) -> FoodEntry:
+        """Move the session's selected entry to a different timestamp."""
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            session, entry = self._selected_entry_session(
+                connection, user_id, chat_id, SessionState.WAIT_ENTRY_TIME
+            )
+            cursor = connection.execute(
+                """
+                UPDATE food_entries SET eaten_at_utc = ?
+                WHERE user_id = ? AND entry_id = ?
+                """,
+                (eaten_at_utc, user_id, entry.entry_id),
+            )
+            if cursor.rowcount != 1:
+                raise NotFound("Food entry not found")
+            self._delete_exact_session(connection, session)
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        return FoodEntry(
+            entry.entry_id, user_id, eaten_at_utc, entry.name, entry.nutrition
+        )
+
+    def _selected_entry_session(
+        self,
+        connection: sqlite3.Connection,
+        user_id: int,
+        chat_id: int,
+        expected_state: SessionState,
+    ) -> tuple[Session, FoodEntry]:
+        row = connection.execute(
+            "SELECT * FROM sessions WHERE user_id = ? AND chat_id = ?",
+            (user_id, chat_id),
+        ).fetchone()
+        if row is None or row["state"] != expected_state.value:
+            raise StateConflict("Entry amendment is no longer active")
+        session = self._row_to_session(row)
+        if session.selected_entry_id is None:
+            raise StateConflict("Entry amendment context is incomplete")
+        entry_row = connection.execute(
+            "SELECT * FROM food_entries WHERE user_id = ? AND entry_id = ?",
+            (user_id, session.selected_entry_id),
+        ).fetchone()
+        if entry_row is None:
+            raise NotFound("Food entry not found")
+        return session, self._row_to_entry(entry_row)
 
     def page_entries(
         self,
@@ -776,6 +1054,35 @@ class Database:
             ).fetchall()
         items = tuple(self._row_to_entry(row) for row in rows[:limit])
         return Page(items, offset, offset > 0, len(rows) > limit)
+
+    def recent_entry_templates(
+        self, user_id: int, limit: int = 10
+    ) -> tuple[FoodEntry, ...]:
+        """Return the newest named entries, one per distinct casefolded name."""
+        if not 1 <= limit <= 100:
+            raise ValueError("limit must be between 1 and 100")
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM food_entries
+                WHERE user_id = ? AND name IS NOT NULL
+                ORDER BY entry_id DESC
+                LIMIT 200
+                """,
+                (user_id,),
+            ).fetchall()
+        templates: list[FoodEntry] = []
+        seen: set[str] = set()
+        for row in rows:
+            entry = self._row_to_entry(row)
+            key = (entry.name or "").casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            templates.append(entry)
+            if len(templates) == limit:
+                break
+        return tuple(templates)
 
     def stats(
         self,
@@ -881,6 +1188,7 @@ class Database:
             session.carbs_per_100g,
             session.selected_favorite_id,
             session.selected_nutrient,
+            session.selected_entry_id,
             int(session.prompt_pending),
             session.last_message_id,
             session.updated_at_utc,
@@ -900,6 +1208,7 @@ class Database:
             carbs_per_100g=row["carbs_per_100g"],
             selected_favorite_id=row["selected_favorite_id"],
             selected_nutrient=row["selected_nutrient"],
+            selected_entry_id=row["selected_entry_id"],
             prompt_pending=bool(row["prompt_pending"]),
             last_message_id=row["last_message_id"],
             revision=row["revision"],

@@ -1,13 +1,21 @@
 import math
 import unittest
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from kcaloriebot.domain import (
+    NutritionTotals,
+    QuickAdd,
     ValidationError,
     normalize_food_name,
     normalize_search_query,
     parse_calories,
+    parse_daily_goal,
+    parse_entry_time,
     parse_grams,
     parse_macro,
+    parse_quick_add,
+    per_100_from_totals,
     scale_per_100,
     validate_macro_sum,
 )
@@ -140,6 +148,136 @@ class NutritionTests(unittest.TestCase):
             with self.subTest(macros=macros):
                 with self.assertRaises(ValidationError):
                     scale_per_100(100.0, 100.0, *macros)
+
+    def test_per_100_recovers_original_values_from_totals(self) -> None:
+        totals = NutritionTotals(
+            calories=100.0, grams=40.0, protein=4.0, fat=None, carbs=12.0
+        )
+
+        calories, protein, fat, carbs = per_100_from_totals(totals)
+
+        self.assertAlmostEqual(250.0, calories)
+        self.assertAlmostEqual(10.0, protein)
+        self.assertIsNone(fat)
+        self.assertAlmostEqual(30.0, carbs)
+
+    def test_per_100_clamps_float_rounding_at_the_macro_boundary(self) -> None:
+        totals = NutritionTotals(
+            calories=300.0, grams=0.3, protein=0.30000000000000004, fat=None, carbs=None
+        )
+
+        _, protein, _, _ = per_100_from_totals(totals)
+
+        self.assertEqual(100.0, protein)
+
+
+class QuickAddParsingTests(unittest.TestCase):
+    def test_plain_name_calories_grams(self) -> None:
+        self.assertEqual(
+            parse_quick_add("oatmeal 370 60"),
+            QuickAdd("oatmeal", 370.0, 60.0),
+        )
+
+    def test_multiword_names_and_decimal_commas(self) -> None:
+        self.assertEqual(
+            parse_quick_add("greek yogurt 59,5 150"),
+            QuickAdd("greek yogurt", 59.5, 150.0),
+        )
+
+    def test_units_fix_value_assignment_in_any_order(self) -> None:
+        for text in (
+            "bread 250 kcal 150 g",
+            "bread 150g 250kcal",
+            "bread 150 g 250 kcal",
+            "bread 250kcal 150",
+            "bread 150g 250",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(parse_quick_add(text), QuickAdd("bread", 250.0, 150.0))
+
+    def test_russian_units_are_recognized(self) -> None:
+        self.assertEqual(
+            parse_quick_add("буханка 250 ккал 150 г"),
+            QuickAdd("буханка", 250.0, 150.0),
+        )
+
+    def test_optional_macro_tokens(self) -> None:
+        self.assertEqual(
+            parse_quick_add("bread 250 150 p8 f3 c47"),
+            QuickAdd("bread", 250.0, 150.0, 8.0, 3.0, 47.0),
+        )
+        self.assertEqual(
+            parse_quick_add("хлеб 250 150 б8 ж3 у47"),
+            QuickAdd("хлеб", 250.0, 150.0, 8.0, 3.0, 47.0),
+        )
+
+    def test_non_quick_add_text_returns_none(self) -> None:
+        for text in (
+            "Add Food",
+            "hello there",
+            "рис",
+            "5 шт",
+            "oatmeal 370",
+            "1 2 3",
+            "370 60",
+        ):
+            with self.subTest(text=text):
+                self.assertIsNone(parse_quick_add(text))
+
+    def test_invalid_values_raise_validation_errors(self) -> None:
+        for text in (
+            "bread 20000 100",
+            "bread 250 0",
+            "bread 250 100 p60 f60",
+            "bread 250kcal 100kcal",
+            "bread 250 100 p101",
+        ):
+            with self.subTest(text=text):
+                with self.assertRaises(ValidationError):
+                    parse_quick_add(text)
+
+
+class DailyGoalParsingTests(unittest.TestCase):
+    def test_goal_accepts_positive_values_up_to_the_cap(self) -> None:
+        self.assertEqual(2000.0, parse_daily_goal("2000"))
+        self.assertEqual(50_000.0, parse_daily_goal("50000"))
+
+    def test_goal_rejects_invalid_values(self) -> None:
+        for text in ("0", "-1", "50001", "nan", "inf", "food"):
+            with self.subTest(text=text):
+                with self.assertRaises(ValidationError):
+                    parse_daily_goal(text)
+
+
+class EntryTimeParsingTests(unittest.TestCase):
+    NOW = int(datetime(2024, 6, 15, 20, 0, tzinfo=timezone.utc).timestamp())
+
+    def test_full_datetime_is_interpreted_in_the_user_timezone(self) -> None:
+        expected = int(
+            datetime(2024, 6, 14, 12, 0, tzinfo=ZoneInfo("Europe/Moscow")).timestamp()
+        )
+        self.assertEqual(
+            expected, parse_entry_time("2024-06-14 12:00", "Europe/Moscow", self.NOW)
+        )
+        self.assertEqual(
+            expected, parse_entry_time("14.06.2024 12:00", "Europe/Moscow", self.NOW)
+        )
+
+    def test_clock_only_uses_the_local_today(self) -> None:
+        expected = int(datetime(2024, 6, 15, 12, 0, tzinfo=timezone.utc).timestamp())
+        self.assertEqual(expected, parse_entry_time("12:00", "UTC", self.NOW))
+
+    def test_future_and_ancient_times_are_rejected(self) -> None:
+        for text in ("23:59", "2023-01-01 12:00"):
+            with self.subTest(text=text):
+                with self.assertRaises(ValidationError):
+                    parse_entry_time(text, "UTC", self.NOW)
+
+    def test_unrecognized_format_is_rejected(self) -> None:
+        for text in ("yesterday", "12", "2024-06-15", "12:00:30"):
+            with self.subTest(text=text):
+                with self.assertRaises(ValidationError):
+                    parse_entry_time(text, "UTC", self.NOW)
 
 
 if __name__ == "__main__":
