@@ -146,18 +146,20 @@ def session_prompt(session: Session, has_timezone: bool) -> tuple[str, Markup]:
     return prompts[session.state]
 
 
-def navigation_row(page: Page[Any], prefix: str) -> list[InlineKeyboardButton]:
+def navigation_row(
+    page: Page[Any], prefix: str, page_size: int = PAGE_SIZE
+) -> list[InlineKeyboardButton]:
     row: list[InlineKeyboardButton] = []
     if page.has_previous:
         row.append(
             InlineKeyboardButton(
-                "Previous", callback_data=f"{prefix}:{max(0, page.offset - PAGE_SIZE)}"
+                "Previous", callback_data=f"{prefix}:{max(0, page.offset - page_size)}"
             )
         )
     if page.has_next:
         row.append(
             InlineKeyboardButton(
-                "Next", callback_data=f"{prefix}:{page.offset + PAGE_SIZE}"
+                "Next", callback_data=f"{prefix}:{page.offset + page_size}"
             )
         )
     return row

@@ -21,6 +21,7 @@ from telegram.ext import (
 from .callbacks import (
     CallbackAction,
     PAGE_SIZE,
+    STATS_PAGE_SIZE,
     confirmation_expired,
     parse_callback,
 )
@@ -923,7 +924,7 @@ async def _show_daily_stats(
         bounds.end_utc,
         timezone_name,
         offset,
-        PAGE_SIZE,
+        STATS_PAGE_SIZE,
     )
     if not page.items and offset > 0:
         page = await _call(
@@ -933,7 +934,7 @@ async def _show_daily_stats(
             bounds.end_utc,
             timezone_name,
             0,
-            PAGE_SIZE,
+            STATS_PAGE_SIZE,
         )
     if not page.items:
         text, keyboard = f"No food entries found for {period.value}.", None
@@ -944,7 +945,7 @@ async def _show_daily_stats(
         }[period]
         blocks = "\n\n".join(day_stats_block(day) for day in page.items)
         text = f"{title}:\n\n{blocks}"
-        navigation = navigation_row(page, f"stats:{period.value}")
+        navigation = navigation_row(page, f"stats:{period.value}", STATS_PAGE_SIZE)
         keyboard = InlineKeyboardMarkup([navigation]) if navigation else None
     if edit and update.callback_query is not None:
         await update.callback_query.edit_message_text(text, reply_markup=keyboard)

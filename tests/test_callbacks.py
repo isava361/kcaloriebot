@@ -37,8 +37,9 @@ class CallbackParsingTests(unittest.TestCase):
             "entry:grams:7": CallbackAction("entry_grams", record_id=7),
             "entry:time:7": CallbackAction("entry_time", record_id=7),
             "recent:use:4": CallbackAction("recent_use", record_id=4),
-            "stats:week:5": CallbackAction("stats_page", period="week", offset=5),
+            "stats:week:7": CallbackAction("stats_page", period="week", offset=7),
             "stats:month:0": CallbackAction("stats_page", period="month", offset=0),
+            "stats:month:14": CallbackAction("stats_page", period="month", offset=14),
         }
         for data, expected in cases.items():
             with self.subTest(data=data):
@@ -116,9 +117,10 @@ class CallbackParsingTests(unittest.TestCase):
             "fav:field:1:sodium",
             "fav:field:1",
             "entry:delete-confirm:1:0",
-            "stats:year:5",
+            "stats:year:7",
             "stats:week",
             "stats:week:3",
+            "stats:week:5",
         ):
             with self.subTest(data=data):
                 self.assertIsNone(parse_callback(data))

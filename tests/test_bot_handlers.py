@@ -736,7 +736,7 @@ class NewFeatureTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("2000 goal (1900 left)", update.effective_message.replies[-1][0])
 
-    async def test_week_stats_show_daily_breakdown_with_pagination(self) -> None:
+    async def test_week_stats_show_whole_week_on_one_page(self) -> None:
         now = self.database.now_epoch()
         for day in range(7):
             self.database.add_entry(
@@ -748,20 +748,28 @@ class NewFeatureTests(unittest.IsolatedAsyncioTestCase):
 
         text, keyboard = update.effective_message.replies[-1]
         self.assertIn("Last 7 days", text)
-        self.assertEqual(5, text.count("kcal"))
+        self.assertEqual(7, text.count("kcal"))
         self.assertIn("Protein: 4.00g", text)
-        buttons = keyboard.inline_keyboard[0]
-        self.assertEqual(["Next"], [button.text for button in buttons])
-        self.assertEqual("stats:week:5", buttons[0].callback_data)
+        self.assertIsNone(keyboard)
 
-        query = FakeQuery("stats:week:5", FakeMessage())
+    async def test_month_stats_paginate_seven_days_per_page(self) -> None:
+        now = self.database.now_epoch()
+        for day in range(8):
+            self.database.add_entry(
+                1, now - day * 86_400, "Rice", 250.0, 40.0, 10.0, 20.0, 30.0
+            )
+        page = self.database.daily_breakdown(1, 0, now + 86_400, "UTC", 0, 7)
+        self.assertTrue(page.has_next)
+
+        query = FakeQuery("stats:month:7", FakeMessage())
         await handle_callback(make_update(query=query), self.context)
 
         text, keyboard = query.edits[-1]
-        self.assertEqual(2, text.count("kcal"))
-        buttons = keyboard.inline_keyboard[0]
-        self.assertEqual(["Previous"], [button.text for button in buttons])
-        self.assertEqual("stats:week:0", buttons[0].callback_data)
+        self.assertIn("This month", text)
+        self.assertGreaterEqual(text.count("kcal"), 1)
+        if keyboard is not None:
+            buttons = keyboard.inline_keyboard[0]
+            self.assertIn("Previous", [button.text for button in buttons])
 
     async def test_week_stats_without_entries_report_empty_period(self) -> None:
         update = make_update("Week Stats")

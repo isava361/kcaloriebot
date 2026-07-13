@@ -303,24 +303,24 @@ class PaginationAndStatsTests(DatabaseTestCase):
         self.assertFalse(page.has_next)
 
     def test_daily_breakdown_paginates_logged_days(self) -> None:
-        for day in range(7):  # 2024-01-01 .. 2024-01-07 UTC
+        for day in range(8):  # 2024-01-01 .. 2024-01-08 UTC
             self.database.add_entry(
                 1, 1_704_067_200 + day * 86_400, "Rice", 250.0, 40.0
             )
 
         first = self.database.daily_breakdown(
-            1, 1_704_067_200, 1_704_672_000, "UTC", 0, 5
+            1, 1_704_067_200, 1_704_758_400, "UTC", 0, 7
         )
         second = self.database.daily_breakdown(
-            1, 1_704_067_200, 1_704_672_000, "UTC", 5, 5
+            1, 1_704_067_200, 1_704_758_400, "UTC", 7, 7
         )
 
-        self.assertEqual(5, len(first.items))
-        self.assertEqual(date(2024, 1, 7), first.items[0].day)
+        self.assertEqual(7, len(first.items))
+        self.assertEqual(date(2024, 1, 8), first.items[0].day)
         self.assertFalse(first.has_previous)
         self.assertTrue(first.has_next)
         self.assertEqual(
-            (date(2024, 1, 2), date(2024, 1, 1)),
+            (date(2024, 1, 1),),
             tuple(item.day for item in second.items),
         )
         self.assertTrue(second.has_previous)

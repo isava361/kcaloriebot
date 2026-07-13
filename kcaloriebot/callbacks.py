@@ -7,6 +7,7 @@ from typing import Optional
 
 
 PAGE_SIZE = 5
+STATS_PAGE_SIZE = 7
 MAX_PAGE_OFFSET = 10_000
 CONFIRMATION_TTL_SECONDS = 15 * 60
 
@@ -37,7 +38,9 @@ def parse_callback(data: str) -> Optional[CallbackAction]:
             return CallbackAction("recent_use", record_id=_parse_id(parts[2]))
         if len(parts) == 3 and parts[0] == "stats" and parts[1] in {"week", "month"}:
             return CallbackAction(
-                "stats_page", period=parts[1], offset=_parse_offset(parts[2])
+                "stats_page",
+                period=parts[1],
+                offset=_parse_offset(parts[2], STATS_PAGE_SIZE),
             )
         if len(parts) == 3 and parts[0] == "entry":
             kinds = {
@@ -144,9 +147,9 @@ def _parse_id(value: str) -> int:
     return record_id
 
 
-def _parse_offset(value: str) -> int:
+def _parse_offset(value: str, page_size: int = PAGE_SIZE) -> int:
     offset = int(value)
-    if offset < 0 or offset > MAX_PAGE_OFFSET or offset % PAGE_SIZE != 0:
+    if offset < 0 or offset > MAX_PAGE_OFFSET or offset % page_size != 0:
         raise ValueError("invalid page offset")
     return offset
 

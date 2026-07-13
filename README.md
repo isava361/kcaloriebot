@@ -284,7 +284,7 @@ The bot intentionally declines group-chat use because food history and inline
 button contents are personal data.
 
 Week and month statistics are a per-day breakdown of days on which at least one
-entry was recorded, newest day first, paginated five days per page with inline
+entry was recorded, newest day first, paginated seven days per page with inline
 `Previous`/`Next` buttons. Each day shows its calories, protein, fat, and
 carbs. Unknown macronutrients remain unknown; the bot marks a day's nutrient as
 partial when only some of its entries contain it. Entries use the timestamp of
