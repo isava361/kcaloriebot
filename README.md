@@ -272,8 +272,9 @@ is two taps: pick the food, then send the grams or choose `Same as last time`.
 ### Goals, editing, and statistics
 
 `Daily Goal` stores a calorie target; every logged entry replies with today's
-total and the remaining budget, and `Today Stats` shows progress against the
-goal. Choose `Remove` in the goal prompt to clear it.
+total and the remaining budget, and `Food Today` shows today's totals with
+progress against the goal above the entry list, with a `Yesterday` button for
+yesterday's totals. Choose `Remove` in the goal prompt to clear it.
 
 Entries in `Food Today` can be corrected after logging: `Edit Grams` re-scales
 the stored nutrition to a new serving weight, and `Edit Time` moves the entry,
@@ -285,10 +286,11 @@ button contents are personal data.
 
 Week and month statistics are a per-day breakdown of days on which at least one
 entry was recorded, newest day first, paginated seven days per page with inline
-`Previous`/`Next` buttons. Each day shows its calories, protein, fat, and
-carbs. Unknown macronutrients remain unknown; the bot marks a day's nutrient as
-partial when only some of its entries contain it. Entries use the timestamp of
-the user's Telegram message,
+`Previous`/`Next` buttons. Month statistics open on the current month and offer
+inline buttons to switch to adjacent months. Each day shows its calories,
+protein, fat, and carbs. Unknown macronutrients remain unknown; the bot marks a
+day's nutrient as partial when only some of its entries contain it. Entries use
+the timestamp of the user's Telegram message,
 not a delayed processing time. Today, yesterday, week, and month boundaries are
 calculated as local calendar boundaries and converted to UTC, including DST
 transitions. Changing the profile timezone can therefore regroup historical

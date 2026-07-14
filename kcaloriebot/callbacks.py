@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Optional
 
@@ -10,6 +11,8 @@ PAGE_SIZE = 5
 STATS_PAGE_SIZE = 7
 MAX_PAGE_OFFSET = 10_000
 CONFIRMATION_TTL_SECONDS = 15 * 60
+
+_MONTH_TOKEN = re.compile(r"20\d{2}-(0[1-9]|1[0-2])")
 
 
 @dataclass(frozen=True)
@@ -20,6 +23,7 @@ class CallbackAction:
     nutrient: Optional[str] = None
     issued_at: Optional[int] = None
     period: Optional[str] = None
+    month: Optional[str] = None
 
 
 def parse_callback(data: str) -> Optional[CallbackAction]:
@@ -36,11 +40,20 @@ def parse_callback(data: str) -> Optional[CallbackAction]:
             return CallbackAction("favorite_list", offset=_parse_offset(parts[2]))
         if len(parts) == 3 and parts[:2] == ["recent", "use"]:
             return CallbackAction("recent_use", record_id=_parse_id(parts[2]))
+        if len(parts) == 2 and parts[0] == "stats" and parts[1] == "yesterday":
+            return CallbackAction("stats_day", period="yesterday")
         if len(parts) == 3 and parts[0] == "stats" and parts[1] in {"week", "month"}:
             return CallbackAction(
                 "stats_page",
                 period=parts[1],
                 offset=_parse_offset(parts[2], STATS_PAGE_SIZE),
+            )
+        if len(parts) == 4 and parts[:2] == ["stats", "month"]:
+            return CallbackAction(
+                "stats_page",
+                period="month",
+                month=_parse_month(parts[2]),
+                offset=_parse_offset(parts[3], STATS_PAGE_SIZE),
             )
         if len(parts) == 3 and parts[0] == "entry":
             kinds = {
@@ -145,6 +158,12 @@ def _parse_id(value: str) -> int:
     if record_id <= 0:
         raise ValueError("record ID must be positive")
     return record_id
+
+
+def _parse_month(value: str) -> str:
+    if _MONTH_TOKEN.fullmatch(value) is None:
+        raise ValueError("invalid statistics month")
+    return value
 
 
 def _parse_offset(value: str, page_size: int = PAGE_SIZE) -> int:

@@ -534,6 +534,25 @@ def period_bounds(
     else:
         raise ValueError(f"Unsupported period: {period}")
 
+    return _bounds_from_dates(zone, start_date, end_date)
+
+
+def month_bounds(year: int, month: int, timezone_name: str) -> PeriodBounds:
+    """Bounds of one local calendar month, for browsing past statistics."""
+    try:
+        zone = ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError as exc:
+        raise ValidationError("The saved timezone is no longer available.") from exc
+    if not 2000 <= year <= 2100 or not 1 <= month <= 12:
+        raise ValidationError("Unsupported statistics month.")
+    start_date = date(year, month, 1)
+    end_date = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
+    return _bounds_from_dates(zone, start_date, end_date)
+
+
+def _bounds_from_dates(
+    zone: ZoneInfo, start_date: date, end_date: date
+) -> PeriodBounds:
     start_local = datetime.combine(start_date, time.min, tzinfo=zone)
     end_local = datetime.combine(end_date, time.min, tzinfo=zone)
     return PeriodBounds(

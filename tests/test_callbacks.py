@@ -40,6 +40,13 @@ class CallbackParsingTests(unittest.TestCase):
             "stats:week:7": CallbackAction("stats_page", period="week", offset=7),
             "stats:month:0": CallbackAction("stats_page", period="month", offset=0),
             "stats:month:14": CallbackAction("stats_page", period="month", offset=14),
+            "stats:yesterday": CallbackAction("stats_day", period="yesterday"),
+            "stats:month:2026-06:0": CallbackAction(
+                "stats_page", period="month", month="2026-06", offset=0
+            ),
+            "stats:month:2026-12:14": CallbackAction(
+                "stats_page", period="month", month="2026-12", offset=14
+            ),
         }
         for data, expected in cases.items():
             with self.subTest(data=data):
@@ -121,6 +128,11 @@ class CallbackParsingTests(unittest.TestCase):
             "stats:week",
             "stats:week:3",
             "stats:week:5",
+            "stats:today",
+            "stats:month:2026-13:0",
+            "stats:month:26-06:0",
+            "stats:month:2026-06:5",
+            "stats:week:2026-06:0",
         ):
             with self.subTest(data=data):
                 self.assertIsNone(parse_callback(data))

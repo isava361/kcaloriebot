@@ -11,8 +11,18 @@ from telegram import (
     ReplyKeyboardRemove,
 )
 
+from datetime import date
+
 from .callbacks import PAGE_SIZE
-from .domain import DayStats, FavoriteFood, FoodEntry, Page, Session, SessionState
+from .domain import (
+    DayStats,
+    FavoriteFood,
+    FoodEntry,
+    Page,
+    Session,
+    SessionState,
+    Stats,
+)
 
 
 Markup = Union[ReplyKeyboardMarkup, ReplyKeyboardRemove]
@@ -36,7 +46,6 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
 
 STATS_KEYBOARD = ReplyKeyboardMarkup(
     [
-        [KeyboardButton("Today Stats"), KeyboardButton("Yesterday Stats")],
         [KeyboardButton("Week Stats"), KeyboardButton("Month Stats")],
         [KeyboardButton("Back")],
     ],
@@ -184,6 +193,48 @@ def stat_macro_line(
     if coverage < coverage_total:
         rendered += f" (partial: {coverage}/{coverage_total} {coverage_unit})"
     return rendered
+
+
+def stats_totals_text(title: str, stats: Stats, goal: Optional[float] = None) -> str:
+    calories_line = f"Calories: {stats.calories:.2f}"
+    if goal is not None:
+        remaining = goal - stats.calories
+        calories_line += (
+            f" / {goal:.0f} goal ({remaining:.0f} left)"
+            if remaining >= 0
+            else f" / {goal:.0f} goal ({-remaining:.0f} over)"
+        )
+    return (
+        f"{title}:\n"
+        f"{calories_line}\n"
+        f"{stat_macro_line('Protein', stats.protein, stats.protein_coverage, stats.coverage_total, 'entries')}\n"
+        f"{stat_macro_line('Fat', stats.fat, stats.fat_coverage, stats.coverage_total, 'entries')}\n"
+        f"{stat_macro_line('Carbs', stats.carbs, stats.carbs_coverage, stats.coverage_total, 'entries')}"
+    )
+
+
+def month_navigation_row(
+    year: int, month: int, current: date
+) -> list[InlineKeyboardButton]:
+    """Buttons that switch the month statistics to an adjacent month."""
+    row: list[InlineKeyboardButton] = []
+    previous = date(year - 1, 12, 1) if month == 1 else date(year, month - 1, 1)
+    if previous.year >= 2020:
+        row.append(
+            InlineKeyboardButton(
+                f"◀ {previous:%b %Y}",
+                callback_data=f"stats:month:{previous:%Y-%m}:0",
+            )
+        )
+    upcoming = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
+    if (upcoming.year, upcoming.month) <= (current.year, current.month):
+        row.append(
+            InlineKeyboardButton(
+                f"{upcoming:%b %Y} ▶",
+                callback_data=f"stats:month:{upcoming:%Y-%m}:0",
+            )
+        )
+    return row
 
 
 def _day_macro(

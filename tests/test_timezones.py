@@ -6,6 +6,7 @@ from kcaloriebot.domain import (
     ValidationError,
     canonical_timezone,
     local_date,
+    month_bounds,
     period_bounds,
 )
 
@@ -82,6 +83,23 @@ class TimezoneTests(unittest.TestCase):
 
         self.assertEqual(bounds.start_local_date, date(2026, 7, 1))
         self.assertEqual(bounds.end_local_date, date(2026, 7, 14))
+
+    def test_month_bounds_cover_one_local_calendar_month(self) -> None:
+        bounds = month_bounds(2026, 6, "Europe/Moscow")
+
+        self.assertEqual(bounds.start_local_date, date(2026, 6, 1))
+        self.assertEqual(bounds.end_local_date, date(2026, 7, 1))
+
+        december = month_bounds(2026, 12, "UTC")
+        self.assertEqual(december.end_local_date, date(2027, 1, 1))
+
+    def test_month_bounds_reject_unsupported_months(self) -> None:
+        for year, month in ((2026, 0), (2026, 13), (1999, 5), (2101, 1)):
+            with self.subTest(year=year, month=month):
+                with self.assertRaises(ValidationError):
+                    month_bounds(year, month, "UTC")
+        with self.assertRaises(ValidationError):
+            month_bounds(2026, 6, "Mars/Olympus_Mons")
 
     def test_naive_now_is_rejected(self) -> None:
         with self.assertRaises(ValueError):

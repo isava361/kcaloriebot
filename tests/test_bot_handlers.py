@@ -577,7 +577,7 @@ class BotHandlerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.database.complete_food_draft(first, now)
         self.database.complete_food_draft(second, now)
-        update = make_update("Today Stats")
+        update = make_update("Food Today")
 
         await handle_text(update, self.context)
 
@@ -727,11 +727,11 @@ class NewFeatureTests(unittest.IsolatedAsyncioTestCase):
         await handle_text(make_update("Remove"), self.context)
         self.assertIsNone(self.database.get_daily_goal(1))
 
-    async def test_today_stats_show_goal_progress(self) -> None:
+    async def test_food_today_shows_goal_progress(self) -> None:
         self.database.set_daily_goal(1, 2000.0, 2)
         self.database.add_entry(1, self.database.now_epoch(), "Rice", 250.0, 40.0)
 
-        update = make_update("Today Stats")
+        update = make_update("Food Today")
         await handle_text(update, self.context)
 
         self.assertIn("2000 goal (1900 left)", update.effective_message.replies[-1][0])
@@ -752,24 +752,67 @@ class NewFeatureTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Protein: 4.00g", text)
         self.assertIsNone(keyboard)
 
-    async def test_month_stats_paginate_seven_days_per_page(self) -> None:
+    async def test_month_stats_show_current_month_with_month_navigation(self) -> None:
         now = self.database.now_epoch()
-        for day in range(8):
-            self.database.add_entry(
-                1, now - day * 86_400, "Rice", 250.0, 40.0, 10.0, 20.0, 30.0
-            )
-        page = self.database.daily_breakdown(1, 0, now + 86_400, "UTC", 0, 7)
-        self.assertTrue(page.has_next)
+        today = datetime.fromtimestamp(now, timezone.utc).date()
+        self.database.add_entry(1, now, "Rice", 250.0, 40.0, 10.0, 20.0, 30.0)
 
-        query = FakeQuery("stats:month:7", FakeMessage())
+        update = make_update("Month Stats")
+        await handle_text(update, self.context)
+
+        text, keyboard = update.effective_message.replies[-1]
+        self.assertIn(f"{today:%B %Y}", text)
+        self.assertIn("kcal", text)
+        previous = (today.replace(day=1) - timedelta(days=1)).replace(day=1)
+        month_row = keyboard.inline_keyboard[-1]
+        self.assertEqual(
+            [f"stats:month:{previous:%Y-%m}:0"],
+            [button.callback_data for button in month_row],
+        )
+
+    async def test_month_stats_switch_to_the_selected_month(self) -> None:
+        now = self.database.now_epoch()
+        today = datetime.fromtimestamp(now, timezone.utc).date()
+        previous = (today.replace(day=1) - timedelta(days=1)).replace(day=1)
+
+        query = FakeQuery(f"stats:month:{previous:%Y-%m}:0", FakeMessage())
         await handle_callback(make_update(query=query), self.context)
 
         text, keyboard = query.edits[-1]
-        self.assertIn("This month", text)
-        self.assertGreaterEqual(text.count("kcal"), 1)
-        if keyboard is not None:
-            buttons = keyboard.inline_keyboard[0]
-            self.assertIn("Previous", [button.text for button in buttons])
+        self.assertIn(f"{previous:%B %Y}", text)
+        month_callbacks = [
+            button.callback_data for button in keyboard.inline_keyboard[-1]
+        ]
+        self.assertIn(f"stats:month:{today:%Y-%m}:0", month_callbacks)
+
+    async def test_food_today_shows_totals_and_yesterday_toggle(self) -> None:
+        now = self.database.now_epoch()
+        self.database.add_entry(1, now, "Rice", 250.0, 40.0, 10.0, 20.0, 30.0)
+        self.database.add_entry(1, now - 86_400, "Soup", 100.0, 200.0)
+
+        update = make_update("Food Today")
+        await handle_text(update, self.context)
+
+        text, keyboard = update.effective_message.replies[-1]
+        self.assertIn("Today's totals", text)
+        self.assertIn("Today's food entries", text)
+        last_row = keyboard.inline_keyboard[-1]
+        self.assertEqual(["stats:yesterday"], [b.callback_data for b in last_row])
+
+        query = FakeQuery("stats:yesterday", FakeMessage())
+        await handle_callback(make_update(query=query), self.context)
+
+        text, keyboard = query.edits[-1]
+        self.assertIn("Yesterday's totals", text)
+        self.assertIn("Calories: 200.00", text)
+        self.assertEqual("entry:list:0", keyboard.inline_keyboard[0][0].callback_data)
+
+    async def test_yesterday_view_without_entries_reports_empty_day(self) -> None:
+        query = FakeQuery("stats:yesterday", FakeMessage())
+
+        await handle_callback(make_update(query=query), self.context)
+
+        self.assertIn("No food entries found for yesterday", query.edits[-1][0])
 
     async def test_week_stats_without_entries_report_empty_period(self) -> None:
         update = make_update("Week Stats")

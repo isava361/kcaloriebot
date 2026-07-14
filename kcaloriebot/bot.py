@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, replace
+from datetime import date
 from typing import Any, Callable, Optional, TypeVar
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -35,6 +36,8 @@ from .domain import (
     StateConflict,
     ValidationError,
     canonical_timezone,
+    local_date,
+    month_bounds,
     normalize_food_name,
     normalize_search_query,
     parse_calories,
@@ -72,9 +75,10 @@ from .render import (
     entry_details,
     favorite_button_text,
     favorite_details,
+    month_navigation_row,
     navigation_row,
     session_prompt,
-    stat_macro_line,
+    stats_totals_text,
 )
 
 
@@ -445,10 +449,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await turn.message.reply_text(
             "Select a statistics period:", reply_markup=STATS_KEYBOARD
         )
-    elif text == "Today Stats":
-        await _show_stats(update, context, Period.TODAY)
-    elif text == "Yesterday Stats":
-        await _show_stats(update, context, Period.YESTERDAY)
     elif text == "Week Stats":
         await _show_daily_stats(update, context, Period.WEEK, 0)
     elif text == "Month Stats":
@@ -857,23 +857,14 @@ async def _reprompt(turn: Turn, prefix: str) -> None:
     await _mark_prompt_delivered(turn.database, session)
 
 
-async def _show_stats(
-    update: Update, context: ContextTypes.DEFAULT_TYPE, period: Period
-) -> None:
-    message = update.effective_message
-    if message is None:
-        return
-    user_id, _ = _identity(update)
-    database = _db(context)
-    timezone_name = await _call(database.get_timezone, user_id)
-    if timezone_name is None:
-        await message.reply_text("Set your timezone first with /updatetimezone.")
-        return
+async def _day_totals_text(
+    database: Database, user_id: int, timezone_name: str, period: Period
+) -> Optional[str]:
+    """Totals block for today or yesterday; None when the day has no entries."""
     bounds = period_bounds(period, timezone_name)
     stats = await _call(database.stats, user_id, bounds.start_utc, bounds.end_utc)
     if stats.entry_count == 0:
-        await message.reply_text(f"No food entries found for {period.value}.")
-        return
+        return None
     title = {
         Period.TODAY: "Today's totals",
         Period.YESTERDAY: "Yesterday's totals",
@@ -883,21 +874,7 @@ async def _show_stats(
         if period == Period.TODAY
         else None
     )
-    calories_line = f"Calories: {stats.calories:.2f}"
-    if goal is not None:
-        remaining = goal - stats.calories
-        calories_line += (
-            f" / {goal:.0f} goal ({remaining:.0f} left)"
-            if remaining >= 0
-            else f" / {goal:.0f} goal ({-remaining:.0f} over)"
-        )
-    await message.reply_text(
-        f"{title}:\n"
-        f"{calories_line}\n"
-        f"{stat_macro_line('Protein', stats.protein, stats.protein_coverage, stats.coverage_total, 'entries')}\n"
-        f"{stat_macro_line('Fat', stats.fat, stats.fat_coverage, stats.coverage_total, 'entries')}\n"
-        f"{stat_macro_line('Carbs', stats.carbs, stats.carbs_coverage, stats.coverage_total, 'entries')}"
-    )
+    return stats_totals_text(title, stats, goal)
 
 
 async def _show_daily_stats(
@@ -906,6 +883,7 @@ async def _show_daily_stats(
     period: Period,
     offset: int,
     edit: bool = False,
+    month: Optional[tuple[int, int]] = None,
 ) -> None:
     user_id, _ = _identity(update)
     database = _db(context)
@@ -916,7 +894,20 @@ async def _show_daily_stats(
                 "Set your timezone first with /updatetimezone."
             )
         return
-    bounds = period_bounds(period, timezone_name)
+    today = local_date(database.now_epoch(), timezone_name)
+    if period == Period.MONTH:
+        year, month_number = month or (today.year, today.month)
+        bounds = month_bounds(year, month_number, timezone_name)
+        shown_month = date(year, month_number, 1)
+        prefix = f"stats:month:{shown_month:%Y-%m}"
+        title = f"{shown_month:%B %Y}, logged days"
+        empty_label = f"{shown_month:%B %Y}"
+    else:
+        bounds = period_bounds(period, timezone_name)
+        shown_month = None
+        prefix = "stats:week"
+        title = "Last 7 days, logged days"
+        empty_label = "week"
     page = await _call(
         database.daily_breakdown,
         user_id,
@@ -936,17 +927,20 @@ async def _show_daily_stats(
             0,
             STATS_PAGE_SIZE,
         )
+    rows: list[list[InlineKeyboardButton]] = []
     if not page.items:
-        text, keyboard = f"No food entries found for {period.value}.", None
+        text = f"No food entries found for {empty_label}."
     else:
-        title = {
-            Period.WEEK: "Last 7 days, logged days",
-            Period.MONTH: "This month, logged days",
-        }[period]
         blocks = "\n\n".join(day_stats_block(day) for day in page.items)
         text = f"{title}:\n\n{blocks}"
-        navigation = navigation_row(page, f"stats:{period.value}", STATS_PAGE_SIZE)
-        keyboard = InlineKeyboardMarkup([navigation]) if navigation else None
+        navigation = navigation_row(page, prefix, STATS_PAGE_SIZE)
+        if navigation:
+            rows.append(navigation)
+    if shown_month is not None:
+        months = month_navigation_row(shown_month.year, shown_month.month, today)
+        if months:
+            rows.append(months)
+    keyboard = InlineKeyboardMarkup(rows) if rows else None
     if edit and update.callback_query is not None:
         await update.callback_query.edit_message_text(text, reply_markup=keyboard)
     elif update.effective_message is not None:
@@ -986,9 +980,12 @@ async def _show_entries(
             0,
             PAGE_SIZE,
         )
+    rows: list[list[InlineKeyboardButton]] = []
     if not page.items:
-        text, keyboard = "No food entries found for today.", None
+        text = "No food entries found for today."
     else:
+        totals = await _day_totals_text(database, user_id, timezone_name, Period.TODAY)
+        text = f"{totals}\n\nToday's food entries:"
         rows = [
             [
                 InlineKeyboardButton(
@@ -1001,7 +998,8 @@ async def _show_entries(
         navigation = navigation_row(page, "entry:list")
         if navigation:
             rows.append(navigation)
-        text, keyboard = "Today's food entries:", InlineKeyboardMarkup(rows)
+    rows.append([InlineKeyboardButton("Yesterday", callback_data="stats:yesterday")])
+    keyboard = InlineKeyboardMarkup(rows)
     if edit and update.callback_query is not None:
         await update.callback_query.edit_message_text(text, reply_markup=keyboard)
     elif update.effective_message is not None:
@@ -1131,9 +1129,34 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         elif action.kind == "entry_list":
             await _show_entries(update, context, action.offset, edit=True)
         elif action.kind == "stats_page" and action.period is not None:
+            month = None
+            if action.month is not None:
+                year_text, month_text = action.month.split("-")
+                month = (int(year_text), int(month_text))
             await _show_daily_stats(
-                update, context, Period(action.period), action.offset, edit=True
+                update,
+                context,
+                Period(action.period),
+                action.offset,
+                edit=True,
+                month=month,
             )
+        elif action.kind == "stats_day":
+            timezone_name = await _call(database.get_timezone, user_id)
+            if timezone_name is None:
+                await query.edit_message_text(
+                    "Set your timezone first with /updatetimezone."
+                )
+            else:
+                totals = await _day_totals_text(
+                    database, user_id, timezone_name, Period.YESTERDAY
+                )
+                await query.edit_message_text(
+                    totals or "No food entries found for yesterday.",
+                    reply_markup=InlineKeyboardMarkup(
+                        [[InlineKeyboardButton("Today", callback_data="entry:list:0")]]
+                    ),
+                )
         elif action.kind == "favorite_list":
             await _show_favorites(update, context, action.offset, edit=True)
         elif action.kind == "entry_view" and action.record_id is not None:
