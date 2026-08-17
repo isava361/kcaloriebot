@@ -11,6 +11,8 @@ from typing import Any
 from telegram.constants import ChatType
 from telegram.error import NetworkError
 
+from telegram import InlineKeyboardMarkup
+
 from kcaloriebot.bot import (
     CANCEL_KEYBOARD,
     MAIN_KEYBOARD,
@@ -21,9 +23,15 @@ from kcaloriebot.bot import (
     start,
     unknown_command,
     update_timezone,
+    weight_command,
 )
 from kcaloriebot.database import Database
 from kcaloriebot.domain import SessionState
+from kcaloriebot.render import PER_SERVING_KEYBOARD
+
+
+def keyboard_callbacks(markup: InlineKeyboardMarkup) -> list[str]:
+    return [button.callback_data for row in markup.inline_keyboard for button in row]
 
 
 class FakeMessage:
@@ -137,7 +145,7 @@ class BotHandlerTests(unittest.IsolatedAsyncioTestCase):
             self.database.get_session(1, 10).state,
         )
         self.assertIn("calories", update.effective_message.replies[-1][0].lower())
-        self.assertIs(CANCEL_KEYBOARD, update.effective_message.replies[-1][1])
+        self.assertIs(PER_SERVING_KEYBOARD, update.effective_message.replies[-1][1])
 
     async def test_favorite_search_restores_main_reply_keyboard(self) -> None:
         self.database.ensure_user(1, 1)
@@ -189,28 +197,31 @@ class BotHandlerTests(unittest.IsolatedAsyncioTestCase):
     async def test_complete_add_food_and_save_favorite_dialog(self) -> None:
         self.database.ensure_user(1, 1)
         self.database.set_timezone(1, "Europe/Moscow", 1)
-        messages = [
-            "Add Food",
-            "Rice",
-            "250",
-            "40",
-            "10",
-            "20",
-            "30",
-            "Yes",
-        ]
+        messages = ["Add Food", "Rice", "250", "40", "10", "20", "30"]
 
+        final_update = None
         for text in messages:
-            await handle_text(make_update(text), self.context)
+            final_update = make_update(text)
+            await handle_text(final_update, self.context)
 
         self.assertIsNone(self.database.get_session(1, 10))
         entries = self.database.page_entries(1, 0, 4_000_000_000)
-        favorites = self.database.page_favorites(1)
         self.assertEqual(1, len(entries.items))
+        entry = entries.items[0]
+        self.assertEqual("Rice", entry.name)
+        self.assertAlmostEqual(100.0, entry.nutrition.calories)
+        self.assertAlmostEqual(12.0, entry.nutrition.carbs)
+
+        receipt_text, receipt_markup = final_update.effective_message.replies[-1]
+        self.assertIn("Food entry added", receipt_text)
+        callbacks = keyboard_callbacks(receipt_markup)
+        self.assertIn(f"entry:view:{entry.entry_id}:0", callbacks)
+        self.assertIn(f"entry:fav:{entry.entry_id}", callbacks)
+
+        save_query = FakeQuery(f"entry:fav:{entry.entry_id}", FakeMessage())
+        await handle_callback(make_update(query=save_query), self.context)
+        favorites = self.database.page_favorites(1)
         self.assertEqual(1, len(favorites.items))
-        self.assertEqual("Rice", entries.items[0].name)
-        self.assertAlmostEqual(100.0, entries.items[0].nutrition.calories)
-        self.assertAlmostEqual(12.0, entries.items[0].nutrition.carbs)
         self.assertEqual(30.0, favorites.items[0].carbs_per_100g)
 
     async def test_add_unnamed_food_with_skipped_macros_returns_to_menu(self) -> None:
@@ -226,7 +237,13 @@ class BotHandlerTests(unittest.IsolatedAsyncioTestCase):
         entry = self.database.page_entries(1, 0, 4_000_000_000).items[0]
         self.assertIsNone(entry.name)
         self.assertIsNone(entry.nutrition.protein)
-        self.assertIs(MAIN_KEYBOARD, final_update.effective_message.replies[-1][1])
+        # The receipt keeps inline actions; the main keyboard is restored by
+        # the preceding message. Unnamed entries get no Save-as-favorite row.
+        self.assertIs(MAIN_KEYBOARD, final_update.effective_message.replies[-2][1])
+        receipt_markup = final_update.effective_message.replies[-1][1]
+        self.assertNotIn(
+            f"entry:fav:{entry.entry_id}", keyboard_callbacks(receipt_markup)
+        )
 
     async def test_invalid_food_value_keeps_the_same_step(self) -> None:
         self.database.ensure_user(1, 1)
@@ -263,7 +280,10 @@ class BotHandlerTests(unittest.IsolatedAsyncioTestCase):
         grams = make_update("40")
         await handle_text(grams, self.context)
         self.assertIsNone(self.database.get_session(1, 10))
-        self.assertIs(MAIN_KEYBOARD, grams.effective_message.replies[-1][1])
+        self.assertIs(MAIN_KEYBOARD, grams.effective_message.replies[-2][1])
+        self.assertIsInstance(
+            grams.effective_message.replies[-1][1], InlineKeyboardMarkup
+        )
 
         amend_query = FakeQuery(
             f"fav:field:{favorite.favorite_id}:protein", FakeMessage()
@@ -538,21 +558,28 @@ class BotHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.database.get_session(1, 10))
         self.assertIs(MAIN_KEYBOARD, update.effective_message.replies[-1][1])
 
-    async def test_cancel_after_entry_commit_only_skips_favorite(self) -> None:
+    async def test_receipt_undo_deletes_the_committed_entry(self) -> None:
         self.database.ensure_user(1, 1)
         self.database.set_timezone(1, "UTC", 1)
+        final_update = None
         for text in ("Add Food", "Rice", "100", "25", "Skip", "Skip", "Skip"):
-            await handle_text(make_update(text), self.context)
-        cancel_update = make_update("Cancel")
-
-        await handle_text(cancel_update, self.context)
+            final_update = make_update(text)
+            await handle_text(final_update, self.context)
 
         self.assertIsNone(self.database.get_session(1, 10))
-        self.assertEqual(
-            1,
-            len(self.database.page_entries(1, 0, 4_000_000_000).items),
+        entry = self.database.page_entries(1, 0, 4_000_000_000).items[0]
+        receipt_markup = final_update.effective_message.replies[-1][1]
+        undo_callback = next(
+            callback
+            for callback in keyboard_callbacks(receipt_markup)
+            if callback.startswith("entry:delete-confirm:")
         )
-        self.assertIn("entry remains", cancel_update.effective_message.replies[-1][0])
+
+        undo_query = FakeQuery(undo_callback, FakeMessage())
+        await handle_callback(make_update(query=undo_query), self.context)
+
+        self.assertIsNone(self.database.get_entry(1, entry.entry_id))
+        self.assertIn("deleted", undo_query.edits[-1][0].lower())
 
     async def test_stats_label_partial_macronutrient_coverage(self) -> None:
         self.database.ensure_user(1, 1)
@@ -624,7 +651,10 @@ class NewFeatureTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(100.0, entries[0].nutrition.calories)
         reply = update.effective_message.replies[-1]
         self.assertIn("Today: 100", reply[0])
-        self.assertIs(MAIN_KEYBOARD, reply[1])
+        self.assertIsInstance(reply[1], InlineKeyboardMarkup)
+        callbacks = keyboard_callbacks(reply[1])
+        self.assertIn(f"entry:fav:{entries[0].entry_id}", callbacks)
+        self.assertTrue(any(c.startswith("entry:delete-confirm:") for c in callbacks))
 
     async def test_quick_add_reports_remaining_goal(self) -> None:
         self.database.set_daily_goal(1, 2000.0, 2)
@@ -750,7 +780,12 @@ class NewFeatureTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Last 7 days", text)
         self.assertEqual(7, text.count("kcal"))
         self.assertIn("Protein: 4.00g", text)
-        self.assertIsNone(keyboard)
+        day_callbacks = [
+            callback
+            for callback in keyboard_callbacks(keyboard)
+            if callback.startswith("entry:list:")
+        ]
+        self.assertEqual(7, len(day_callbacks))
 
     async def test_month_stats_show_current_month_with_month_navigation(self) -> None:
         now = self.database.now_epoch()
@@ -785,8 +820,10 @@ class NewFeatureTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertIn(f"stats:month:{today:%Y-%m}:0", month_callbacks)
 
-    async def test_food_today_shows_totals_and_yesterday_toggle(self) -> None:
+    async def test_food_today_shows_totals_and_day_navigation(self) -> None:
         now = self.database.now_epoch()
+        today = datetime.fromtimestamp(now, timezone.utc).date()
+        yesterday = today - timedelta(days=1)
         self.database.add_entry(1, now, "Rice", 250.0, 40.0, 10.0, 20.0, 30.0)
         self.database.add_entry(1, now - 86_400, "Soup", 100.0, 200.0)
 
@@ -796,23 +833,48 @@ class NewFeatureTests(unittest.IsolatedAsyncioTestCase):
         text, keyboard = update.effective_message.replies[-1]
         self.assertIn("Today's totals", text)
         self.assertIn("Today's food entries", text)
-        last_row = keyboard.inline_keyboard[-1]
-        self.assertEqual(["stats:yesterday"], [b.callback_data for b in last_row])
+        last_row = [b.callback_data for b in keyboard.inline_keyboard[-1]]
+        self.assertEqual([f"entry:list:{yesterday.isoformat()}:0"], last_row)
 
-        query = FakeQuery("stats:yesterday", FakeMessage())
+        query = FakeQuery(f"entry:list:{yesterday.isoformat()}:0", FakeMessage())
         await handle_callback(make_update(query=query), self.context)
 
         text, keyboard = query.edits[-1]
         self.assertIn("Yesterday's totals", text)
         self.assertIn("Calories: 200.00", text)
-        self.assertEqual("entry:list:0", keyboard.inline_keyboard[0][0].callback_data)
+        callbacks = keyboard_callbacks(keyboard)
+        self.assertIn("entry:list:0", callbacks)
 
-    async def test_yesterday_view_without_entries_reports_empty_day(self) -> None:
+    async def test_stats_yesterday_callback_still_opens_yesterday(self) -> None:
         query = FakeQuery("stats:yesterday", FakeMessage())
 
         await handle_callback(make_update(query=query), self.context)
 
-        self.assertIn("No food entries found for yesterday", query.edits[-1][0])
+        self.assertIn("No food entries found for", query.edits[-1][0])
+
+    async def test_backdated_entry_is_editable_from_its_day_page(self) -> None:
+        now = self.database.now_epoch()
+        day = datetime.fromtimestamp(now, timezone.utc).date() - timedelta(days=3)
+        entry = self.database.add_entry(1, now - 3 * 86_400, "Soup", 100.0, 200.0)
+
+        query = FakeQuery(f"entry:list:{day.isoformat()}:0", FakeMessage())
+        await handle_callback(make_update(query=query), self.context)
+
+        text, keyboard = query.edits[-1]
+        self.assertIn(f"Entries for {day.isoformat()}", text)
+        view_callback = f"entry:view:{entry.entry_id}:0:{day.isoformat()}"
+        self.assertIn(view_callback, keyboard_callbacks(keyboard))
+
+        view_query = FakeQuery(view_callback, FakeMessage())
+        await handle_callback(make_update(query=view_query), self.context)
+        text, keyboard = view_query.edits[-1]
+        self.assertIn("Soup", text)
+        self.assertIn("Time:", text)
+        callbacks = keyboard_callbacks(keyboard)
+        self.assertIn(f"entry:grams:{entry.entry_id}", callbacks)
+        self.assertIn(f"entry:name:{entry.entry_id}", callbacks)
+        self.assertIn(f"entry:field:{entry.entry_id}:calories", callbacks)
+        self.assertIn(f"entry:list:{day.isoformat()}:0", callbacks)
 
     async def test_week_stats_without_entries_report_empty_period(self) -> None:
         update = make_update("Week Stats")
@@ -864,6 +926,120 @@ class NewFeatureTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(80.0, stored.nutrition.grams)
         self.assertAlmostEqual(200.0, stored.nutrition.calories)
         self.assertIn("updated", grams_update.effective_message.replies[-1][0])
+
+    async def test_serving_wizard_bypasses_per_100g_macro_limit(self) -> None:
+        for text in ("Add Food", "Pizza", "Per Serving", "900", "0.5", "40", "30"):
+            await handle_text(make_update(text), self.context)
+        final_update = make_update("120")
+
+        await handle_text(final_update, self.context)
+
+        self.assertIsNone(self.database.get_session(1, 10))
+        entry = self.entries()[0]
+        self.assertEqual("Pizza", entry.name)
+        self.assertEqual(0.5, entry.nutrition.servings)
+        self.assertIsNone(entry.nutrition.grams)
+        self.assertAlmostEqual(450.0, entry.nutrition.calories)
+        self.assertAlmostEqual(60.0, entry.nutrition.carbs)
+        self.assertIn("0.5 servings", final_update.effective_message.replies[-1][0])
+
+    async def test_favorite_conversion_and_fractional_serving_use(self) -> None:
+        favorite = self.database.add_favorite(1, "Rice", 250, 10, 20, 30, 2)
+
+        convert_query = FakeQuery(f"fav:serving:{favorite.favorite_id}", FakeMessage())
+        await handle_callback(make_update(query=convert_query), self.context)
+        self.assertEqual(
+            SessionState.WAIT_FAVORITE_TO_SERVING,
+            self.database.get_session(1, 10).state,
+        )
+        grams_update = make_update("50")
+        await handle_text(grams_update, self.context)
+
+        converted = self.database.get_favorite(1, favorite.favorite_id)
+        self.assertEqual("serving", converted.unit)
+        self.assertEqual(50.0, converted.serving_grams)
+        self.assertAlmostEqual(125.0, converted.calories_per_100g)
+
+        use_query = FakeQuery(f"fav:use:{favorite.favorite_id}", FakeMessage())
+        await handle_callback(make_update(query=use_query), self.context)
+        self.assertEqual(
+            SessionState.WAIT_FAVORITE_SERVINGS,
+            self.database.get_session(1, 10).state,
+        )
+        await handle_text(make_update("0.5"), self.context)
+
+        entry = self.entries()[0]
+        self.assertEqual(0.5, entry.nutrition.servings)
+        self.assertAlmostEqual(25.0, entry.nutrition.grams)
+        self.assertAlmostEqual(62.5, entry.nutrition.calories)
+        self.assertIsNone(self.database.get_session(1, 10))
+
+    async def test_entry_calories_edit_rescales_totals(self) -> None:
+        entry = self.database.add_entry(
+            1, self.database.now_epoch(), "Rice", 250.0, 40.0, 10.0, 20.0, 30.0
+        )
+
+        query = FakeQuery(f"entry:field:{entry.entry_id}:calories", FakeMessage())
+        await handle_callback(make_update(query=query), self.context)
+        self.assertEqual(
+            SessionState.WAIT_ENTRY_AMENDMENT, self.database.get_session(1, 10).state
+        )
+        self.assertIn("per 100g", query.message.replies[-1][0])
+
+        await handle_text(make_update("300"), self.context)
+
+        stored = self.database.get_entry(1, entry.entry_id)
+        self.assertAlmostEqual(120.0, stored.nutrition.calories)
+        self.assertAlmostEqual(4.0, stored.nutrition.protein)
+        self.assertIsNone(self.database.get_session(1, 10))
+
+    async def test_entry_name_edit_renames_the_entry(self) -> None:
+        entry = self.database.add_entry(1, self.database.now_epoch(), None, 250.0, 40.0)
+
+        query = FakeQuery(f"entry:name:{entry.entry_id}", FakeMessage())
+        await handle_callback(make_update(query=query), self.context)
+        rename_update = make_update("Buckwheat")
+        await handle_text(rename_update, self.context)
+
+        stored = self.database.get_entry(1, entry.entry_id)
+        self.assertEqual("Buckwheat", stored.name)
+        self.assertIn("renamed", rename_update.effective_message.replies[-1][0])
+
+    async def test_weight_command_logs_and_reports_average(self) -> None:
+        update = make_update("/weight 82.5")
+
+        await weight_command(update, self.context)
+
+        stored = self.database.latest_weight(1)
+        self.assertEqual(82.5, stored.weight_kg)
+        reply = update.effective_message.replies[-1][0]
+        self.assertIn("Weight recorded", reply)
+        self.assertIn("7-day average: 82.5 kg", reply)
+
+    async def test_weight_menu_flow_records_measurement(self) -> None:
+        await handle_text(make_update("Weight"), self.context)
+        self.assertEqual(
+            SessionState.WAIT_WEIGHT, self.database.get_session(1, 10).state
+        )
+
+        value_update = make_update("81,9")
+        await handle_text(value_update, self.context)
+
+        self.assertIsNone(self.database.get_session(1, 10))
+        self.assertEqual(81.9, self.database.latest_weight(1).weight_kg)
+        self.assertIn("7-day average", value_update.effective_message.replies[-1][0])
+
+    async def test_weight_average_reports_week_over_week_delta(self) -> None:
+        now = self.database.now_epoch()
+        for days_ago, weight in ((10, 84.0), (9, 84.0), (3, 83.0), (1, 83.0)):
+            self.database.add_weight(1, now - days_ago * 86_400, weight)
+
+        update = make_update("/weight 83")
+        await weight_command(update, self.context)
+
+        reply = update.effective_message.replies[-1][0]
+        self.assertIn("7-day average: 83.0 kg", reply)
+        self.assertIn("-1.0 kg vs previous week", reply)
 
     async def test_entry_time_edit_backdates_the_entry(self) -> None:
         entry = self.database.add_entry(

@@ -1,4 +1,5 @@
 import unittest
+from datetime import date
 
 from kcaloriebot.callbacks import CallbackAction, parse_callback
 
@@ -47,10 +48,35 @@ class CallbackParsingTests(unittest.TestCase):
             "stats:month:2026-12:14": CallbackAction(
                 "stats_page", period="month", month="2026-12", offset=14
             ),
+            "entry:list:2026-08-15:0": CallbackAction(
+                "entry_list", day=date(2026, 8, 15), offset=0
+            ),
+            "entry:view:7:10:2026-08-15": CallbackAction(
+                "entry_view", record_id=7, offset=10, day=date(2026, 8, 15)
+            ),
+            "entry:name:7": CallbackAction("entry_name", record_id=7),
+            "entry:fav:7": CallbackAction("entry_favorite", record_id=7),
+            "entry:field:7:calories": CallbackAction(
+                "entry_field", record_id=7, nutrient="calories"
+            ),
+            "entry:field:7:carbs": CallbackAction(
+                "entry_field", record_id=7, nutrient="carbs"
+            ),
+            "fav:serving:11": CallbackAction("favorite_to_serving", record_id=11),
         }
         for data, expected in cases.items():
             with self.subTest(data=data):
                 self.assertEqual(parse_callback(data), expected)
+
+    def test_invalid_diary_days_are_rejected(self) -> None:
+        for data in (
+            "entry:list:2026-02-30:0",
+            "entry:list:not-a-day:0",
+            "entry:list:2026-8-15:0",
+            "entry:field:7:name",
+        ):
+            with self.subTest(data=data):
+                self.assertIsNone(parse_callback(data))
 
     def test_every_supported_favorite_nutrient_is_parsed(self) -> None:
         for nutrient in ("calories", "protein", "fat", "carbs"):

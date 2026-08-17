@@ -17,6 +17,14 @@ MAX_SERVING_GRAMS = 100_000.0
 MAX_DAILY_GOAL_KCAL = 50_000.0
 MAX_ENTRY_AGE_SECONDS = 366 * 24 * 60 * 60
 ENTRY_TIME_GRACE_SECONDS = 120
+MAX_SERVINGS = 1_000.0
+MAX_CALORIES_PER_SERVING = 50_000.0
+MAX_MACRO_PER_SERVING = 10_000.0
+MIN_WEIGHT_KG = 1.0
+MAX_WEIGHT_KG = 500.0
+
+UNIT_100G = "100g"
+UNIT_SERVING = "serving"
 
 
 class ValidationError(ValueError):
@@ -47,6 +55,11 @@ class SessionState(str, Enum):
     WAIT_RECENT_GRAMS = "wait_recent_grams"
     WAIT_ENTRY_GRAMS = "wait_entry_grams"
     WAIT_ENTRY_TIME = "wait_entry_time"
+    WAIT_FAVORITE_SERVINGS = "wait_favorite_servings"
+    WAIT_FAVORITE_TO_SERVING = "wait_favorite_to_serving"
+    WAIT_ENTRY_NAME = "wait_entry_name"
+    WAIT_ENTRY_AMENDMENT = "wait_entry_amendment"
+    WAIT_WEIGHT = "wait_weight"
 
 
 class Period(str, Enum):
@@ -72,6 +85,8 @@ class Session:
     selected_entry_id: Optional[int] = None
     prompt_pending: bool = False
     last_message_id: Optional[int] = None
+    draft_unit: str = UNIT_100G
+    draft_servings: Optional[float] = None
     revision: int = 0
     updated_at_utc: int = 0
 
@@ -79,10 +94,11 @@ class Session:
 @dataclass(frozen=True)
 class NutritionTotals:
     calories: float
-    grams: float
+    grams: Optional[float]
     protein: Optional[float]
     fat: Optional[float]
     carbs: Optional[float]
+    servings: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -96,6 +112,13 @@ class FoodEntry:
 
 @dataclass(frozen=True)
 class FavoriteFood:
+    """A saved food.
+
+    For ``unit == UNIT_100G`` the nutrition fields are per 100g. For
+    ``unit == UNIT_SERVING`` they are per one serving and ``serving_grams``
+    optionally records how much one serving weighs.
+    """
+
     favorite_id: int
     user_id: int
     name: str
@@ -103,6 +126,16 @@ class FavoriteFood:
     protein_per_100g: Optional[float]
     fat_per_100g: Optional[float]
     carbs_per_100g: Optional[float]
+    unit: str = UNIT_100G
+    serving_grams: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class WeightRecord:
+    weight_id: int
+    user_id: int
+    measured_at_utc: int
+    weight_kg: float
 
 
 @dataclass(frozen=True)
@@ -207,8 +240,73 @@ def check_daily_goal(value: float) -> float:
     return value
 
 
+def check_servings(value: float) -> float:
+    if not math.isfinite(value) or value <= 0:
+        raise ValidationError("Servings must be greater than zero.")
+    if value > MAX_SERVINGS:
+        raise ValidationError(f"Servings must be no more than {MAX_SERVINGS:.0f}.")
+    return value
+
+
+def check_calories_per_serving(value: float) -> float:
+    if not math.isfinite(value) or value < 0:
+        raise ValidationError("Calories cannot be negative or non-finite.")
+    if value > MAX_CALORIES_PER_SERVING:
+        raise ValidationError(
+            f"Calories must be no more than {MAX_CALORIES_PER_SERVING:.0f} per serving."
+        )
+    return value
+
+
+def check_macro_per_serving(value: float, label: str) -> float:
+    if not math.isfinite(value) or not 0 <= value <= MAX_MACRO_PER_SERVING:
+        raise ValidationError(
+            f"{label} must be between 0 and {MAX_MACRO_PER_SERVING:.0f} grams "
+            "per serving."
+        )
+    return value
+
+
+def check_weight_kg(value: float) -> float:
+    if not math.isfinite(value) or not MIN_WEIGHT_KG <= value <= MAX_WEIGHT_KG:
+        raise ValidationError(
+            f"Weight must be between {MIN_WEIGHT_KG:.0f} and {MAX_WEIGHT_KG:.0f} kg."
+        )
+    return value
+
+
 def parse_calories(text: str) -> float:
     return check_calories_per_100g(_parse_finite(text, "Calories"))
+
+
+def parse_servings(text: str) -> float:
+    return check_servings(_parse_finite(text, "Servings"))
+
+
+def parse_calories_per_serving(text: str) -> float:
+    return check_calories_per_serving(_parse_finite(text, "Calories"))
+
+
+def parse_macro_per_serving(text: str, label: str) -> float:
+    return check_macro_per_serving(_parse_finite(text, label), label)
+
+
+def parse_nutrient_value(text: str, label: str) -> float:
+    """Parse a non-negative nutrition number; unit-specific limits are
+    enforced where the entry or favorite is updated."""
+    value = _parse_finite(text, label)
+    if value < 0:
+        raise ValidationError(f"{label} cannot be negative.")
+    return value
+
+
+def parse_weight(text: str) -> float:
+    cleaned = " ".join(text.split())
+    for suffix in ("kg", "кг"):
+        if cleaned.lower().endswith(suffix):
+            cleaned = cleaned[: -len(suffix)].strip()
+            break
+    return check_weight_kg(_parse_finite(cleaned, "Weight"))
 
 
 def parse_grams(text: str) -> float:
@@ -298,6 +396,73 @@ def scale_per_100(
     )
 
 
+def scale_per_serving(
+    calories_per_serving: float,
+    servings: float,
+    protein_per_serving: Optional[float],
+    fat_per_serving: Optional[float],
+    carbs_per_serving: Optional[float],
+    serving_grams: Optional[float] = None,
+) -> NutritionTotals:
+    """Totals for a serving-based entry; values are absolute per one serving."""
+    check_calories_per_serving(calories_per_serving)
+    check_servings(servings)
+    for label, value in (
+        ("Protein", protein_per_serving),
+        ("Fat", fat_per_serving),
+        ("Carbs", carbs_per_serving),
+    ):
+        if value is not None:
+            check_macro_per_serving(value, label)
+    if serving_grams is not None:
+        check_serving_grams(serving_grams * servings)
+
+    def scaled(value: Optional[float]) -> Optional[float]:
+        if value is None:
+            return None
+        result = value * servings
+        if not math.isfinite(result) or result >= SQLITE_REAL_LIMIT:
+            raise ValidationError("The scaled nutrition value is too large to store.")
+        return result
+
+    calories = scaled(calories_per_serving)
+    assert calories is not None
+    return NutritionTotals(
+        calories=calories,
+        grams=None if serving_grams is None else serving_grams * servings,
+        protein=scaled(protein_per_serving),
+        fat=scaled(fat_per_serving),
+        carbs=scaled(carbs_per_serving),
+        servings=servings,
+    )
+
+
+def per_unit_from_totals(
+    totals: NutritionTotals,
+) -> tuple[str, float, Optional[float], Optional[float], Optional[float]]:
+    """Recover per-unit values from a stored entry so it can be re-scaled.
+
+    Returns ``(unit, calories, protein, fat, carbs)`` where the values are per
+    100g for gram-based entries and per one serving for serving-based entries.
+    """
+    if totals.servings is not None:
+        if not math.isfinite(totals.servings) or totals.servings <= 0:
+            raise ValidationError("The stored entry has an invalid serving count.")
+        factor = 1.0 / totals.servings
+
+        def scaled(value: Optional[float]) -> Optional[float]:
+            return None if value is None else value * factor
+
+        return (
+            UNIT_SERVING,
+            totals.calories * factor,
+            scaled(totals.protein),
+            scaled(totals.fat),
+            scaled(totals.carbs),
+        )
+    return (UNIT_100G, *per_100_from_totals(totals))
+
+
 def per_100_from_totals(
     totals: NutritionTotals,
 ) -> tuple[float, Optional[float], Optional[float], Optional[float]]:
@@ -306,7 +471,7 @@ def per_100_from_totals(
     Macros are clamped to the valid 0..100 range because floating-point
     round-trips can push a boundary value like 100.0 slightly past it.
     """
-    if not math.isfinite(totals.grams) or totals.grams <= 0:
+    if totals.grams is None or not math.isfinite(totals.grams) or totals.grams <= 0:
         raise ValidationError("The stored entry has an invalid serving weight.")
     factor = 100.0 / totals.grams
 
@@ -564,8 +729,19 @@ def _bounds_from_dates(
 
 
 def local_date(timestamp_utc: int, timezone_name: str) -> date:
-    return (
-        datetime.fromtimestamp(timestamp_utc, UTC)
-        .astimezone(ZoneInfo(timezone_name))
-        .date()
+    return local_datetime(timestamp_utc, timezone_name).date()
+
+
+def local_datetime(timestamp_utc: int, timezone_name: str) -> datetime:
+    return datetime.fromtimestamp(timestamp_utc, UTC).astimezone(
+        ZoneInfo(timezone_name)
     )
+
+
+def day_bounds(day: date, timezone_name: str) -> PeriodBounds:
+    """Bounds of one local calendar day, for browsing the diary by day."""
+    try:
+        zone = ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError as exc:
+        raise ValidationError("The saved timezone is no longer available.") from exc
+    return _bounds_from_dates(zone, day, day + timedelta(days=1))

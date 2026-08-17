@@ -79,6 +79,14 @@ BotFather and generate a replacement.
 uses an explicit database path so application updates and user data remain
 separate.
 
+`LOG_LEVEL` applies only to the application's own logger. HTTP client and
+Telegram library loggers are capped at WARNING because their request logs
+include the Bot API URL, which contains the token; a redaction filter
+additionally replaces the token in anything that is still logged. Versions
+before this protection logged such URLs at INFO: if an older version ran in
+production, treat existing journals as sensitive and rotate the token in
+BotFather.
+
 ### 4. Create the systemd service
 
 Create `/etc/systemd/system/kcalculatorbot.service`:
@@ -137,7 +145,9 @@ sudo systemctl status kcalculatorbot --no-pager
 
 The database directory and schema are created automatically. SQLite foreign
 keys, WAL mode, busy timeouts, numeric constraints, and deterministic indexes
-are enabled at startup.
+are enabled at startup. Databases from earlier versions are migrated to the
+current schema automatically on the first start; because the migration
+rebuilds tables, take the pre-update backup described below before upgrading.
 
 ### 5. Verify the deployment
 
@@ -263,23 +273,53 @@ calories and the second is grams. Optional macro tokens add protein, fat, and
 carbs per 100g: `bread 250 150 p8 f3 c47` (or `б`/`ж`/`у`). The `/add` command
 accepts the same format.
 
-The `Add Food` menu starts the step-by-step wizard instead. If the entered
-food name matches a saved favorite, the bot offers to reuse its nutrition
-values and asks only for the serving weight; choose `Enter Manually` to type
+Every saved entry replies with a receipt: the food, amount, calories, macros,
+the entry time, and today's progress, together with inline `Undo` (deletes the
+entry, valid for 15 minutes), `Edit` (opens the full entry editor), and — for
+named foods — `Save as favorite` buttons. Saving a favorite whose name already
+exists updates that favorite's values.
+
+The `Add Food` menu starts the step-by-step wizard instead. At the calories
+step, `Per Serving` switches the draft to serving mode: calories and macros
+are then entered per one serving (a whole pizza, a sandwich) without the
+per-100g limits, and the amount is a serving count such as `0.5`, `1`, or `2`.
+If the entered food name matches a saved favorite, the bot offers to reuse its
+nutrition values and asks only for the amount; choose `Enter Manually` to type
 new values. `Recent Foods` lists the latest distinct foods so a repeated meal
-is two taps: pick the food, then send the grams or choose `Same as last time`.
+is two taps: pick the food, then send the amount or choose `Same as last time`.
+
+### Favorites and servings
+
+Favorites store nutrition per 100g by default. `To Serving` in the favorite
+view converts a per-100g favorite into a per-serving one: enter the weight of
+one serving and the stored values are converted. Serving favorites are logged
+by serving count (including fractions like `0.5`), and `Amend` edits their
+values per serving.
 
 ### Goals, editing, and statistics
 
 `Daily Goal` stores a calorie target; every logged entry replies with today's
 total and the remaining budget, and `Food Today` shows today's totals with
-progress against the goal above the entry list, with a `Yesterday` button for
-yesterday's totals. Choose `Remove` in the goal prompt to clear it.
+progress against the goal above the entry list. Choose `Remove` in the goal
+prompt to clear it.
 
-Entries in `Food Today` can be corrected after logging: `Edit Grams` re-scales
-the stored nutrition to a new serving weight, and `Edit Time` moves the entry,
-including backdating with `HH:MM` (today, local time) or `YYYY-MM-DD HH:MM`.
-Future timestamps and dates more than a year old are rejected.
+The diary is browsable by day: `Food Today` has previous/next-day arrows and a
+`Today` shortcut, entry buttons show the local time of each entry, and every
+day listed in week or month statistics is a button that opens that day's
+diary. Backdated entries are therefore reachable for editing on their own day.
+
+Entries can be fully corrected after logging from the entry view: the serving
+weight (or serving count), the entry time — including backdating with `HH:MM`
+(today, local time) or `YYYY-MM-DD HH:MM` — the name, and calories, protein,
+fat, and carbs (per 100g for weighed entries, per serving for serving-based
+ones). Future timestamps and dates more than a year old are rejected.
+
+### Weight tracking
+
+The `Weight` button or `/weight 82.5` records a body-weight measurement in
+kilograms. Replies show the latest measurement, the floating average over the
+last 7 local days, and the difference against the previous 7 days once enough
+history exists.
 
 The bot intentionally declines group-chat use because food history and inline
 button contents are personal data.

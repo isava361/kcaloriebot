@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, replace
-from datetime import date
+from datetime import date, timedelta
 from typing import Any, Callable, Optional, TypeVar
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -29,6 +29,9 @@ from .callbacks import (
 from .config import Settings
 from .database import Database
 from .domain import (
+    MAX_ENTRY_AGE_SECONDS,
+    UNIT_100G,
+    UNIT_SERVING,
     NotFound,
     Period,
     Session,
@@ -36,26 +39,37 @@ from .domain import (
     StateConflict,
     ValidationError,
     canonical_timezone,
+    day_bounds,
     local_date,
     month_bounds,
     normalize_food_name,
     normalize_search_query,
     parse_calories,
+    parse_calories_per_serving,
     parse_daily_goal,
     parse_entry_time,
     parse_grams,
     parse_macro,
+    parse_macro_per_serving,
+    parse_nutrient_value,
     parse_quick_add,
+    parse_servings,
+    parse_weight,
     period_bounds,
     validate_macro_sum,
 )
 from .render import (
     CANCEL_KEYBOARD,
     ENTRY_GRAMS_PROMPT,
+    ENTRY_NAME_PROMPT,
+    ENTRY_SERVINGS_PROMPT,
     ENTRY_TIME_PROMPT,
     FAVORITE_DECISION_KEYBOARD,
     FAVORITE_MATCH_GRAMS_PROMPT,
     FAVORITE_SEARCH_PROMPT,
+    FAVORITE_SERVINGS_MANUAL_KEYBOARD,
+    FAVORITE_SERVINGS_PROMPT,
+    FAVORITE_TO_SERVING_PROMPT,
     FOOD_NAME_PROMPT,
     GOAL_KEYBOARD,
     GOAL_PROMPT,
@@ -64,12 +78,16 @@ from .render import (
     Markup,
     QUICK_ADD_USAGE,
     REPEAT_KEYBOARD,
+    SERVINGS_KEYBOARD,
     SKIP_KEYBOARD,
     STATS_KEYBOARD,
     TIMEZONE_CHANGE_PROMPT,
     TIMEZONE_ONBOARDING_PROMPT,
     TIMEZONE_REQUIRED_MARKUP,
     TIMEZONE_SETUP_REQUIRED_PROMPT,
+    WEIGHT_PROMPT,
+    amount_text,
+    day_navigation_row,
     day_stats_block,
     entry_button_text,
     entry_details,
@@ -78,6 +96,7 @@ from .render import (
     month_navigation_row,
     navigation_row,
     session_prompt,
+    stats_day_rows,
     stats_totals_text,
 )
 
@@ -96,6 +115,7 @@ __all__ = [
     "cancel",
     "update_timezone",
     "add_command",
+    "weight_command",
     "handle_text",
     "handle_callback",
     "unknown_command",
@@ -308,6 +328,60 @@ async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await turn.message.reply_text(QUICK_ADD_USAGE, reply_markup=MAIN_KEYBOARD)
 
 
+async def _start_weight_prompt(turn: Turn) -> None:
+    """Show the weight summary and ask for a new measurement."""
+    summary = await _weight_summary(turn.database, turn.user_id)
+    prompt = WEIGHT_PROMPT if summary is None else f"{summary}\n\n{WEIGHT_PROMPT}"
+    await _start_with_prompt(
+        turn.database,
+        turn.user_id,
+        turn.chat_id,
+        SessionState.WAIT_WEIGHT,
+        turn.message,
+        prompt,
+        CANCEL_KEYBOARD,
+    )
+
+
+async def weight_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    turn = await _begin(update, context, register_user=True)
+    if turn is None or turn.message.text is None:
+        return
+    database = turn.database
+    if turn.session is not None:
+        prompt, markup = session_prompt(
+            turn.session, await _call(database.get_timezone, turn.user_id) is not None
+        )
+        await turn.message.reply_text(
+            "Finish or cancel the current input before logging weight.\n\n" + prompt,
+            reply_markup=markup,
+        )
+        await _mark_prompt_delivered(database, turn.session)
+        return
+    parts = turn.message.text.split(maxsplit=1)
+    payload = parts[1].strip() if len(parts) > 1 else ""
+    if not payload:
+        await _start_weight_prompt(turn)
+        return
+    try:
+        weight = parse_weight(payload)
+    except ValidationError as exc:
+        await turn.message.reply_text(str(exc), reply_markup=MAIN_KEYBOARD)
+        return
+    message_date = getattr(turn.message, "date", None)
+    measured_at = (
+        int(message_date.timestamp())
+        if message_date is not None
+        else database.now_epoch()
+    )
+    await _call(database.add_weight, turn.user_id, measured_at, weight)
+    summary = await _weight_summary(database, turn.user_id)
+    await turn.message.reply_text(
+        f"Weight recorded.\n{summary}" if summary else "Weight recorded.",
+        reply_markup=MAIN_KEYBOARD,
+    )
+
+
 async def _log_quick_add(turn: Turn, text: str) -> bool:
     """Try to log the text as a one-message food entry; True when handled."""
     try:
@@ -334,12 +408,7 @@ async def _log_quick_add(turn: Turn, text: str) -> bool:
         quick.fat_per_100g,
         quick.carbs_per_100g,
     )
-    progress = await _today_progress(turn.database, turn.user_id)
-    await turn.message.reply_text(
-        f"Added {entry.name}: {entry.nutrition.calories:.2f} kcal, "
-        f"{entry.nutrition.grams:.2f}g. {progress}",
-        reply_markup=MAIN_KEYBOARD,
-    )
+    await _send_receipt(turn.database, turn.user_id, turn.message, entry)
     return True
 
 
@@ -358,6 +427,68 @@ async def _today_progress(database: Database, user_id: int) -> str:
     if remaining >= 0:
         return f"Today: {total:.0f} / {goal:.0f} kcal ({remaining:.0f} left)."
     return f"Today: {total:.0f} / {goal:.0f} kcal ({-remaining:.0f} over)."
+
+
+async def _send_receipt(
+    database: Database,
+    user_id: int,
+    message: Any,
+    entry: Any,
+    restore_keyboard: bool = False,
+) -> None:
+    """Confirm a saved entry with its details and Undo/Edit inline actions."""
+    timezone_name = await _call(database.get_timezone, user_id)
+    progress = await _today_progress(database, user_id)
+    text = f"Food entry added. {progress}\n\n{entry_details(entry, timezone_name)}"
+    rows = [
+        [
+            InlineKeyboardButton(
+                "Undo",
+                callback_data=(
+                    f"entry:delete-confirm:{entry.entry_id}:{database.now_epoch()}"
+                ),
+            ),
+            InlineKeyboardButton(
+                "Edit", callback_data=f"entry:view:{entry.entry_id}:0"
+            ),
+        ]
+    ]
+    if entry.name is not None:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "Save as favorite",
+                    callback_data=f"entry:fav:{entry.entry_id}",
+                )
+            ]
+        )
+    if restore_keyboard:
+        await message.reply_text("Select an option:", reply_markup=MAIN_KEYBOARD)
+    await message.reply_text(text, reply_markup=InlineKeyboardMarkup(rows))
+
+
+async def _weight_summary(database: Database, user_id: int) -> Optional[str]:
+    """Latest weight plus the floating 7-day average and week-over-week delta."""
+    latest = await _call(database.latest_weight, user_id)
+    if latest is None:
+        return None
+    timezone_name = await _call(database.get_timezone, user_id)
+    if timezone_name is None:
+        return f"Latest weight: {latest.weight_kg:.1f} kg."
+    today = local_date(database.now_epoch(), timezone_name)
+    week_start = day_bounds(today - timedelta(days=6), timezone_name).start_utc
+    week_end = day_bounds(today, timezone_name).end_utc
+    previous_start = day_bounds(today - timedelta(days=13), timezone_name).start_utc
+    current = await _call(database.average_weight, user_id, week_start, week_end)
+    previous = await _call(database.average_weight, user_id, previous_start, week_start)
+    measured_on = local_date(latest.measured_at_utc, timezone_name)
+    lines = [f"Latest weight: {latest.weight_kg:.1f} kg ({measured_on.isoformat()})."]
+    if current is not None:
+        line = f"7-day average: {current:.1f} kg"
+        if previous is not None:
+            line += f" ({current - previous:+.1f} kg vs previous week)"
+        lines.append(line + ".")
+    return "\n".join(lines)
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -483,6 +614,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             prompt,
             GOAL_KEYBOARD,
         )
+    elif text == "Weight":
+        await _start_weight_prompt(turn)
     elif text == "Update Timezone":
         await _start_with_prompt(
             database,
@@ -542,6 +675,22 @@ async def _handle_session_text(
                     message_id,
                     draft_name=name,
                 )
+            elif favorite.unit == UNIT_SERVING:
+                advanced = await _transition(
+                    database,
+                    session,
+                    SessionState.WAIT_FAVORITE_SERVINGS,
+                    message_id,
+                    draft_name=name,
+                    selected_favorite_id=favorite.favorite_id,
+                )
+                await message.reply_text(
+                    f"Found favorite {favorite.name} "
+                    f"({favorite.calories_per_100g:.2f} kcal/serving). "
+                    f"{FAVORITE_SERVINGS_PROMPT}",
+                    reply_markup=FAVORITE_SERVINGS_MANUAL_KEYBOARD,
+                )
+                await _mark_prompt_delivered(database, advanced)
             else:
                 advanced = await _transition(
                     database,
@@ -559,28 +708,59 @@ async def _handle_session_text(
                 )
                 await _mark_prompt_delivered(database, advanced)
         elif session.state == SessionState.WAIT_CALORIES:
-            calories = parse_calories(text)
-            await _advance_with_prompt(
-                database,
-                session,
-                SessionState.WAIT_GRAMS,
-                message,
-                message_id,
-                calories_per_100g=calories,
-            )
+            if text == "Per Serving" and session.draft_unit == UNIT_100G:
+                await _advance_with_prompt(
+                    database,
+                    session,
+                    SessionState.WAIT_CALORIES,
+                    message,
+                    message_id,
+                    draft_unit=UNIT_SERVING,
+                )
+            else:
+                serving_mode = session.draft_unit == UNIT_SERVING
+                calories = (
+                    parse_calories_per_serving(text)
+                    if serving_mode
+                    else parse_calories(text)
+                )
+                await _advance_with_prompt(
+                    database,
+                    session,
+                    SessionState.WAIT_GRAMS,
+                    message,
+                    message_id,
+                    calories_per_100g=calories,
+                )
         elif session.state == SessionState.WAIT_GRAMS:
-            grams = parse_grams(text)
-            await _advance_with_prompt(
-                database,
-                session,
-                SessionState.WAIT_PROTEIN,
-                message,
-                message_id,
-                serving_grams=grams,
-            )
+            if session.draft_unit == UNIT_SERVING:
+                servings = parse_servings(text)
+                await _advance_with_prompt(
+                    database,
+                    session,
+                    SessionState.WAIT_PROTEIN,
+                    message,
+                    message_id,
+                    draft_servings=servings,
+                )
+            else:
+                grams = parse_grams(text)
+                await _advance_with_prompt(
+                    database,
+                    session,
+                    SessionState.WAIT_PROTEIN,
+                    message,
+                    message_id,
+                    serving_grams=grams,
+                )
         elif session.state == SessionState.WAIT_PROTEIN:
-            protein = None if text == "Skip" else parse_macro(text, "Protein")
-            validate_macro_sum(protein, session.fat_per_100g, session.carbs_per_100g)
+            protein = (
+                None if text == "Skip" else _parse_draft_macro(session, text, "Protein")
+            )
+            if session.draft_unit == UNIT_100G:
+                validate_macro_sum(
+                    protein, session.fat_per_100g, session.carbs_per_100g
+                )
             await _advance_with_prompt(
                 database,
                 session,
@@ -590,8 +770,11 @@ async def _handle_session_text(
                 protein_per_100g=protein,
             )
         elif session.state == SessionState.WAIT_FAT:
-            fat = None if text == "Skip" else parse_macro(text, "Fat")
-            validate_macro_sum(session.protein_per_100g, fat, session.carbs_per_100g)
+            fat = None if text == "Skip" else _parse_draft_macro(session, text, "Fat")
+            if session.draft_unit == UNIT_100G:
+                validate_macro_sum(
+                    session.protein_per_100g, fat, session.carbs_per_100g
+                )
             await _advance_with_prompt(
                 database,
                 session,
@@ -601,27 +784,20 @@ async def _handle_session_text(
                 fat_per_100g=fat,
             )
         elif session.state == SessionState.WAIT_CARBS:
-            carbs = None if text == "Skip" else parse_macro(text, "Carbs")
-            validate_macro_sum(session.protein_per_100g, session.fat_per_100g, carbs)
+            carbs = (
+                None if text == "Skip" else _parse_draft_macro(session, text, "Carbs")
+            )
+            if session.draft_unit == UNIT_100G:
+                validate_macro_sum(
+                    session.protein_per_100g, session.fat_per_100g, carbs
+                )
             completed = replace(
                 session, carbs_per_100g=carbs, last_message_id=message_id
             )
-            await _call(database.complete_food_draft, completed, event_epoch)
-            progress = await _today_progress(database, session.user_id)
-            if session.draft_name is None:
-                await message.reply_text(
-                    f"Food entry added. {progress}", reply_markup=MAIN_KEYBOARD
-                )
-            else:
-                await message.reply_text(
-                    f"Food entry added. {progress}\nSave this product as a favorite?",
-                    reply_markup=FAVORITE_DECISION_KEYBOARD,
-                )
-                pending = await _call(
-                    database.get_session, session.user_id, session.chat_id
-                )
-                if pending is not None:
-                    await _mark_prompt_delivered(database, pending)
+            entry = await _call(database.complete_food_draft, completed, event_epoch)
+            await _send_receipt(
+                database, session.user_id, message, entry, restore_keyboard=True
+            )
         elif session.state == SessionState.WAIT_SAVE_FAVORITE:
             if text == "Yes":
                 await _call(
@@ -671,7 +847,10 @@ async def _handle_session_text(
                     "Select an option:", reply_markup=MAIN_KEYBOARD
                 )
             await _call(database.clear_session, session.user_id, session.chat_id)
-        elif session.state == SessionState.WAIT_FAVORITE_GRAMS:
+        elif session.state in {
+            SessionState.WAIT_FAVORITE_GRAMS,
+            SessionState.WAIT_FAVORITE_SERVINGS,
+        }:
             if text == "Enter Manually" and session.draft_name is not None:
                 await _advance_with_prompt(
                     database,
@@ -682,30 +861,32 @@ async def _handle_session_text(
                     selected_favorite_id=None,
                 )
             else:
-                grams = parse_grams(text)
-                await _call(
+                amount = (
+                    parse_servings(text)
+                    if session.state == SessionState.WAIT_FAVORITE_SERVINGS
+                    else parse_grams(text)
+                )
+                entry = await _call(
                     database.use_selected_favorite,
                     session.user_id,
                     session.chat_id,
-                    grams,
+                    amount,
                     event_epoch,
                 )
-                progress = await _today_progress(database, session.user_id)
-                await message.reply_text(
-                    f"Food entry added. {progress}", reply_markup=MAIN_KEYBOARD
+                await _send_receipt(
+                    database, session.user_id, message, entry, restore_keyboard=True
                 )
         elif session.state == SessionState.WAIT_RECENT_GRAMS:
-            grams = None if text == "Same as last time" else parse_grams(text)
-            await _call(
+            amount = None if text == "Same as last time" else parse_grams(text)
+            entry = await _call(
                 database.use_selected_entry,
                 session.user_id,
                 session.chat_id,
-                grams,
+                amount,
                 event_epoch,
             )
-            progress = await _today_progress(database, session.user_id)
-            await message.reply_text(
-                f"Food entry added. {progress}", reply_markup=MAIN_KEYBOARD
+            await _send_receipt(
+                database, session.user_id, message, entry, restore_keyboard=True
             )
         elif session.state == SessionState.WAIT_GOAL:
             goal = None if text == "Remove" else parse_daily_goal(text)
@@ -717,17 +898,64 @@ async def _handle_session_text(
                 reply_markup=MAIN_KEYBOARD,
             )
         elif session.state == SessionState.WAIT_ENTRY_GRAMS:
-            grams = parse_grams(text)
+            amount = parse_grams(text)
             entry = await _call(
-                database.update_entry_grams,
+                database.update_entry_amount,
+                session.user_id,
+                session.chat_id,
+                amount,
+                now,
+            )
+            await message.reply_text(
+                f"Serving updated to {amount_text(entry.nutrition)} "
+                f"({entry.nutrition.calories:.2f} kcal).",
+                reply_markup=MAIN_KEYBOARD,
+            )
+        elif session.state == SessionState.WAIT_ENTRY_NAME:
+            entry = await _call(
+                database.update_entry_name,
+                session.user_id,
+                session.chat_id,
+                text,
+                now,
+            )
+            await message.reply_text(
+                f"Food entry renamed to {entry.name}.", reply_markup=MAIN_KEYBOARD
+            )
+        elif session.state == SessionState.WAIT_ENTRY_AMENDMENT:
+            nutrient = session.selected_nutrient or "value"
+            value = parse_nutrient_value(text, nutrient.title())
+            entry = await _call(
+                database.update_entry_field,
+                session.user_id,
+                session.chat_id,
+                value,
+                now,
+            )
+            timezone_name = await _call(database.get_timezone, session.user_id)
+            await message.reply_text(
+                f"Food entry updated.\n\n{entry_details(entry, timezone_name)}",
+                reply_markup=MAIN_KEYBOARD,
+            )
+        elif session.state == SessionState.WAIT_FAVORITE_TO_SERVING:
+            grams = parse_grams(text)
+            favorite = await _call(
+                database.convert_favorite_to_serving,
                 session.user_id,
                 session.chat_id,
                 grams,
                 now,
             )
             await message.reply_text(
-                f"Serving weight updated to {entry.nutrition.grams:.2f}g "
-                f"({entry.nutrition.calories:.2f} kcal).",
+                "Favorite converted to a serving.\n\n" + favorite_details(favorite),
+                reply_markup=MAIN_KEYBOARD,
+            )
+        elif session.state == SessionState.WAIT_WEIGHT:
+            weight = parse_weight(text)
+            await _call(database.complete_weight_session, session, weight, event_epoch)
+            summary = await _weight_summary(database, session.user_id)
+            await message.reply_text(
+                f"Weight recorded.\n{summary}" if summary else "Weight recorded.",
                 reply_markup=MAIN_KEYBOARD,
             )
         elif session.state == SessionState.WAIT_ENTRY_TIME:
@@ -744,12 +972,16 @@ async def _handle_session_text(
             )
             await message.reply_text("Entry time updated.", reply_markup=MAIN_KEYBOARD)
         elif session.state == SessionState.WAIT_FAVORITE_AMENDMENT:
-            if session.selected_nutrient == "calories":
-                value = parse_calories(text)
-            elif session.selected_nutrient in {"protein", "fat", "carbs"}:
-                value = parse_macro(text, session.selected_nutrient.title())
-            else:
+            if session.selected_nutrient not in {
+                "calories",
+                "protein",
+                "fat",
+                "carbs",
+            }:
                 raise StateConflict("Favorite amendment context is incomplete")
+            # Unit-specific limits are enforced by the database against the
+            # favorite's own unit (per 100g or per serving).
+            value = parse_nutrient_value(text, session.selected_nutrient.title())
             await _call(
                 database.complete_favorite_amendment,
                 session.user_id,
@@ -774,6 +1006,12 @@ async def _handle_session_text(
             "That workflow is no longer available. Please start again.",
             reply_markup=MAIN_KEYBOARD,
         )
+
+
+def _parse_draft_macro(session: Session, text: str, label: str) -> float:
+    if session.draft_unit == UNIT_SERVING:
+        return parse_macro_per_serving(text, label)
+    return parse_macro(text, label)
 
 
 async def _transition(
@@ -858,22 +1096,24 @@ async def _reprompt(turn: Turn, prefix: str) -> None:
 
 
 async def _day_totals_text(
-    database: Database, user_id: int, timezone_name: str, period: Period
+    database: Database,
+    user_id: int,
+    timezone_name: str,
+    day: date,
+    today: date,
 ) -> Optional[str]:
-    """Totals block for today or yesterday; None when the day has no entries."""
-    bounds = period_bounds(period, timezone_name)
+    """Totals block for one local day; None when the day has no entries."""
+    bounds = day_bounds(day, timezone_name)
     stats = await _call(database.stats, user_id, bounds.start_utc, bounds.end_utc)
     if stats.entry_count == 0:
         return None
-    title = {
-        Period.TODAY: "Today's totals",
-        Period.YESTERDAY: "Yesterday's totals",
-    }[period]
-    goal = (
-        await _call(database.get_daily_goal, user_id)
-        if period == Period.TODAY
-        else None
-    )
+    if day == today:
+        title = "Today's totals"
+    elif day == today - timedelta(days=1):
+        title = "Yesterday's totals"
+    else:
+        title = f"Totals for {day.isoformat()}"
+    goal = await _call(database.get_daily_goal, user_id) if day == today else None
     return stats_totals_text(title, stats, goal)
 
 
@@ -932,7 +1172,8 @@ async def _show_daily_stats(
         text = f"No food entries found for {empty_label}."
     else:
         blocks = "\n\n".join(day_stats_block(day) for day in page.items)
-        text = f"{title}:\n\n{blocks}"
+        text = f"{title}:\n\nTap a day below to open its diary.\n\n{blocks}"
+        rows.extend(stats_day_rows(page.items))
         navigation = navigation_row(page, prefix, STATS_PAGE_SIZE)
         if navigation:
             rows.append(navigation)
@@ -952,7 +1193,9 @@ async def _show_entries(
     context: ContextTypes.DEFAULT_TYPE,
     offset: int,
     edit: bool = False,
+    day: Optional[date] = None,
 ) -> None:
+    """Diary page for one local day (today when ``day`` is None)."""
     user_id, _ = _identity(update)
     database = _db(context)
     timezone_name = await _call(database.get_timezone, user_id)
@@ -962,7 +1205,11 @@ async def _show_entries(
                 "Set your timezone first with /updatetimezone."
             )
         return
-    bounds = period_bounds(Period.TODAY, timezone_name)
+    today = local_date(database.now_epoch(), timezone_name)
+    oldest = today - timedelta(seconds=MAX_ENTRY_AGE_SECONDS)
+    shown_day = today if day is None else min(max(day, oldest), today)
+    is_today = shown_day == today
+    bounds = day_bounds(shown_day, timezone_name)
     page = await _call(
         database.page_entries,
         user_id,
@@ -980,25 +1227,35 @@ async def _show_entries(
             0,
             PAGE_SIZE,
         )
+    list_prefix = "entry:list" if is_today else f"entry:list:{shown_day.isoformat()}"
+    view_suffix = "" if is_today else f":{shown_day.isoformat()}"
+    day_label = "today" if is_today else shown_day.isoformat()
     rows: list[list[InlineKeyboardButton]] = []
     if not page.items:
-        text = "No food entries found for today."
+        text = f"No food entries found for {day_label}."
     else:
-        totals = await _day_totals_text(database, user_id, timezone_name, Period.TODAY)
-        text = f"{totals}\n\nToday's food entries:"
+        totals = await _day_totals_text(
+            database, user_id, timezone_name, shown_day, today
+        )
+        title = "Today's food entries" if is_today else f"Entries for {day_label}"
+        text = f"{totals}\n\n{title}:"
         rows = [
             [
                 InlineKeyboardButton(
-                    entry_button_text(entry),
-                    callback_data=f"entry:view:{entry.entry_id}:{page.offset}",
+                    entry_button_text(entry, timezone_name),
+                    callback_data=(
+                        f"entry:view:{entry.entry_id}:{page.offset}{view_suffix}"
+                    ),
                 )
             ]
             for entry in page.items
         ]
-        navigation = navigation_row(page, "entry:list")
+        navigation = navigation_row(page, list_prefix)
         if navigation:
             rows.append(navigation)
-    rows.append([InlineKeyboardButton("Yesterday", callback_data="stats:yesterday")])
+    day_navigation = day_navigation_row(shown_day, today, oldest)
+    if day_navigation:
+        rows.append(day_navigation)
     keyboard = InlineKeyboardMarkup(rows)
     if edit and update.callback_query is not None:
         await update.callback_query.edit_message_text(text, reply_markup=keyboard)
@@ -1111,11 +1368,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             elif active_session is None or active_session.state not in {
                 SessionState.WAIT_FAVORITE_SEARCH,
                 SessionState.WAIT_FAVORITE_GRAMS,
+                SessionState.WAIT_FAVORITE_SERVINGS,
                 SessionState.WAIT_FAVORITE_AMENDMENT,
+                SessionState.WAIT_FAVORITE_TO_SERVING,
                 SessionState.WAIT_RECENT_GRAMS,
                 SessionState.WAIT_ENTRY_GRAMS,
                 SessionState.WAIT_ENTRY_TIME,
+                SessionState.WAIT_ENTRY_NAME,
+                SessionState.WAIT_ENTRY_AMENDMENT,
                 SessionState.WAIT_GOAL,
+                SessionState.WAIT_WEIGHT,
             }:
                 await query.edit_message_text("This prompt has expired.")
             else:
@@ -1127,7 +1389,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         elif action.kind == "dismiss":
             await query.edit_message_text("No changes made.")
         elif action.kind == "entry_list":
-            await _show_entries(update, context, action.offset, edit=True)
+            await _show_entries(
+                update, context, action.offset, edit=True, day=action.day
+            )
         elif action.kind == "stats_page" and action.period is not None:
             month = None
             if action.month is not None:
@@ -1148,43 +1412,69 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     "Set your timezone first with /updatetimezone."
                 )
             else:
-                totals = await _day_totals_text(
-                    database, user_id, timezone_name, Period.YESTERDAY
+                yesterday = local_date(database.now_epoch(), timezone_name) - timedelta(
+                    days=1
                 )
-                await query.edit_message_text(
-                    totals or "No food entries found for yesterday.",
-                    reply_markup=InlineKeyboardMarkup(
-                        [[InlineKeyboardButton("Today", callback_data="entry:list:0")]]
-                    ),
-                )
+                await _show_entries(update, context, 0, edit=True, day=yesterday)
         elif action.kind == "favorite_list":
             await _show_favorites(update, context, action.offset, edit=True)
         elif action.kind == "entry_view" and action.record_id is not None:
             entry = await _call(database.get_entry, user_id, action.record_id)
             if entry is None:
                 raise NotFound("Food entry not found")
+            timezone_name = await _call(database.get_timezone, user_id)
+            back_target = (
+                f"entry:list:{action.day.isoformat()}:{action.offset}"
+                if action.day is not None
+                else f"entry:list:{action.offset}"
+            )
+            amount_label = (
+                "Edit Servings"
+                if entry.nutrition.servings is not None
+                else "Edit Grams"
+            )
             keyboard = InlineKeyboardMarkup(
                 [
                     [
                         InlineKeyboardButton(
-                            "Edit Grams",
+                            amount_label,
                             callback_data=f"entry:grams:{entry.entry_id}",
                         ),
                         InlineKeyboardButton(
                             "Edit Time", callback_data=f"entry:time:{entry.entry_id}"
+                        ),
+                        InlineKeyboardButton(
+                            "Edit Name", callback_data=f"entry:name:{entry.entry_id}"
+                        ),
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "Calories",
+                            callback_data=f"entry:field:{entry.entry_id}:calories",
+                        ),
+                        InlineKeyboardButton(
+                            "Protein",
+                            callback_data=f"entry:field:{entry.entry_id}:protein",
+                        ),
+                        InlineKeyboardButton(
+                            "Fat", callback_data=f"entry:field:{entry.entry_id}:fat"
+                        ),
+                        InlineKeyboardButton(
+                            "Carbs",
+                            callback_data=f"entry:field:{entry.entry_id}:carbs",
                         ),
                     ],
                     [
                         InlineKeyboardButton(
                             "Delete", callback_data=f"entry:delete:{entry.entry_id}"
                         ),
-                        InlineKeyboardButton(
-                            "Back", callback_data=f"entry:list:{action.offset}"
-                        ),
+                        InlineKeyboardButton("Back", callback_data=back_target),
                     ],
                 ]
             )
-            await query.edit_message_text(entry_details(entry), reply_markup=keyboard)
+            await query.edit_message_text(
+                entry_details(entry, timezone_name), reply_markup=keyboard
+            )
         elif action.kind == "entry_grams" and action.record_id is not None:
             entry = await _call(database.get_entry, user_id, action.record_id)
             if entry is None:
@@ -1198,13 +1488,73 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 prompt_pending=True,
             )
             await query.edit_message_text(
-                f"Editing serving weight for {entry.name or 'Unnamed food'} "
-                f"(currently {entry.nutrition.grams:.2f}g)."
+                f"Editing the amount for {entry.name or 'Unnamed food'} "
+                f"(currently {amount_text(entry.nutrition)})."
             )
             await query.message.reply_text(
-                ENTRY_GRAMS_PROMPT, reply_markup=CANCEL_KEYBOARD
+                ENTRY_SERVINGS_PROMPT
+                if entry.nutrition.servings is not None
+                else ENTRY_GRAMS_PROMPT,
+                reply_markup=CANCEL_KEYBOARD,
             )
             await _mark_prompt_delivered(database, started)
+        elif action.kind == "entry_name" and action.record_id is not None:
+            entry = await _call(database.get_entry, user_id, action.record_id)
+            if entry is None:
+                raise NotFound("Food entry not found")
+            started = await _call(
+                database.start_session,
+                user_id,
+                chat_id,
+                SessionState.WAIT_ENTRY_NAME,
+                selected_entry_id=entry.entry_id,
+                prompt_pending=True,
+            )
+            await query.edit_message_text(f"Renaming {entry.name or 'Unnamed food'}.")
+            await query.message.reply_text(
+                ENTRY_NAME_PROMPT, reply_markup=CANCEL_KEYBOARD
+            )
+            await _mark_prompt_delivered(database, started)
+        elif (
+            action.kind == "entry_field"
+            and action.record_id is not None
+            and action.nutrient is not None
+        ):
+            entry = await _call(database.get_entry, user_id, action.record_id)
+            if entry is None:
+                raise NotFound("Food entry not found")
+            started = await _call(
+                database.start_session,
+                user_id,
+                chat_id,
+                SessionState.WAIT_ENTRY_AMENDMENT,
+                selected_entry_id=entry.entry_id,
+                selected_nutrient=action.nutrient,
+                prompt_pending=True,
+            )
+            unit_label = (
+                "per serving" if entry.nutrition.servings is not None else "per 100g"
+            )
+            await query.edit_message_text(
+                f"Editing {action.nutrient} for {entry.name or 'Unnamed food'}."
+            )
+            await query.message.reply_text(
+                f"Enter the new {action.nutrient} value {unit_label}:",
+                reply_markup=CANCEL_KEYBOARD,
+            )
+            await _mark_prompt_delivered(database, started)
+        elif action.kind == "entry_favorite" and action.record_id is not None:
+            favorite, created = await _call(
+                database.add_favorite_from_entry, user_id, action.record_id
+            )
+            await query.message.reply_text(
+                (
+                    f"{favorite.name} saved as a favorite."
+                    if created
+                    else f"Favorite {favorite.name} updated with these values."
+                ),
+                reply_markup=MAIN_KEYBOARD,
+            )
         elif action.kind == "entry_time" and action.record_id is not None:
             entry = await _call(database.get_entry, user_id, action.record_id)
             if entry is None:
@@ -1286,45 +1636,81 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             favorite = await _call(database.get_favorite, user_id, action.record_id)
             if favorite is None:
                 raise NotFound("Favorite not found")
-            keyboard = InlineKeyboardMarkup(
-                [
+            action_row = [
+                InlineKeyboardButton(
+                    "Use", callback_data=f"fav:use:{favorite.favorite_id}"
+                ),
+                InlineKeyboardButton(
+                    "Amend", callback_data=f"fav:edit:{favorite.favorite_id}"
+                ),
+                InlineKeyboardButton(
+                    "Delete", callback_data=f"fav:delete:{favorite.favorite_id}"
+                ),
+                InlineKeyboardButton("Back", callback_data=f"fav:list:{action.offset}"),
+            ]
+            rows = [action_row]
+            if favorite.unit == UNIT_100G:
+                rows.append(
                     [
                         InlineKeyboardButton(
-                            "Use", callback_data=f"fav:use:{favorite.favorite_id}"
-                        ),
-                        InlineKeyboardButton(
-                            "Amend", callback_data=f"fav:edit:{favorite.favorite_id}"
-                        ),
-                        InlineKeyboardButton(
-                            "Delete", callback_data=f"fav:delete:{favorite.favorite_id}"
-                        ),
-                        InlineKeyboardButton(
-                            "Back", callback_data=f"fav:list:{action.offset}"
-                        ),
+                            "To Serving",
+                            callback_data=f"fav:serving:{favorite.favorite_id}",
+                        )
                     ]
-                ]
-            )
+                )
             await query.edit_message_text(
-                favorite_details(favorite), reply_markup=keyboard
+                favorite_details(favorite), reply_markup=InlineKeyboardMarkup(rows)
             )
         elif action.kind == "favorite_use" and action.record_id is not None:
             favorite = await _call(database.get_favorite, user_id, action.record_id)
             if favorite is None:
                 raise NotFound("Favorite not found")
+            serving_based = favorite.unit == UNIT_SERVING
             started = await _call(
                 database.start_session,
                 user_id,
                 chat_id,
-                SessionState.WAIT_FAVORITE_GRAMS,
+                SessionState.WAIT_FAVORITE_SERVINGS
+                if serving_based
+                else SessionState.WAIT_FAVORITE_GRAMS,
                 selected_favorite_id=favorite.favorite_id,
                 prompt_pending=True,
             )
             await query.edit_message_text(f"Selected favorite: {favorite.name}")
-            await query.message.reply_text(
-                f"Enter the serving weight in grams for {favorite.name}:",
-                reply_markup=CANCEL_KEYBOARD,
-            )
+            if serving_based:
+                await query.message.reply_text(
+                    f"Enter the number of servings of {favorite.name}, "
+                    "for example 1 or 0.5:",
+                    reply_markup=SERVINGS_KEYBOARD,
+                )
+            else:
+                await query.message.reply_text(
+                    f"Enter the serving weight in grams for {favorite.name}:",
+                    reply_markup=CANCEL_KEYBOARD,
+                )
             await _mark_prompt_delivered(database, started)
+        elif action.kind == "favorite_to_serving" and action.record_id is not None:
+            favorite = await _call(database.get_favorite, user_id, action.record_id)
+            if favorite is None:
+                raise NotFound("Favorite not found")
+            if favorite.unit == UNIT_SERVING:
+                await query.edit_message_text("This favorite is already serving-based.")
+            else:
+                started = await _call(
+                    database.start_session,
+                    user_id,
+                    chat_id,
+                    SessionState.WAIT_FAVORITE_TO_SERVING,
+                    selected_favorite_id=favorite.favorite_id,
+                    prompt_pending=True,
+                )
+                await query.edit_message_text(
+                    f"Converting {favorite.name} to a serving."
+                )
+                await query.message.reply_text(
+                    FAVORITE_TO_SERVING_PROMPT, reply_markup=CANCEL_KEYBOARD
+                )
+                await _mark_prompt_delivered(database, started)
         elif action.kind == "favorite_edit" and action.record_id is not None:
             favorite = await _call(database.get_favorite, user_id, action.record_id)
             if favorite is None:
@@ -1373,11 +1759,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 selected_nutrient=action.nutrient,
                 prompt_pending=True,
             )
+            unit_label = "per serving" if favorite.unit == UNIT_SERVING else "per 100g"
             await query.edit_message_text(
                 f"Editing {action.nutrient} for {favorite.name}."
             )
             await query.message.reply_text(
-                f"Enter the new {action.nutrient} value per 100g:",
+                f"Enter the new {action.nutrient} value {unit_label}:",
                 reply_markup=CANCEL_KEYBOARD,
             )
             await _mark_prompt_delivered(database, started)
@@ -1509,6 +1896,9 @@ def build_application(
         CommandHandler("updatetimezone", update_timezone, filters=new_messages)
     )
     application.add_handler(CommandHandler("add", add_command, filters=new_messages))
+    application.add_handler(
+        CommandHandler("weight", weight_command, filters=new_messages)
+    )
     application.add_handler(CallbackQueryHandler(handle_callback))
     application.add_handler(
         MessageHandler(new_messages & filters.TEXT & ~filters.COMMAND, handle_text)

@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from kcaloriebot.domain import (
+    UNIT_100G,
+    UNIT_SERVING,
     NutritionTotals,
     QuickAdd,
     ValidationError,
@@ -15,8 +17,12 @@ from kcaloriebot.domain import (
     parse_grams,
     parse_macro,
     parse_quick_add,
+    parse_servings,
+    parse_weight,
     per_100_from_totals,
+    per_unit_from_totals,
     scale_per_100,
+    scale_per_serving,
     validate_macro_sum,
 )
 
@@ -169,6 +175,97 @@ class NutritionTests(unittest.TestCase):
         _, protein, _, _ = per_100_from_totals(totals)
 
         self.assertEqual(100.0, protein)
+
+
+class ServingTests(unittest.TestCase):
+    def test_parse_servings_accepts_fractions(self) -> None:
+        self.assertEqual(0.5, parse_servings("0.5"))
+        self.assertEqual(0.5, parse_servings("0,5"))
+        self.assertEqual(2.0, parse_servings("2"))
+
+    def test_parse_servings_rejects_invalid_values(self) -> None:
+        for text in ("0", "-1", "nan", "1001", "abc"):
+            with self.subTest(text=text):
+                with self.assertRaises(ValidationError):
+                    parse_servings(text)
+
+    def test_scale_per_serving_allows_macros_beyond_100(self) -> None:
+        totals = scale_per_serving(900.0, 0.5, 40.0, 30.0, 120.0)
+
+        self.assertEqual(0.5, totals.servings)
+        self.assertIsNone(totals.grams)
+        self.assertAlmostEqual(450.0, totals.calories)
+        self.assertAlmostEqual(20.0, totals.protein or 0.0)
+        self.assertAlmostEqual(15.0, totals.fat or 0.0)
+        self.assertAlmostEqual(60.0, totals.carbs or 0.0)
+
+    def test_scale_per_serving_tracks_known_serving_weight(self) -> None:
+        totals = scale_per_serving(137.5, 2.0, None, None, None, serving_grams=55.0)
+
+        self.assertAlmostEqual(110.0, totals.grams or 0.0)
+        self.assertAlmostEqual(275.0, totals.calories)
+
+    def test_scale_per_serving_rejects_invalid_values(self) -> None:
+        for calories, servings in (
+            (-1.0, 1.0),
+            (math.nan, 1.0),
+            (50_001.0, 1.0),
+            (100.0, 0.0),
+            (100.0, -0.5),
+            (100.0, math.inf),
+        ):
+            with self.subTest(calories=calories, servings=servings):
+                with self.assertRaises(ValidationError):
+                    scale_per_serving(calories, servings, None, None, None)
+
+    def test_per_unit_recovers_serving_values(self) -> None:
+        totals = NutritionTotals(
+            calories=450.0,
+            grams=None,
+            protein=20.0,
+            fat=None,
+            carbs=60.0,
+            servings=0.5,
+        )
+
+        unit, calories, protein, fat, carbs = per_unit_from_totals(totals)
+
+        self.assertEqual(UNIT_SERVING, unit)
+        self.assertAlmostEqual(900.0, calories)
+        self.assertAlmostEqual(40.0, protein)
+        self.assertIsNone(fat)
+        self.assertAlmostEqual(120.0, carbs)
+
+    def test_per_unit_falls_back_to_per_100_for_gram_entries(self) -> None:
+        totals = NutritionTotals(
+            calories=100.0, grams=40.0, protein=4.0, fat=None, carbs=12.0
+        )
+
+        unit, calories, protein, _, _ = per_unit_from_totals(totals)
+
+        self.assertEqual(UNIT_100G, unit)
+        self.assertAlmostEqual(250.0, calories)
+        self.assertAlmostEqual(10.0, protein)
+
+    def test_per_100_rejects_entries_without_grams(self) -> None:
+        totals = NutritionTotals(
+            calories=450.0, grams=None, protein=None, fat=None, carbs=None
+        )
+        with self.assertRaises(ValidationError):
+            per_100_from_totals(totals)
+
+
+class WeightParsingTests(unittest.TestCase):
+    def test_parse_weight_accepts_units_and_commas(self) -> None:
+        self.assertEqual(82.5, parse_weight("82.5"))
+        self.assertEqual(82.5, parse_weight("82,5 kg"))
+        self.assertEqual(82.5, parse_weight("82.5кг"))
+
+    def test_parse_weight_rejects_out_of_range_values(self) -> None:
+        for text in ("0", "0.5", "501", "-80", "nan", "abc"):
+            with self.subTest(text=text):
+                with self.assertRaises(ValidationError):
+                    parse_weight(text)
 
 
 class QuickAddParsingTests(unittest.TestCase):

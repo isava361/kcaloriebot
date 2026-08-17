@@ -11,17 +11,20 @@ from telegram import (
     ReplyKeyboardRemove,
 )
 
-from datetime import date
+from datetime import date, timedelta
 
 from .callbacks import PAGE_SIZE
 from .domain import (
+    UNIT_SERVING,
     DayStats,
     FavoriteFood,
     FoodEntry,
+    NutritionTotals,
     Page,
     Session,
     SessionState,
     Stats,
+    local_datetime,
 )
 
 
@@ -38,8 +41,9 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
         [
             KeyboardButton("Statistics"),
             KeyboardButton("Daily Goal"),
-            KeyboardButton("Update Timezone"),
+            KeyboardButton("Weight"),
         ],
+        [KeyboardButton("Update Timezone")],
     ],
     resize_keyboard=True,
 )
@@ -80,6 +84,27 @@ MANUAL_ENTRY_KEYBOARD = ReplyKeyboardMarkup(
     resize_keyboard=True,
 )
 
+PER_SERVING_KEYBOARD = ReplyKeyboardMarkup(
+    [[KeyboardButton("Per Serving"), KeyboardButton("Cancel")]],
+    resize_keyboard=True,
+)
+
+SERVINGS_KEYBOARD = ReplyKeyboardMarkup(
+    [
+        [KeyboardButton("0.5"), KeyboardButton("1"), KeyboardButton("2")],
+        [KeyboardButton("Cancel")],
+    ],
+    resize_keyboard=True,
+)
+
+FAVORITE_SERVINGS_MANUAL_KEYBOARD = ReplyKeyboardMarkup(
+    [
+        [KeyboardButton("0.5"), KeyboardButton("1"), KeyboardButton("2")],
+        [KeyboardButton("Enter Manually"), KeyboardButton("Cancel")],
+    ],
+    resize_keyboard=True,
+)
+
 TIMEZONE_REQUIRED_MARKUP = ReplyKeyboardRemove()
 
 
@@ -111,7 +136,22 @@ FAVORITE_MATCH_GRAMS_PROMPT = (
 GOAL_PROMPT = "Enter your daily calorie goal in kcal, or choose Remove to clear it:"
 RECENT_GRAMS_PROMPT = "Enter the serving weight in grams, or choose Same as last time:"
 ENTRY_GRAMS_PROMPT = "Enter the new serving weight in grams:"
+ENTRY_SERVINGS_PROMPT = "Enter the new number of servings, for example 1 or 0.5:"
 ENTRY_TIME_PROMPT = "Enter the new entry time as HH:MM for today, or YYYY-MM-DD HH:MM:"
+ENTRY_NAME_PROMPT = "Enter the new food name:"
+SERVING_CALORIES_PROMPT = "Enter calories per one serving:"
+SERVINGS_COUNT_PROMPT = "Enter the number of servings, for example 1 or 0.5:"
+SERVING_PROTEIN_PROMPT = "Enter protein per serving in grams, or choose Skip:"
+SERVING_FAT_PROMPT = "Enter fat per serving in grams, or choose Skip:"
+SERVING_CARBS_PROMPT = "Enter carbs per serving in grams, or choose Skip:"
+FAVORITE_SERVINGS_PROMPT = (
+    "Enter the number of servings for the selected favorite, for example 1 or 0.5:"
+)
+FAVORITE_TO_SERVING_PROMPT = (
+    "How many grams is one serving? The favorite's per-100g values will be "
+    "converted to per-serving values:"
+)
+WEIGHT_PROMPT = "Enter your weight in kilograms, for example 82.5:"
 QUICK_ADD_USAGE = (
     "Log a food in one message: name, calories per 100g, grams. "
     "Example: oatmeal 370 60 or bread 250 kcal 150 g. "
@@ -121,17 +161,35 @@ QUICK_ADD_USAGE = (
 
 def session_prompt(session: Session, has_timezone: bool) -> tuple[str, Markup]:
     """Return the prompt and keyboard that re-ask the session's current step."""
+    serving_mode = session.draft_unit == UNIT_SERVING
     prompts: dict[SessionState, tuple[str, Markup]] = {
         SessionState.WAIT_TIMEZONE: (
             TIMEZONE_CHANGE_PROMPT if has_timezone else TIMEZONE_ONBOARDING_PROMPT,
             CANCEL_KEYBOARD if has_timezone else TIMEZONE_REQUIRED_MARKUP,
         ),
         SessionState.WAIT_FOOD_NAME: (FOOD_NAME_PROMPT, SKIP_KEYBOARD),
-        SessionState.WAIT_CALORIES: (CALORIES_PROMPT, CANCEL_KEYBOARD),
-        SessionState.WAIT_GRAMS: (GRAMS_PROMPT, CANCEL_KEYBOARD),
-        SessionState.WAIT_PROTEIN: (PROTEIN_PROMPT, SKIP_KEYBOARD),
-        SessionState.WAIT_FAT: (FAT_PROMPT, SKIP_KEYBOARD),
-        SessionState.WAIT_CARBS: (CARBS_PROMPT, SKIP_KEYBOARD),
+        SessionState.WAIT_CALORIES: (
+            (SERVING_CALORIES_PROMPT, CANCEL_KEYBOARD)
+            if serving_mode
+            else (CALORIES_PROMPT, PER_SERVING_KEYBOARD)
+        ),
+        SessionState.WAIT_GRAMS: (
+            (SERVINGS_COUNT_PROMPT, SERVINGS_KEYBOARD)
+            if serving_mode
+            else (GRAMS_PROMPT, CANCEL_KEYBOARD)
+        ),
+        SessionState.WAIT_PROTEIN: (
+            SERVING_PROTEIN_PROMPT if serving_mode else PROTEIN_PROMPT,
+            SKIP_KEYBOARD,
+        ),
+        SessionState.WAIT_FAT: (
+            SERVING_FAT_PROMPT if serving_mode else FAT_PROMPT,
+            SKIP_KEYBOARD,
+        ),
+        SessionState.WAIT_CARBS: (
+            SERVING_CARBS_PROMPT if serving_mode else CARBS_PROMPT,
+            SKIP_KEYBOARD,
+        ),
         SessionState.WAIT_SAVE_FAVORITE: (
             SAVE_FAVORITE_PROMPT,
             FAVORITE_DECISION_KEYBOARD,
@@ -143,14 +201,30 @@ def session_prompt(session: Session, has_timezone: bool) -> tuple[str, Markup]:
             and session.selected_favorite_id is not None
             else (FAVORITE_GRAMS_PROMPT, CANCEL_KEYBOARD)
         ),
+        SessionState.WAIT_FAVORITE_SERVINGS: (
+            (FAVORITE_SERVINGS_PROMPT, FAVORITE_SERVINGS_MANUAL_KEYBOARD)
+            if session.draft_name is not None
+            and session.selected_favorite_id is not None
+            else (FAVORITE_SERVINGS_PROMPT, SERVINGS_KEYBOARD)
+        ),
+        SessionState.WAIT_FAVORITE_TO_SERVING: (
+            FAVORITE_TO_SERVING_PROMPT,
+            CANCEL_KEYBOARD,
+        ),
         SessionState.WAIT_FAVORITE_AMENDMENT: (
-            f"Enter the new {session.selected_nutrient or 'nutrient'} value per 100g:",
+            f"Enter the new {session.selected_nutrient or 'nutrient'} value:",
             CANCEL_KEYBOARD,
         ),
         SessionState.WAIT_GOAL: (GOAL_PROMPT, GOAL_KEYBOARD),
         SessionState.WAIT_RECENT_GRAMS: (RECENT_GRAMS_PROMPT, REPEAT_KEYBOARD),
         SessionState.WAIT_ENTRY_GRAMS: (ENTRY_GRAMS_PROMPT, CANCEL_KEYBOARD),
         SessionState.WAIT_ENTRY_TIME: (ENTRY_TIME_PROMPT, CANCEL_KEYBOARD),
+        SessionState.WAIT_ENTRY_NAME: (ENTRY_NAME_PROMPT, CANCEL_KEYBOARD),
+        SessionState.WAIT_ENTRY_AMENDMENT: (
+            f"Enter the new {session.selected_nutrient or 'nutrient'} value:",
+            CANCEL_KEYBOARD,
+        ),
+        SessionState.WAIT_WEIGHT: (WEIGHT_PROMPT, CANCEL_KEYBOARD),
     }
     return prompts[session.state]
 
@@ -258,20 +332,44 @@ def day_stats_block(stats: DayStats) -> str:
     return f"{stats.day.isoformat()} — {stats.calories:.2f} kcal\n{macros}"
 
 
-def entry_button_text(entry: FoodEntry) -> str:
+def amount_text(nutrition: NutritionTotals) -> str:
+    """Human-readable amount: grams, servings, or servings with known weight."""
+    if nutrition.servings is not None:
+        label = "serving" if nutrition.servings == 1 else "servings"
+        rendered = f"{nutrition.servings:g} {label}"
+        if nutrition.grams is not None:
+            rendered += f" ({nutrition.grams:.0f}g)"
+        return rendered
+    assert nutrition.grams is not None
+    return f"{nutrition.grams:.2f}g"
+
+
+def entry_button_text(entry: FoodEntry, timezone_name: Optional[str] = None) -> str:
     name = short(entry.name or "Unnamed food", 30)
-    return f"{name} - {entry.nutrition.calories:.2f} kcal, {entry.nutrition.grams:.2f}g"
+    prefix = ""
+    if timezone_name is not None:
+        prefix = f"{local_datetime(entry.eaten_at_utc, timezone_name):%H:%M} "
+    return (
+        f"{prefix}{name} - {entry.nutrition.calories:.2f} kcal, "
+        f"{amount_text(entry.nutrition)}"
+    )
 
 
 def favorite_button_text(favorite: FavoriteFood) -> str:
-    return f"{short(favorite.name, 30)} - {favorite.calories_per_100g:.2f} kcal/100g"
+    unit = "serving" if favorite.unit == UNIT_SERVING else "100g"
+    return f"{short(favorite.name, 30)} - {favorite.calories_per_100g:.2f} kcal/{unit}"
 
 
-def entry_details(entry: FoodEntry) -> str:
+def entry_details(entry: FoodEntry, timezone_name: Optional[str] = None) -> str:
+    time_line = ""
+    if timezone_name is not None:
+        eaten_at = local_datetime(entry.eaten_at_utc, timezone_name)
+        time_line = f"Time: {eaten_at:%Y-%m-%d %H:%M}\n"
     return (
         f"{entry.name or 'Unnamed food'}\n"
+        f"{time_line}"
         f"Calories: {entry.nutrition.calories:.2f}\n"
-        f"Serving: {entry.nutrition.grams:.2f}g\n"
+        f"Serving: {amount_text(entry.nutrition)}\n"
         f"Protein: {optional_grams(entry.nutrition.protein)}\n"
         f"Fat: {optional_grams(entry.nutrition.fat)}\n"
         f"Carbs: {optional_grams(entry.nutrition.carbs)}"
@@ -279,10 +377,58 @@ def entry_details(entry: FoodEntry) -> str:
 
 
 def favorite_details(favorite: FavoriteFood) -> str:
+    if favorite.unit == UNIT_SERVING:
+        header = f"{favorite.name} per serving"
+        if favorite.serving_grams is not None:
+            header += f" ({favorite.serving_grams:.0f}g)"
+    else:
+        header = f"{favorite.name} per 100g"
     return (
-        f"{favorite.name} per 100g\n"
+        f"{header}\n"
         f"Calories: {favorite.calories_per_100g:.2f}\n"
         f"Protein: {optional_grams(favorite.protein_per_100g)}\n"
         f"Fat: {optional_grams(favorite.fat_per_100g)}\n"
         f"Carbs: {optional_grams(favorite.carbs_per_100g)}"
     )
+
+
+def day_navigation_row(
+    day: date, today: date, oldest: date
+) -> list[InlineKeyboardButton]:
+    """Previous/next-day buttons for the diary, bounded by history and today."""
+    row: list[InlineKeyboardButton] = []
+    previous = day - timedelta(days=1)
+    if previous >= oldest:
+        row.append(
+            InlineKeyboardButton(
+                f"◀ {previous:%d %b}",
+                callback_data=f"entry:list:{previous.isoformat()}:0",
+            )
+        )
+    upcoming = day + timedelta(days=1)
+    if upcoming <= today:
+        row.append(
+            InlineKeyboardButton(
+                f"{upcoming:%d %b} ▶",
+                callback_data=f"entry:list:{upcoming.isoformat()}:0",
+            )
+        )
+    if day != today:
+        row.append(InlineKeyboardButton("Today", callback_data="entry:list:0"))
+    return row
+
+
+def stats_day_rows(
+    days: tuple[DayStats, ...], per_row: int = 4
+) -> list[list[InlineKeyboardButton]]:
+    """Buttons that open the diary page of each listed statistics day."""
+    buttons = [
+        InlineKeyboardButton(
+            f"{stats.day:%d %b}",
+            callback_data=f"entry:list:{stats.day.isoformat()}:0",
+        )
+        for stats in days
+    ]
+    return [
+        buttons[start : start + per_row] for start in range(0, len(buttons), per_row)
+    ]

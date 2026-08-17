@@ -8,8 +8,101 @@ from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
-from kcaloriebot.database import SCHEMA, Database
+from kcaloriebot.database import Database
 from kcaloriebot.domain import NotFound, SessionState, StateConflict, ValidationError
+
+
+# The exact schema shipped as user_version 3, frozen for migration tests.
+V3_SCHEMA = """
+BEGIN;
+
+CREATE TABLE users (
+    user_id INTEGER PRIMARY KEY,
+    timezone TEXT NULL CHECK (timezone IS NULL OR length(timezone) BETWEEN 1 AND 128),
+    daily_calorie_goal REAL NULL CHECK (daily_calorie_goal IS NULL OR (daily_calorie_goal > 0 AND daily_calorie_goal <= 50000)),
+    created_at_utc INTEGER NOT NULL,
+    updated_at_utc INTEGER NOT NULL
+);
+
+CREATE TABLE favorite_foods (
+    favorite_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    name TEXT NOT NULL CHECK (length(trim(name)) BETWEEN 1 AND 200),
+    name_key TEXT NOT NULL,
+    calories_per_100g REAL NOT NULL
+        CHECK (calories_per_100g >= 0 AND calories_per_100g < 1e308),
+    protein_per_100g REAL NULL
+        CHECK (protein_per_100g IS NULL OR protein_per_100g BETWEEN 0 AND 100),
+    fat_per_100g REAL NULL
+        CHECK (fat_per_100g IS NULL OR fat_per_100g BETWEEN 0 AND 100),
+    carbs_per_100g REAL NULL
+        CHECK (carbs_per_100g IS NULL OR carbs_per_100g BETWEEN 0 AND 100),
+    created_at_utc INTEGER NOT NULL,
+    updated_at_utc INTEGER NOT NULL,
+    CHECK (
+        coalesce(protein_per_100g, 0) +
+        coalesce(fat_per_100g, 0) +
+        coalesce(carbs_per_100g, 0) <= 100.000001
+    ),
+    UNIQUE (user_id, favorite_id)
+);
+
+CREATE TABLE food_entries (
+    entry_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    eaten_at_utc INTEGER NOT NULL CHECK (typeof(eaten_at_utc) = 'integer'),
+    name TEXT NULL CHECK (name IS NULL OR length(trim(name)) BETWEEN 1 AND 200),
+    grams REAL NOT NULL CHECK (grams > 0 AND grams < 1e308),
+    calories REAL NOT NULL CHECK (calories >= 0 AND calories < 1e308),
+    protein REAL NULL CHECK (protein IS NULL OR (protein >= 0 AND protein < 1e308)),
+    fat REAL NULL CHECK (fat IS NULL OR (fat >= 0 AND fat < 1e308)),
+    carbs REAL NULL CHECK (carbs IS NULL OR (carbs >= 0 AND carbs < 1e308))
+);
+
+CREATE TABLE sessions (
+    user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    chat_id INTEGER NOT NULL,
+    state TEXT NOT NULL,
+    draft_name TEXT NULL CHECK (draft_name IS NULL OR length(trim(draft_name)) BETWEEN 1 AND 200),
+    calories_per_100g REAL NULL
+        CHECK (calories_per_100g IS NULL OR (calories_per_100g >= 0 AND calories_per_100g < 1e308)),
+    serving_grams REAL NULL
+        CHECK (serving_grams IS NULL OR (serving_grams > 0 AND serving_grams < 1e308)),
+    protein_per_100g REAL NULL
+        CHECK (protein_per_100g IS NULL OR protein_per_100g BETWEEN 0 AND 100),
+    fat_per_100g REAL NULL
+        CHECK (fat_per_100g IS NULL OR fat_per_100g BETWEEN 0 AND 100),
+    carbs_per_100g REAL NULL
+        CHECK (carbs_per_100g IS NULL OR carbs_per_100g BETWEEN 0 AND 100),
+    selected_favorite_id INTEGER NULL,
+    selected_nutrient TEXT NULL
+        CHECK (selected_nutrient IS NULL OR selected_nutrient IN ('calories', 'protein', 'fat', 'carbs')),
+    selected_entry_id INTEGER NULL,
+    prompt_pending INTEGER NOT NULL DEFAULT 0 CHECK (prompt_pending IN (0, 1)),
+    last_message_id INTEGER NULL,
+    revision INTEGER NOT NULL DEFAULT 0,
+    updated_at_utc INTEGER NOT NULL,
+    PRIMARY KEY (user_id, chat_id),
+    FOREIGN KEY (user_id, selected_favorite_id)
+        REFERENCES favorite_foods(user_id, favorite_id) ON DELETE CASCADE,
+    CHECK (
+        coalesce(protein_per_100g, 0) +
+        coalesce(fat_per_100g, 0) +
+        coalesce(carbs_per_100g, 0) <= 100.000001
+    )
+);
+
+CREATE INDEX food_entries_user_time_idx
+    ON food_entries(user_id, eaten_at_utc DESC, entry_id DESC);
+CREATE INDEX favorites_user_id_idx
+    ON favorite_foods(user_id, favorite_id DESC);
+CREATE INDEX favorites_user_name_idx
+    ON favorite_foods(user_id, name_key, favorite_id DESC);
+CREATE INDEX sessions_updated_idx ON sessions(updated_at_utc);
+
+PRAGMA user_version = 3;
+COMMIT;
+"""
 
 
 class DatabaseTestCase(unittest.TestCase):
@@ -97,19 +190,16 @@ class SessionAndTransactionTests(DatabaseTestCase):
         self.assertEqual(25.0, self.database.get_session(2, 10).carbs_per_100g)
         self.assertEqual(35.0, self.database.get_session(1, 11).carbs_per_100g)
 
-    def test_food_completion_scales_once_and_advances_atomically(self) -> None:
+    def test_food_completion_scales_once_and_clears_session(self) -> None:
         session = self.ready_food_session()
 
         entry = self.database.complete_food_draft(session, 1_700_000_100)
-        stored_session = self.database.get_session(1, 10)
 
         self.assertAlmostEqual(100.0, entry.nutrition.calories)
         self.assertAlmostEqual(4.0, entry.nutrition.protein)
         self.assertAlmostEqual(8.0, entry.nutrition.fat)
         self.assertAlmostEqual(12.0, entry.nutrition.carbs)
-        self.assertEqual(SessionState.WAIT_SAVE_FAVORITE, stored_session.state)
-        self.assertEqual(30.0, stored_session.carbs_per_100g)
-        self.assertGreater(stored_session.updated_at_utc, entry.eaten_at_utc)
+        self.assertIsNone(self.database.get_session(1, 10))
 
     def test_food_completion_reloads_persisted_draft_fields(self) -> None:
         session = self.ready_food_session(name="Rice")
@@ -141,14 +231,50 @@ class SessionAndTransactionTests(DatabaseTestCase):
         self.assertIsNone(self.database.get_session(1, 10))
 
     def test_saving_favorite_and_clearing_session_is_atomic(self) -> None:
-        session = self.ready_food_session()
-        self.database.complete_food_draft(session, 1_700_000_100)
+        # Legacy WAIT_SAVE_FAVORITE sessions (from before the inline receipt
+        # button) still complete through save_session_as_favorite.
+        self.database.start_session(
+            1,
+            10,
+            SessionState.WAIT_SAVE_FAVORITE,
+            now_utc=1_700_000_000,
+            draft_name="Rice",
+            calories_per_100g=250.0,
+            serving_grams=40.0,
+            protein_per_100g=10.0,
+            fat_per_100g=20.0,
+            carbs_per_100g=30.0,
+        )
 
         favorite = self.database.save_session_as_favorite(1, 10, 1_700_000_101)
 
         self.assertEqual("Rice", favorite.name)
         self.assertEqual(30.0, favorite.carbs_per_100g)
         self.assertIsNone(self.database.get_session(1, 10))
+
+    def test_favorite_from_entry_creates_and_updates(self) -> None:
+        session = self.ready_food_session()
+        entry = self.database.complete_food_draft(session, 1_700_000_100)
+
+        favorite, created = self.database.add_favorite_from_entry(
+            1, entry.entry_id, 1_700_000_101
+        )
+        self.assertTrue(created)
+        self.assertEqual("Rice", favorite.name)
+        self.assertAlmostEqual(250.0, favorite.calories_per_100g)
+        self.assertEqual("100g", favorite.unit)
+
+        again, created_again = self.database.add_favorite_from_entry(
+            1, entry.entry_id, 1_700_000_102
+        )
+        self.assertFalse(created_again)
+        self.assertEqual(favorite.favorite_id, again.favorite_id)
+
+    def test_favorite_from_unnamed_entry_is_rejected(self) -> None:
+        session = self.ready_food_session(name=None)
+        entry = self.database.complete_food_draft(session, 1_700_000_100)
+        with self.assertRaises(ValidationError):
+            self.database.add_favorite_from_entry(1, entry.entry_id, 1_700_000_101)
 
     def test_use_favorite_inserts_owned_entry_and_clears_session(self) -> None:
         favorite = self.database.add_favorite(
@@ -492,7 +618,7 @@ class RecentAndEditTests(DatabaseTestCase):
             selected_entry_id=source.entry_id,
         )
 
-        self.database.update_entry_grams(1, 10, 80.0, 1_700_000_102)
+        self.database.update_entry_amount(1, 10, 80.0, 1_700_000_102)
 
         stored = self.database.get_entry(1, source.entry_id)
         self.assertAlmostEqual(80.0, stored.nutrition.grams)
@@ -528,7 +654,7 @@ class RecentAndEditTests(DatabaseTestCase):
         )
 
         with self.assertRaises(NotFound):
-            self.database.update_entry_grams(2, 20, 80.0, 1_700_000_102)
+            self.database.update_entry_amount(2, 20, 80.0, 1_700_000_102)
 
         stored = self.database.get_entry(1, source.entry_id)
         self.assertAlmostEqual(40.0, stored.nutrition.grams)
@@ -544,7 +670,7 @@ class RecentAndEditTests(DatabaseTestCase):
         )
 
         with self.assertRaises(StateConflict):
-            self.database.update_entry_grams(1, 10, 80.0, 1_700_000_102)
+            self.database.update_entry_amount(1, 10, 80.0, 1_700_000_102)
 
 
 class SchemaTests(DatabaseTestCase):
@@ -569,7 +695,7 @@ class SchemaTests(DatabaseTestCase):
     MESSAGE_COLUMN_LINE = "    last_message_id INTEGER NULL,\n"
 
     def _historic_schema(self, version: int, *removed_lines: str) -> str:
-        schema = SCHEMA.replace(
+        schema = V3_SCHEMA.replace(
             "PRAGMA user_version = 3;", f"PRAGMA user_version = {version};"
         )
         for line in removed_lines:
@@ -635,7 +761,7 @@ class SchemaTests(DatabaseTestCase):
         with sqlite3.connect(version_two_path) as connection:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
 
-        self.assertEqual(3, version)
+        self.assertEqual(4, version)
         self.assertEqual("wait_grams", migrated.get_session(1, 10).state.value)
         migrated.set_daily_goal(1, 2000.0, 2)
         self.assertEqual(2000.0, migrated.get_daily_goal(1))
@@ -664,11 +790,72 @@ class SchemaTests(DatabaseTestCase):
                 row[1] for row in connection.execute("PRAGMA table_info(users)")
             }
 
-        self.assertEqual(3, version)
+        self.assertEqual(4, version)
         self.assertIn("prompt_pending", session_columns)
         self.assertIn("last_message_id", session_columns)
         self.assertIn("selected_entry_id", session_columns)
+        self.assertIn("draft_unit", session_columns)
         self.assertIn("daily_calorie_goal", user_columns)
+
+    def test_version_three_database_is_rebuilt_to_v4_preserving_data(self) -> None:
+        version_three_path = Path(self.temporary_directory.name) / "version-three.db"
+        with sqlite3.connect(version_three_path) as connection:
+            connection.executescript(V3_SCHEMA)
+            connection.execute(
+                "INSERT INTO users(user_id, timezone, created_at_utc, updated_at_utc) "
+                "VALUES (1, 'Europe/Moscow', 1, 1)"
+            )
+            connection.execute(
+                """
+                INSERT INTO food_entries(
+                    entry_id, user_id, eaten_at_utc, name, grams, calories,
+                    protein, fat, carbs
+                ) VALUES (7, 1, 1700000100, 'Rice', 40.0, 100.0, 4.0, 8.0, 12.0)
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO favorite_foods(
+                    favorite_id, user_id, name, name_key, calories_per_100g,
+                    protein_per_100g, fat_per_100g, carbs_per_100g,
+                    created_at_utc, updated_at_utc
+                ) VALUES (3, 1, 'Rice', 'rice', 250.0, 10.0, 20.0, 30.0, 1, 1)
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO sessions(user_id, chat_id, state, selected_favorite_id,
+                    updated_at_utc)
+                VALUES (1, 10, 'wait_favorite_grams', 3, 1700000000)
+                """
+            )
+
+        migrated = Database(version_three_path)
+        migrated.initialize()
+        with sqlite3.connect(version_three_path) as connection:
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+            table_names = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+
+        self.assertEqual(4, version)
+        self.assertIn("weights", table_names)
+        entry = migrated.get_entry(1, 7)
+        self.assertEqual("Rice", entry.name)
+        self.assertEqual(40.0, entry.nutrition.grams)
+        self.assertIsNone(entry.nutrition.servings)
+        favorite = migrated.get_favorite(1, 3)
+        self.assertEqual("100g", favorite.unit)
+        self.assertIsNone(favorite.serving_grams)
+        session = migrated.get_session(1, 10)
+        self.assertEqual(SessionState.WAIT_FAVORITE_GRAMS, session.state)
+        self.assertEqual(3, session.selected_favorite_id)
+        self.assertTrue(migrated.foreign_keys_enabled())
+        migrated.add_weight(1, 1_700_000_200, 82.5)
+        self.assertEqual(82.5, migrated.latest_weight(1).weight_kg)
 
     def test_nan_favorite_macro_is_rejected(self) -> None:
         with self.assertRaises(ValidationError):

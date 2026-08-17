@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import date
 from typing import Optional
 
 
@@ -13,6 +14,7 @@ MAX_PAGE_OFFSET = 10_000
 CONFIRMATION_TTL_SECONDS = 15 * 60
 
 _MONTH_TOKEN = re.compile(r"20\d{2}-(0[1-9]|1[0-2])")
+_DAY_TOKEN = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
 @dataclass(frozen=True)
@@ -24,6 +26,7 @@ class CallbackAction:
     issued_at: Optional[int] = None
     period: Optional[str] = None
     month: Optional[str] = None
+    day: Optional[date] = None
 
 
 def parse_callback(data: str) -> Optional[CallbackAction]:
@@ -36,6 +39,12 @@ def parse_callback(data: str) -> Optional[CallbackAction]:
     try:
         if len(parts) == 3 and parts[:2] == ["entry", "list"]:
             return CallbackAction("entry_list", offset=_parse_offset(parts[2]))
+        if len(parts) == 4 and parts[:2] == ["entry", "list"]:
+            return CallbackAction(
+                "entry_list",
+                day=_parse_day(parts[2]),
+                offset=_parse_offset(parts[3]),
+            )
         if len(parts) == 3 and parts[:2] == ["fav", "list"]:
             return CallbackAction("favorite_list", offset=_parse_offset(parts[2]))
         if len(parts) == 3 and parts[:2] == ["recent", "use"]:
@@ -62,14 +71,23 @@ def parse_callback(data: str) -> Optional[CallbackAction]:
                 "delete-confirm": "entry_delete_confirm",
                 "grams": "entry_grams",
                 "time": "entry_time",
+                "name": "entry_name",
+                "fav": "entry_favorite",
             }
             if parts[1] in kinds:
                 return CallbackAction(kinds[parts[1]], record_id=_parse_id(parts[2]))
-        if len(parts) == 4 and parts[:2] == ["entry", "view"]:
+        if len(parts) == 4 and parts[:2] == ["entry", "field"]:
+            if parts[3] not in {"calories", "protein", "fat", "carbs"}:
+                return None
+            return CallbackAction(
+                "entry_field", record_id=_parse_id(parts[2]), nutrient=parts[3]
+            )
+        if len(parts) in (4, 5) and parts[:2] == ["entry", "view"]:
             return CallbackAction(
                 "entry_view",
                 record_id=_parse_id(parts[2]),
                 offset=_parse_offset(parts[3]),
+                day=_parse_day(parts[4]) if len(parts) == 5 else None,
             )
         if len(parts) == 4 and parts[:2] == ["entry", "delete-confirm"]:
             return CallbackAction(
@@ -84,6 +102,7 @@ def parse_callback(data: str) -> Optional[CallbackAction]:
                 "edit": "favorite_edit",
                 "delete": "favorite_delete",
                 "delete-confirm": "favorite_delete_confirm",
+                "serving": "favorite_to_serving",
             }
             if parts[1] in kinds:
                 return CallbackAction(kinds[parts[1]], record_id=_parse_id(parts[2]))
@@ -164,6 +183,12 @@ def _parse_month(value: str) -> str:
     if _MONTH_TOKEN.fullmatch(value) is None:
         raise ValueError("invalid statistics month")
     return value
+
+
+def _parse_day(value: str) -> date:
+    if _DAY_TOKEN.fullmatch(value) is None:
+        raise ValueError("invalid diary day")
+    return date.fromisoformat(value)
 
 
 def _parse_offset(value: str, page_size: int = PAGE_SIZE) -> int:

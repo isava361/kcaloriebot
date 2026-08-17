@@ -148,3 +148,32 @@ With 2.1–2.4 and 2.6 shipped, the remaining ideas in rough priority order:
 nutrition lookup via Open Food Facts / USDA (2.5), default serving sizes for
 favorites (2.7), weekly summary + reminder (2.8), CSV export (2.9), and
 localization (2.10).
+
+## Part 3 — Shipped 2026-08-17 (schema v4)
+
+- **Token-leak fix**: `LOG_LEVEL` now applies only to the `kcaloriebot`
+  logger; httpx/httpcore/telegram are capped at WARNING and a
+  `TokenRedactionFilter` scrubs the bot token from all emitted records
+  (`kcaloriebot/__main__.py`). If an earlier version ran at INFO in
+  production, rotate the token and treat old journals as sensitive.
+- **Historical diary**: day pages with previous/next-day navigation and a
+  Today shortcut, clickable days in week/month statistics, local time in
+  entry buttons and details. Backdated entries are editable from their day.
+- **Receipt after every save** with inline Undo (15-minute TTL, reuses the
+  delete-confirm path), Edit, and Save-as-favorite; the wizard's Yes/No
+  save-favorite step was replaced by the receipt button
+  (`complete_food_draft` no longer transitions to `WAIT_SAVE_FAVORITE`,
+  which is kept only for pre-upgrade sessions).
+- **Full entry editing**: name, calories, protein, fat, carbs (per 100g for
+  weighed entries, per serving for serving entries), amount, and time.
+- **Serving-based foods** (covers and extends 2.7): `Per Serving` mode in the
+  wizard without the per-100g macro caps, `To Serving` conversion for
+  favorites, fractional serving counts (0.5 etc.). Schema v4 rebuilds
+  `food_entries` (nullable grams + `servings`), `favorite_foods`
+  (`unit`, `serving_grams`, conditional macro checks), and `sessions`
+  (`draft_unit`, `draft_servings`).
+- **Weight tracking**: `Weight` button and `/weight` command with a floating
+  7-day average and week-over-week delta; new `weights` table.
+
+Still open from Part 2: nutrition lookup (2.5), weekly summary/reminder
+(2.8), CSV export (2.9), localization (2.10).
