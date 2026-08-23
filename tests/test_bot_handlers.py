@@ -974,6 +974,71 @@ class NewFeatureTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(62.5, entry.nutrition.calories)
         self.assertIsNone(self.database.get_session(1, 10))
 
+    async def add_serving_entry(self):
+        """Log a per-serving food whose serving weight is unknown."""
+        for text in ("Add Food", "Pizza", "Per Serving", "900", "1", "Skip", "Skip"):
+            await handle_text(make_update(text), self.context)
+        await handle_text(make_update("Skip"), self.context)
+        return self.entries()[0]
+
+    async def test_recent_foods_repeats_a_serving_entry(self) -> None:
+        entry = await self.add_serving_entry()
+        self.assertIsNone(entry.nutrition.grams)
+
+        query = FakeQuery(f"recent:use:{entry.entry_id}", FakeMessage())
+        await handle_callback(make_update(query=query), self.context)
+
+        prompt = query.message.replies[-1][0]
+        self.assertIn("number of servings", prompt)
+        self.assertIn("1 serving", prompt)
+
+        await handle_text(make_update("Same as last time"), self.context)
+
+        entries = self.entries()
+        self.assertEqual(2, len(entries))
+        self.assertEqual(1.0, entries[0].nutrition.servings)
+        self.assertAlmostEqual(900.0, entries[0].nutrition.calories)
+        self.assertIsNone(self.database.get_session(1, 10))
+
+    async def test_serving_entry_amount_is_edited_in_servings(self) -> None:
+        entry = await self.add_serving_entry()
+
+        query = FakeQuery(f"entry:grams:{entry.entry_id}", FakeMessage())
+        await handle_callback(make_update(query=query), self.context)
+        self.assertIn("number of servings", query.message.replies[-1][0])
+
+        rejected = make_update("0")
+        await handle_text(rejected, self.context)
+        self.assertIn("Servings", rejected.effective_message.replies[-1][0])
+        self.assertEqual(
+            SessionState.WAIT_ENTRY_GRAMS, self.database.get_session(1, 10).state
+        )
+
+        await handle_text(make_update("2"), self.context)
+
+        stored = self.database.get_entry(1, entry.entry_id)
+        self.assertEqual(2.0, stored.nutrition.servings)
+        self.assertAlmostEqual(1800.0, stored.nutrition.calories)
+
+    async def test_entries_older_than_a_year_are_reachable_by_day(self) -> None:
+        # Entries imported from the Go database can predate the one-year limit
+        # that applies to backdating a new entry.
+        now = self.database.now_epoch()
+        old_epoch = now - 730 * 86_400
+        old_day = datetime.fromtimestamp(old_epoch, timezone.utc).date()
+        entry = self.database.add_entry(1, old_epoch, "Borscht", 100.0, 300.0)
+
+        query = FakeQuery(f"entry:list:{old_day.isoformat()}:0", FakeMessage())
+        await handle_callback(make_update(query=query), self.context)
+
+        text, keyboard = query.edits[-1]
+        self.assertIn(f"Totals for {old_day.isoformat()}", text)
+        self.assertIn("Borscht", str(keyboard))
+        self.assertIn(
+            f"entry:view:{entry.entry_id}:0:{old_day.isoformat()}",
+            keyboard_callbacks(keyboard),
+        )
+
     async def test_entry_calories_edit_rescales_totals(self) -> None:
         entry = self.database.add_entry(
             1, self.database.now_epoch(), "Rice", 250.0, 40.0, 10.0, 20.0, 30.0

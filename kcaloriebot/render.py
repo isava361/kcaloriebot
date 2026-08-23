@@ -15,6 +15,7 @@ from datetime import date, timedelta
 
 from .callbacks import PAGE_SIZE
 from .domain import (
+    EARLIEST_DIARY_DATE,
     UNIT_SERVING,
     DayStats,
     FavoriteFood,
@@ -135,6 +136,7 @@ FAVORITE_MATCH_GRAMS_PROMPT = (
 )
 GOAL_PROMPT = "Enter your daily calorie goal in kcal, or choose Remove to clear it:"
 RECENT_GRAMS_PROMPT = "Enter the serving weight in grams, or choose Same as last time:"
+RECENT_SERVINGS_PROMPT = "Enter the number of servings, or choose Same as last time:"
 ENTRY_GRAMS_PROMPT = "Enter the new serving weight in grams:"
 ENTRY_SERVINGS_PROMPT = "Enter the new number of servings, for example 1 or 0.5:"
 ENTRY_TIME_PROMPT = "Enter the new entry time as HH:MM for today, or YYYY-MM-DD HH:MM:"
@@ -216,12 +218,19 @@ def session_prompt(session: Session, has_timezone: bool) -> tuple[str, Markup]:
             CANCEL_KEYBOARD,
         ),
         SessionState.WAIT_GOAL: (GOAL_PROMPT, GOAL_KEYBOARD),
-        SessionState.WAIT_RECENT_GRAMS: (RECENT_GRAMS_PROMPT, REPEAT_KEYBOARD),
-        SessionState.WAIT_ENTRY_GRAMS: (ENTRY_GRAMS_PROMPT, CANCEL_KEYBOARD),
+        SessionState.WAIT_RECENT_GRAMS: (
+            RECENT_SERVINGS_PROMPT if serving_mode else RECENT_GRAMS_PROMPT,
+            REPEAT_KEYBOARD,
+        ),
+        SessionState.WAIT_ENTRY_GRAMS: (
+            ENTRY_SERVINGS_PROMPT if serving_mode else ENTRY_GRAMS_PROMPT,
+            CANCEL_KEYBOARD,
+        ),
         SessionState.WAIT_ENTRY_TIME: (ENTRY_TIME_PROMPT, CANCEL_KEYBOARD),
         SessionState.WAIT_ENTRY_NAME: (ENTRY_NAME_PROMPT, CANCEL_KEYBOARD),
         SessionState.WAIT_ENTRY_AMENDMENT: (
-            f"Enter the new {session.selected_nutrient or 'nutrient'} value:",
+            f"Enter the new {session.selected_nutrient or 'nutrient'} value "
+            f"{'per serving' if serving_mode else 'per 100g'}:",
             CANCEL_KEYBOARD,
         ),
         SessionState.WAIT_WEIGHT: (WEIGHT_PROMPT, CANCEL_KEYBOARD),
@@ -293,7 +302,7 @@ def month_navigation_row(
     """Buttons that switch the month statistics to an adjacent month."""
     row: list[InlineKeyboardButton] = []
     previous = date(year - 1, 12, 1) if month == 1 else date(year, month - 1, 1)
-    if previous.year >= 2020:
+    if previous >= EARLIEST_DIARY_DATE:
         row.append(
             InlineKeyboardButton(
                 f"◀ {previous:%b %Y}",

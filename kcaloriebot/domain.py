@@ -22,6 +22,11 @@ MAX_CALORIES_PER_SERVING = 50_000.0
 MAX_MACRO_PER_SERVING = 10_000.0
 MIN_WEIGHT_KG = 1.0
 MAX_WEIGHT_KG = 500.0
+# Oldest day the diary and statistics can be browsed back to. Entries imported
+# from the Go database can be older than MAX_ENTRY_AGE_SECONDS, which limits
+# only how far back a new entry may be backdated, so browsing uses its own
+# floor.
+EARLIEST_DIARY_DATE = date(2020, 1, 1)
 
 UNIT_100G = "100g"
 UNIT_SERVING = "serving"

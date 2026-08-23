@@ -29,7 +29,7 @@ from .callbacks import (
 from .config import Settings
 from .database import Database
 from .domain import (
-    MAX_ENTRY_AGE_SECONDS,
+    EARLIEST_DIARY_DATE,
     UNIT_100G,
     UNIT_SERVING,
     NotFound,
@@ -357,6 +357,17 @@ async def weight_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             reply_markup=markup,
         )
         await _mark_prompt_delivered(database, turn.session)
+        return
+    if await _call(database.get_timezone, turn.user_id) is None:
+        await _start_with_prompt(
+            database,
+            turn.user_id,
+            turn.chat_id,
+            SessionState.WAIT_TIMEZONE,
+            turn.message,
+            TIMEZONE_ONBOARDING_PROMPT,
+            TIMEZONE_REQUIRED_MARKUP,
+        )
         return
     parts = turn.message.text.split(maxsplit=1)
     payload = parts[1].strip() if len(parts) > 1 else ""
@@ -877,7 +888,11 @@ async def _handle_session_text(
                     database, session.user_id, message, entry, restore_keyboard=True
                 )
         elif session.state == SessionState.WAIT_RECENT_GRAMS:
-            amount = None if text == "Same as last time" else parse_grams(text)
+            amount = (
+                None
+                if text == "Same as last time"
+                else _parse_entry_amount(session, text)
+            )
             entry = await _call(
                 database.use_selected_entry,
                 session.user_id,
@@ -898,7 +913,7 @@ async def _handle_session_text(
                 reply_markup=MAIN_KEYBOARD,
             )
         elif session.state == SessionState.WAIT_ENTRY_GRAMS:
-            amount = parse_grams(text)
+            amount = _parse_entry_amount(session, text)
             entry = await _call(
                 database.update_entry_amount,
                 session.user_id,
@@ -1012,6 +1027,17 @@ def _parse_draft_macro(session: Session, text: str, label: str) -> float:
     if session.draft_unit == UNIT_SERVING:
         return parse_macro_per_serving(text, label)
     return parse_macro(text, label)
+
+
+def _parse_entry_amount(session: Session, text: str) -> float:
+    """Parse an amount in the selected entry's own unit.
+
+    The unit is carried on the session so the prompt, the validation limits,
+    and the error message all agree on grams versus servings.
+    """
+    if session.draft_unit == UNIT_SERVING:
+        return parse_servings(text)
+    return parse_grams(text)
 
 
 async def _transition(
@@ -1206,7 +1232,7 @@ async def _show_entries(
             )
         return
     today = local_date(database.now_epoch(), timezone_name)
-    oldest = today - timedelta(seconds=MAX_ENTRY_AGE_SECONDS)
+    oldest = min(EARLIEST_DIARY_DATE, today)
     shown_day = today if day is None else min(max(day, oldest), today)
     is_today = shown_day == today
     bounds = day_bounds(shown_day, timezone_name)
@@ -1479,12 +1505,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             entry = await _call(database.get_entry, user_id, action.record_id)
             if entry is None:
                 raise NotFound("Food entry not found")
+            serving_based = entry.nutrition.servings is not None
             started = await _call(
                 database.start_session,
                 user_id,
                 chat_id,
                 SessionState.WAIT_ENTRY_GRAMS,
                 selected_entry_id=entry.entry_id,
+                draft_unit=UNIT_SERVING if serving_based else UNIT_100G,
                 prompt_pending=True,
             )
             await query.edit_message_text(
@@ -1492,9 +1520,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 f"(currently {amount_text(entry.nutrition)})."
             )
             await query.message.reply_text(
-                ENTRY_SERVINGS_PROMPT
-                if entry.nutrition.servings is not None
-                else ENTRY_GRAMS_PROMPT,
+                ENTRY_SERVINGS_PROMPT if serving_based else ENTRY_GRAMS_PROMPT,
                 reply_markup=CANCEL_KEYBOARD,
             )
             await _mark_prompt_delivered(database, started)
@@ -1523,6 +1549,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             entry = await _call(database.get_entry, user_id, action.record_id)
             if entry is None:
                 raise NotFound("Food entry not found")
+            serving_based = entry.nutrition.servings is not None
             started = await _call(
                 database.start_session,
                 user_id,
@@ -1530,11 +1557,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 SessionState.WAIT_ENTRY_AMENDMENT,
                 selected_entry_id=entry.entry_id,
                 selected_nutrient=action.nutrient,
+                draft_unit=UNIT_SERVING if serving_based else UNIT_100G,
                 prompt_pending=True,
             )
-            unit_label = (
-                "per serving" if entry.nutrition.servings is not None else "per 100g"
-            )
+            unit_label = "per serving" if serving_based else "per 100g"
             await query.edit_message_text(
                 f"Editing {action.nutrient} for {entry.name or 'Unnamed food'}."
             )
@@ -1578,19 +1604,26 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             entry = await _call(database.get_entry, user_id, action.record_id)
             if entry is None:
                 raise NotFound("Food entry not found")
+            serving_based = entry.nutrition.servings is not None
             started = await _call(
                 database.start_session,
                 user_id,
                 chat_id,
                 SessionState.WAIT_RECENT_GRAMS,
                 selected_entry_id=entry.entry_id,
+                draft_unit=UNIT_SERVING if serving_based else UNIT_100G,
                 prompt_pending=True,
             )
             name = entry.name or "Unnamed food"
             await query.edit_message_text(f"Selected: {name}")
+            amount = (
+                "the number of servings"
+                if serving_based
+                else "the serving weight in grams"
+            )
             await query.message.reply_text(
-                f"Enter the serving weight in grams for {name}, or choose "
-                f"Same as last time ({entry.nutrition.grams:.0f}g):",
+                f"Enter {amount} for {name}, or choose "
+                f"Same as last time ({amount_text(entry.nutrition)}):",
                 reply_markup=REPEAT_KEYBOARD,
             )
             await _mark_prompt_delivered(database, started)

@@ -608,7 +608,7 @@ class RecentAndEditTests(DatabaseTestCase):
         self.assertAlmostEqual(40.0, entry.nutrition.grams)
         self.assertAlmostEqual(100.0, entry.nutrition.calories)
 
-    def test_update_entry_grams_recomputes_totals(self) -> None:
+    def test_update_entry_amount_recomputes_totals(self) -> None:
         source = self.make_entry()
         self.database.start_session(
             1,
