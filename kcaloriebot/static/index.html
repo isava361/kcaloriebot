@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>KCalorie · Дневник питания</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+<main>
+  <header><div><span class="eyebrow">KCALORIE</span><h1>Дневник питания</h1></div><span class="brand" aria-hidden="true">k.</span></header>
+  <p id="notice" role="status" aria-live="polite">Загружаем ваш дневник…</p>
+  <section id="onboarding" class="card" hidden>
+    <h2>Начнём с вашего времени</h2><p class="muted">Так приёмы пищи попадут в правильный день.</p>
+    <form id="timezone-form"><label>Часовой пояс<input name="timezone" required placeholder="Europe/Moscow" maxlength="100"></label><button class="primary">Продолжить</button></form>
+  </section>
+  <div id="app" hidden>
+    <nav class="day-nav" aria-label="Выбор дня"><button id="previous" aria-label="Предыдущий день">←</button><label><span class="sr-only">Дата дневника</span><input id="day" type="date" min="2020-01-01"></label><button id="next" aria-label="Следующий день">→</button></nav>
+    <section class="card summary">
+      <div class="row"><span class="eyebrow">ЭНЕРГИЯ ЗА ДЕНЬ</span><button id="goal-button" class="text-button">Цель</button></div>
+      <div class="energy"><strong id="calories">0</strong><span>ккал</span></div>
+      <progress id="progress" max="100" value="0" aria-label="Прогресс дневной цели"></progress>
+      <p id="budget" class="muted"></p>
+      <div class="macros"><div><span class="dot protein"></span>Белки<strong id="protein">—</strong></div><div><span class="dot fat"></span>Жиры<strong id="fat">—</strong></div><div><span class="dot carbs"></span>Углеводы<strong id="carbs">—</strong></div></div>
+      <p id="partial" class="muted small" hidden>Значения со знаком ≈ неполные: БЖУ указаны не для всех записей.</p>
+    </section>
+    <div class="actions"><button id="add-button" class="primary">＋ Добавить еду</button><button id="favorites-button">♡ Избранное</button></div>
+    <section><div class="row section-title"><h2>Приёмы пищи</h2><span id="count" class="muted"></span></div><div id="entries"></div><button id="more" class="wide" hidden>Показать ещё</button></section>
+    <footer><button id="today-button" class="text-button">К сегодняшнему дню</button><span id="zone" class="small muted"></span></footer>
+  </div>
+</main>
+<dialog id="food-dialog"><form id="food-form">
+  <div class="row"><h2>Добавить еду</h2><button type="button" class="close" aria-label="Закрыть">×</button></div>
+  <p class="muted">Запись будет добавлена на сегодня.</p>
+  <label>Название<input name="name" placeholder="Например, овсянка" required maxlength="200"></label>
+  <div class="field-pair"><label>Ккал на 100 г<input name="calories" type="number" inputmode="decimal" min="0" max="10000" step="any" required></label><label>Съедено, г<input name="grams" type="number" inputmode="decimal" min="0.01" max="100000" step="any" value="100" required></label></div>
+  <p class="muted small">БЖУ на 100 г · можно оставить пустыми</p>
+  <div class="field-triple"><label>Белки<input name="protein" type="number" inputmode="decimal" min="0" max="100" step="any"></label><label>Жиры<input name="fat" type="number" inputmode="decimal" min="0" max="100" step="any"></label><label>Углеводы<input name="carbs" type="number" inputmode="decimal" min="0" max="100" step="any"></label></div>
+  <p class="form-error" role="alert"></p><button class="primary wide">Добавить в дневник</button>
+</form></dialog>
+<dialog id="goal-dialog"><form id="goal-form"><div class="row"><h2>Дневная цель</h2><button type="button" class="close" aria-label="Закрыть">×</button></div><label>Килокалории<input name="goal" type="number" inputmode="decimal" min="1" max="50000" step="any"></label><p class="muted small">Оставьте поле пустым, чтобы убрать цель.</p><p class="form-error" role="alert"></p><button class="primary wide">Сохранить</button></form></dialog>
+<dialog id="favorites-dialog"><div class="row"><h2>Избранное</h2><button type="button" class="close" aria-label="Закрыть">×</button></div><div id="favorites"></div><button id="favorites-more" class="wide" hidden>Показать ещё</button><form id="favorite-form" hidden><label id="favorite-amount-label">Количество<input name="amount" type="number" inputmode="decimal" min="0.01" step="any" required></label><p class="form-error" role="alert"></p><button class="primary wide">Добавить на сегодня</button></form></dialog>
+<dialog id="delete-dialog"><form id="delete-form"><h2>Удалить запись?</h2><p id="delete-name"></p><p class="form-error" role="alert"></p><div class="actions"><button type="button" class="close">Отмена</button><button class="danger">Удалить</button></div></form></dialog>
+</body>
+</html>

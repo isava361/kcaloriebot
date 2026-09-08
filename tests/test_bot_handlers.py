@@ -20,6 +20,7 @@ from kcaloriebot.bot import (
     add_command,
     handle_callback,
     handle_text,
+    miniapp_command,
     start,
     unknown_command,
     update_timezone,
@@ -102,6 +103,18 @@ class BotHandlerTests(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self) -> None:
         self.temporary_directory.cleanup()
+
+    async def test_miniapp_button_is_private_and_uses_configured_url(self) -> None:
+        self.context.application.bot_data["miniapp_url"] = "https://example.com/"
+        update = make_update("/app")
+        await miniapp_command(update, self.context)
+        markup = update.effective_message.replies[-1][1]
+        self.assertEqual(
+            markup.inline_keyboard[0][0].web_app.url, "https://example.com/"
+        )
+        group = make_update("/app", chat_type=ChatType.GROUP)
+        await miniapp_command(group, self.context)
+        self.assertIsNone(group.effective_message.replies[-1][1])
 
     async def test_first_menu_text_starts_timezone_onboarding_without_consuming_text(
         self,

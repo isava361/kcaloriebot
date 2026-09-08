@@ -6,7 +6,7 @@ from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from typing import Any, Callable, Optional, TypeVar
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, WebAppInfo
 from telegram.constants import ChatType
 from telegram.error import TelegramError
 from telegram.ext import (
@@ -2216,6 +2216,21 @@ async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> No
             )
 
 
+async def miniapp_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_private(update):
+        return
+    url = context.application.bot_data.get("miniapp_url")
+    if not url:
+        await update.effective_message.reply_text("Mini App пока не настроен.")
+        return
+    await update.effective_message.reply_text(
+        "Ваш дневник питания",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("Открыть дневник", web_app=WebAppInfo(url=url))]]
+        ),
+    )
+
+
 def build_application(
     settings: Settings, database: Optional[Database] = None
 ) -> Application:
@@ -2232,7 +2247,11 @@ def build_application(
         .build()
     )
     application.bot_data["database"] = store
+    application.bot_data["miniapp_url"] = settings.miniapp_url
     new_messages = filters.UpdateType.MESSAGE
+    application.add_handler(
+        CommandHandler("app", miniapp_command, filters=new_messages)
+    )
     application.add_handler(CommandHandler("start", start, filters=new_messages))
     application.add_handler(CommandHandler("cancel", cancel, filters=new_messages))
     application.add_handler(

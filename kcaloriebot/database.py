@@ -1065,6 +1065,31 @@ class Database:
             entry_id = int(cursor.lastrowid)
         return FoodEntry(entry_id, user_id, eaten_at_utc, clean_name, totals)
 
+    def log_favorite(
+        self, user_id: int, favorite_id: int, amount: float, eaten_at_utc: int
+    ) -> FoodEntry:
+        """Log an owned favorite without modifying an active chat workflow."""
+        favorite = self.get_favorite(user_id, favorite_id)
+        if favorite is None:
+            raise NotFound("Favorite not found")
+        values = (
+            favorite.calories_per_100g,
+            amount,
+            favorite.protein_per_100g,
+            favorite.fat_per_100g,
+            favorite.carbs_per_100g,
+        )
+        totals = (
+            scale_per_serving(*values, serving_grams=favorite.serving_grams)
+            if favorite.unit == UNIT_SERVING
+            else scale_per_100(*values)
+        )
+        with self._connect() as connection:
+            entry_id = self._insert_entry(
+                connection, user_id, eaten_at_utc, favorite.name, totals
+            )
+        return FoodEntry(entry_id, user_id, eaten_at_utc, favorite.name, totals)
+
     def add_favorite_from_entry(
         self, user_id: int, entry_id: int, now_utc: Optional[int] = None
     ) -> tuple[FavoriteFood, bool]:

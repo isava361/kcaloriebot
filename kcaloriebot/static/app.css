@@ -1,0 +1,361 @@
+:root{
+  font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  color:var(--tg-theme-text-color,#202b25);
+  background:var(--tg-theme-secondary-bg-color,#f3f5f0);
+  --card:var(--tg-theme-bg-color,#fff);
+  --muted:var(--tg-theme-hint-color,#6b786e);
+  --accent:var(--tg-theme-button-color,#326a49);
+  --button-text:var(--tg-theme-button-text-color,#fff);
+  --border:color-mix(in srgb,currentColor 12%,transparent);
+  color-scheme:light
+}
+*{
+  box-sizing:border-box
+}
+body{
+  margin:0
+}
+main{
+  max-width:540px;
+  margin:auto;
+  padding:calc(28px + var(--tg-content-safe-area-inset-top,0px)) 20px calc(24px + env(safe-area-inset-bottom))
+}
+header,.row,.day-nav,.actions{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px
+}
+header{
+  margin-bottom:25px
+}
+h1{
+  font-size:25px;
+  letter-spacing:-.8px;
+  margin:6px 0
+}
+h2{
+  font-size:18px;
+  margin:0
+}
+.eyebrow{
+  font-size:11px;
+  letter-spacing:1.8px;
+  font-weight:750;
+  color:var(--muted)
+}
+.brand{
+  display:grid;
+  place-items:center;
+  width:48px;
+  height:48px;
+  border-radius:17px;
+  background:var(--accent);
+  color:var(--button-text);
+  font-size:29px;
+  font-weight:750
+}
+.card{
+  background:var(--card);
+  padding:23px;
+  border-radius:25px;
+  border:1px solid var(--border)
+}
+button,input{
+  font:inherit
+}
+button{
+  min-height:44px;
+  border:1px solid var(--border);
+  border-radius:14px;
+  background:var(--card);
+  color:inherit;
+  padding:11px 16px;
+  font-weight:650;
+  cursor:pointer
+}
+button:disabled{
+  opacity:.45;
+  cursor:default
+}
+button:active{
+  transform:translateY(1px)
+}
+button:focus-visible,input:focus-visible{
+  outline:3px solid var(--accent);
+  outline-offset:3px
+}
+.primary{
+  background:var(--accent);
+  color:var(--button-text);
+  border-color:transparent
+}
+.text-button{
+  background:transparent;
+  border:0;
+  padding:8px 0;
+  color:var(--accent);
+  font-size:13px
+}
+.day-nav{
+  margin:18px 0
+}
+.day-nav input{
+  background:transparent;
+  border:0;
+  text-align:center;
+  font-weight:650;
+  padding:7px;
+  min-width:0;
+  width:100%
+}
+.day-nav label{
+  margin:0
+}
+.day-nav button{
+  font-size:20px;
+  min-width:46px
+}
+.energy{
+  display:flex;
+  align-items:baseline;
+  gap:10px;
+  margin:19px 0 15px
+}
+.energy strong{
+  font-size:56px;
+  letter-spacing:-3px;
+  line-height:1
+}
+.energy span,.muted{
+  color:var(--muted)
+}
+progress{
+  display:block;
+  width:100%;
+  height:8px;
+  border:none;
+  border-radius:8px;
+  overflow:hidden;
+  accent-color:var(--accent)
+}
+progress::-webkit-progress-bar{
+  background:var(--border)
+}
+progress::-webkit-progress-value{
+  background:var(--accent);
+  border-radius:8px
+}
+progress::-moz-progress-bar{
+  background:var(--accent)
+}
+.small{
+  font-size:12px;
+  line-height:1.6
+}
+.macros{
+  display:grid;
+  grid-template-columns:repeat(3,1fr);
+  gap:8px;
+  border-top:1px solid var(--border);
+  padding-top:21px;
+  margin-top:24px
+}
+.macros>div{
+  font-size:12px;
+  color:var(--muted)
+}
+.macros strong{
+  display:block;
+  font-size:20px;
+  color:var(--tg-theme-text-color,#202b25);
+  margin-top:8px
+}
+.dot{
+  display:inline-block;
+  width:7px;
+  height:7px;
+  border-radius:50%;
+  margin-right:5px
+}
+.protein{
+  background:#6692d1
+}
+.fat{
+  background:#d4a349
+}
+.carbs{
+  background:#8f78b6
+}
+.actions{
+  margin:20px 0;
+  align-items:stretch
+}
+.actions>button{
+  flex:1
+}
+.section-title{
+  margin:28px 0 15px
+}
+.entry{
+  background:var(--card);
+  border:1px solid var(--border);
+  border-radius:18px;
+  padding:16px;
+  margin:10px 0
+}
+.entry-name{
+  font-weight:650;
+  overflow-wrap:anywhere
+}
+.entry p{
+  margin:6px 0
+}
+.entry .row{
+  align-items:start
+}
+.entry-actions{
+  display:flex;
+  gap:16px;
+  margin-top:5px
+}
+.entry-actions button{
+  font-size:12px
+}
+.empty{
+  text-align:center;
+  padding:32px 15px;
+  border:1px dashed var(--border);
+  border-radius:18px;
+  color:var(--muted);
+  line-height:1.7
+}
+footer{
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  gap:3px;
+  margin-top:22px
+}
+dialog{
+  width:calc(100% - 24px);
+  max-width:490px;
+  max-height:90dvh;
+  overflow:auto;
+  padding:24px;
+  border:1px solid var(--border);
+  border-radius:25px;
+  background:var(--card);
+  color:inherit
+}
+dialog::backdrop{
+  background:#10251888;
+  backdrop-filter:blur(3px)
+}
+.close{
+  border:0;
+  min-width:44px
+}
+.row>.close{
+  font-size:25px
+}
+label{
+  display:block;
+  font-size:13px;
+  font-weight:600;
+  margin:18px 0
+}
+input{
+  display:block;
+  width:100%;
+  margin-top:7px;
+  border:1px solid var(--border);
+  border-radius:12px;
+  background:var(--card);
+  color:inherit;
+  padding:13px;
+  min-height:46px
+}
+.field-pair,.field-triple{
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:12px
+}
+.field-triple{
+  grid-template-columns:repeat(3,minmax(0,1fr))
+}
+.field-triple label{
+  margin-top:0
+}
+.wide{
+  width:100%
+}
+.danger,.form-error{
+  color:#c34540
+}
+.form-error{
+  font-size:13px
+}
+#notice{
+  padding:12px 0;
+  line-height:1.6
+}
+#favorites>button{
+  display:block;
+  text-align:left;
+  width:100%;
+  margin:10px 0
+}
+#favorites>button[aria-pressed=true]{
+  border-color:var(--accent);
+  outline:1px solid var(--accent)
+}
+.sr-only{
+  position:absolute;
+  width:1px;
+  height:1px;
+  padding:0;
+  margin:-1px;
+  overflow:hidden;
+  clip:rect(0,0,0,0);
+  white-space:nowrap;
+  border:0
+}
+[hidden]{
+  display:none!important
+}
+@media(prefers-color-scheme:dark){
+  :root{
+    color-scheme:dark;
+    --card:var(--tg-theme-bg-color,#202822);
+    --muted:var(--tg-theme-hint-color,#a1afa4);
+    color:var(--tg-theme-text-color,#eaf0ea);
+    background:var(--tg-theme-secondary-bg-color,#151b17)
+  }
+  .macros strong{
+    color:var(--tg-theme-text-color,#eaf0ea)
+  }
+}
+@media(max-width:350px){
+  main{
+    padding-left:12px;
+    padding-right:12px
+  }
+  .card{
+    padding:18px
+  }
+  .actions{
+    gap:7px
+  }
+  .actions button{
+    padding:11px 8px
+  }
+}
+.text-button{
+  color:var(--tg-theme-link-color,#326a49)
+}
+@media(prefers-color-scheme:dark){
+  .text-button{
+    color:var(--tg-theme-link-color,#91c9a2)
+  }
+}

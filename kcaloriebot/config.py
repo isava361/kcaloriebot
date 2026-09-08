@@ -5,6 +5,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Optional
+from urllib.parse import urlsplit
 
 
 class ConfigError(ValueError):
@@ -16,6 +17,7 @@ class Settings:
     bot_token: str
     database_path: Path
     log_level: int
+    miniapp_url: Optional[str] = None
 
     def __repr__(self) -> str:
         return (
@@ -42,4 +44,24 @@ def load_settings(environ: Optional[Mapping[str, str]] = None) -> Settings:
     log_level = getattr(logging, level_name, None)
     if not isinstance(log_level, int):
         raise ConfigError(f"Invalid LOG_LEVEL: {level_name}")
-    return Settings(bot_token=token, database_path=database_path, log_level=log_level)
+    miniapp_url = values.get("MINIAPP_URL", "").strip() or None
+    if miniapp_url:
+        try:
+            parsed = urlsplit(miniapp_url)
+            valid = (
+                parsed.scheme == "https"
+                and parsed.hostname
+                and not parsed.username
+                and not parsed.password
+                and not parsed.fragment
+            )
+        except ValueError:
+            valid = False
+        if not valid:
+            raise ConfigError("MINIAPP_URL must be a public HTTPS URL.")
+    return Settings(
+        bot_token=token,
+        database_path=database_path,
+        log_level=log_level,
+        miniapp_url=miniapp_url,
+    )

@@ -53,6 +53,23 @@ class SettingsTests(unittest.TestCase):
         self.assertNotIn(secret, representation)
         self.assertIn("<redacted>", representation)
 
+    def test_miniapp_url_is_optional_and_requires_https(self) -> None:
+        self.assertIsNone(load_settings({"BOT_TOKEN": "test"}).miniapp_url)
+        for url in (
+            "http://example.com",
+            "https://",
+            "https://user:pass@example.com",
+            "https://example.com/#fragment",
+        ):
+            with self.subTest(url=url), self.assertRaises(ConfigError):
+                load_settings({"BOT_TOKEN": "test", "MINIAPP_URL": url})
+        self.assertEqual(
+            load_settings(
+                {"BOT_TOKEN": "test", "MINIAPP_URL": "https://example.com/"}
+            ).miniapp_url,
+            "https://example.com/",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

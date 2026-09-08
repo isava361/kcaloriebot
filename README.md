@@ -7,6 +7,11 @@ and assigns entries to calendar days using each user's IANA timezone.
 The bot uses Telegram long polling. It does not need a public domain, TLS
 certificate, Nginx, or an inbound firewall port.
 
+An optional Telegram Mini App adds a Russian mobile interface for the diary,
+food entry, favorites (including servings), and daily goals. It shares the bot's
+SQLite database. The Mini App needs a public HTTPS address; see
+[Mini App setup](docs/miniapp.md).
+
 ## Requirements
 
 - Ubuntu Server 22.04 LTS or newer

@@ -15,9 +15,14 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["ruff==0.15.21"]
+miniapp = ["aiohttp>=3.12,<4"]
 
 [project.scripts]
 kcaloriebot = "kcaloriebot.__main__:main"
+kcaloriebot-web = "kcaloriebot.web:main"
+
+[tool.setuptools.package-data]
+kcaloriebot = ["static/*"]
 
 [tool.setuptools.packages.find]
 include = ["kcaloriebot*"]
