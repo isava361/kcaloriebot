@@ -171,6 +171,41 @@ sudo journalctl -u kcalculatorbot -n 100 --no-pager
 
 ## Updating the Server
 
+### Using the update script
+
+`scripts/update.sh` performs the whole procedure below and rolls back
+automatically if any step fails. Install it once, outside the repository so
+that updating the checkout cannot replace the script while it is running:
+
+```bash
+sudo install -m 755 /opt/kcaloriebot/app/scripts/update.sh \
+  /usr/local/sbin/kcaloriebot-update
+```
+
+Afterwards each update is one command:
+
+```bash
+sudo kcaloriebot-update
+```
+
+It refuses to run if the checkout has local changes or if the branch has
+diverged from origin, stops the service before taking the backup so a rollback
+cannot lose entries, verifies the backup with `PRAGMA integrity_check`, runs
+the test suite before starting the service, and confirms the service stayed
+running afterwards. If anything fails after the service was stopped, it
+restores the previous commit and the backup and starts the service again, so a
+failed update leaves a working bot. Useful flags:
+
+```bash
+sudo kcaloriebot-update --check        # report pending commits, change nothing
+sudo kcaloriebot-update --no-rollback  # leave a failure in place to inspect
+```
+
+The last ten backups are kept in `/var/backups/kcaloriebot`; older ones are
+pruned. Reinstall the script after an update that changes it.
+
+### Updating by hand
+
 Back up the database before an update, then stop the service, pull only
 fast-forward changes, install any changed dependencies, run the tests, and
 start the service again:

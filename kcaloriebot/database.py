@@ -39,7 +39,7 @@ from .domain import (
 )
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # The favorite_foods and sessions nutrition columns keep their historical
 # *_per_100g names; for unit = 'serving' rows they hold per-serving values.
@@ -256,13 +256,24 @@ class Database:
                         "Back it up and use a new DATABASE_PATH for the Python version."
                     )
                 connection.executescript(SCHEMA)
-                return
+                version = 4
             if version in (1, 2):
                 self._upgrade_v1_v2_to_v3(connection)
                 version = 3
             if version == 3:
                 self._upgrade_v3_to_v4(connection)
                 version = 4
+            if version == 4:
+                connection.executescript("""
+                    BEGIN IMMEDIATE;
+                    ALTER TABLE sessions ADD COLUMN return_day TEXT NULL;
+                    ALTER TABLE sessions ADD COLUMN return_offset INTEGER NOT NULL DEFAULT 0;
+                    ALTER TABLE sessions ADD COLUMN selected_weight_id INTEGER NULL;
+                    ALTER TABLE sessions ADD COLUMN prompt_text TEXT NULL;
+                    PRAGMA user_version = 5;
+                    COMMIT;
+                """)
+                version = 5
             if version != SCHEMA_VERSION:
                 raise RuntimeError(
                     f"Unsupported database schema version {version}; expected {SCHEMA_VERSION}."
@@ -483,8 +494,9 @@ class Database:
                         draft_servings, calories_per_100g, serving_grams,
                         protein_per_100g, fat_per_100g, carbs_per_100g,
                         selected_favorite_id, selected_nutrient, selected_entry_id,
-                        prompt_pending, last_message_id, revision, updated_at_utc
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+                        prompt_pending, last_message_id, revision, updated_at_utc,
+                        return_day, return_offset, selected_weight_id, prompt_text
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
                     ON CONFLICT(user_id, chat_id) DO UPDATE SET
                         state = excluded.state,
                         draft_name = excluded.draft_name,
@@ -501,7 +513,11 @@ class Database:
                         prompt_pending = excluded.prompt_pending,
                         last_message_id = excluded.last_message_id,
                         revision = sessions.revision + 1,
-                        updated_at_utc = excluded.updated_at_utc
+                        updated_at_utc = excluded.updated_at_utc,
+                        return_day = excluded.return_day,
+                        return_offset = excluded.return_offset,
+                        selected_weight_id = excluded.selected_weight_id,
+                        prompt_text = excluded.prompt_text
                     """,
                     columns,
                 )
@@ -549,6 +565,10 @@ class Database:
             updated.selected_entry_id,
             int(updated.prompt_pending),
             updated.last_message_id,
+            updated.return_day,
+            updated.return_offset,
+            updated.selected_weight_id,
+            updated.prompt_text,
             now,
             previous.user_id,
             previous.chat_id,
@@ -564,6 +584,7 @@ class Database:
                     protein_per_100g = ?, fat_per_100g = ?, carbs_per_100g = ?,
                     selected_favorite_id = ?, selected_nutrient = ?,
                     selected_entry_id = ?, prompt_pending = ?, last_message_id = ?,
+                    return_day = ?, return_offset = ?, selected_weight_id = ?, prompt_text = ?,
                     revision = revision + 1, updated_at_utc = ?
                 WHERE user_id = ? AND chat_id = ? AND state = ? AND revision = ?
                 """,
@@ -1237,6 +1258,53 @@ class Database:
             weight_id = int(cursor.lastrowid)
         return WeightRecord(weight_id, user_id, measured_at_utc, weight_kg)
 
+    def get_weight(self, user_id: int, weight_id: int) -> Optional[WeightRecord]:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM weights WHERE user_id = ? AND weight_id = ?",
+                (user_id, weight_id),
+            ).fetchone()
+        return None if row is None else self._row_to_weight(row)
+
+    def delete_weight(self, user_id: int, weight_id: int) -> None:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM weights WHERE user_id = ? AND weight_id = ?",
+                (user_id, weight_id),
+            )
+            if cursor.rowcount != 1:
+                raise NotFound("Weight measurement not found")
+
+    def complete_weight_edit(self, session: Session, weight_kg: float) -> WeightRecord:
+        if (
+            session.state != SessionState.WAIT_WEIGHT_EDIT
+            or session.selected_weight_id is None
+        ):
+            raise StateConflict("Weight editing is no longer active")
+        check_weight_kg(weight_kg)
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            self._assert_session(connection, session)
+            row = connection.execute(
+                "SELECT * FROM weights WHERE user_id = ? AND weight_id = ?",
+                (session.user_id, session.selected_weight_id),
+            ).fetchone()
+            if row is None:
+                raise NotFound("Weight measurement not found")
+            connection.execute(
+                "UPDATE weights SET weight_kg = ? WHERE user_id = ? AND weight_id = ?",
+                (weight_kg, session.user_id, session.selected_weight_id),
+            )
+            self._delete_exact_session(connection, session)
+            connection.commit()
+            return replace(self._row_to_weight(row), weight_kg=weight_kg)
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
     def latest_weight(self, user_id: int) -> Optional[WeightRecord]:
         with self._connect() as connection:
             row = connection.execute(
@@ -1652,6 +1720,10 @@ class Database:
             int(session.prompt_pending),
             session.last_message_id,
             session.updated_at_utc,
+            session.return_day,
+            session.return_offset,
+            session.selected_weight_id,
+            session.prompt_text,
         )
 
     @staticmethod
@@ -1675,6 +1747,10 @@ class Database:
             last_message_id=row["last_message_id"],
             revision=row["revision"],
             updated_at_utc=row["updated_at_utc"],
+            return_day=row["return_day"],
+            return_offset=row["return_offset"],
+            selected_weight_id=row["selected_weight_id"],
+            prompt_text=row["prompt_text"],
         )
 
     @staticmethod

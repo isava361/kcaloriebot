@@ -213,7 +213,7 @@ class BotHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(12.0, entry.nutrition.carbs)
 
         receipt_text, receipt_markup = final_update.effective_message.replies[-1]
-        self.assertIn("Food entry added", receipt_text)
+        self.assertIn("Added Rice", receipt_text)
         callbacks = keyboard_callbacks(receipt_markup)
         self.assertIn(f"entry:view:{entry.entry_id}:0", callbacks)
         self.assertIn(f"entry:fav:{entry.entry_id}", callbacks)
@@ -300,7 +300,7 @@ class BotHandlerTests(unittest.IsolatedAsyncioTestCase):
             15.0,
             self.database.get_favorite(1, favorite.favorite_id).protein_per_100g,
         )
-        self.assertIs(MAIN_KEYBOARD, amended.effective_message.replies[-1][1])
+        self.assertIs(MAIN_KEYBOARD, amended.effective_message.replies[-2][1])
 
     async def test_favorite_prompt_send_failure_remains_resumable(self) -> None:
         self.database.ensure_user(1, 1)
@@ -572,7 +572,7 @@ class BotHandlerTests(unittest.IsolatedAsyncioTestCase):
         undo_callback = next(
             callback
             for callback in keyboard_callbacks(receipt_markup)
-            if callback.startswith("entry:delete-confirm:")
+            if callback.startswith("entry:undo:")
         )
 
         undo_query = FakeQuery(undo_callback, FakeMessage())
@@ -609,7 +609,7 @@ class BotHandlerTests(unittest.IsolatedAsyncioTestCase):
         await handle_text(update, self.context)
 
         response = update.effective_message.replies[-1][0]
-        self.assertIn("Protein: 10.00g", response)
+        self.assertIn("Protein: 10 g", response)
         self.assertIn("partial: 1/2 entries", response)
 
     async def test_expired_delete_confirmation_is_non_destructive(self) -> None:
@@ -654,7 +654,7 @@ class NewFeatureTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(reply[1], InlineKeyboardMarkup)
         callbacks = keyboard_callbacks(reply[1])
         self.assertIn(f"entry:fav:{entries[0].entry_id}", callbacks)
-        self.assertTrue(any(c.startswith("entry:delete-confirm:") for c in callbacks))
+        self.assertTrue(any(c.startswith("entry:undo:") for c in callbacks))
 
     async def test_quick_add_reports_remaining_goal(self) -> None:
         self.database.set_daily_goal(1, 2000.0, 2)
@@ -779,7 +779,7 @@ class NewFeatureTests(unittest.IsolatedAsyncioTestCase):
         text, keyboard = update.effective_message.replies[-1]
         self.assertIn("Last 7 days", text)
         self.assertEqual(7, text.count("kcal"))
-        self.assertIn("Protein: 4.00g", text)
+        self.assertIn("Protein: 4 g", text)
         day_callbacks = [
             callback
             for callback in keyboard_callbacks(keyboard)
@@ -841,7 +841,7 @@ class NewFeatureTests(unittest.IsolatedAsyncioTestCase):
 
         text, keyboard = query.edits[-1]
         self.assertIn("Yesterday's totals", text)
-        self.assertIn("Calories: 200.00", text)
+        self.assertIn("Calories: 200 kcal", text)
         callbacks = keyboard_callbacks(keyboard)
         self.assertIn("entry:list:0", callbacks)
 
@@ -871,9 +871,13 @@ class NewFeatureTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Soup", text)
         self.assertIn("Time:", text)
         callbacks = keyboard_callbacks(keyboard)
-        self.assertIn(f"entry:grams:{entry.entry_id}", callbacks)
-        self.assertIn(f"entry:name:{entry.entry_id}", callbacks)
-        self.assertIn(f"entry:field:{entry.entry_id}:calories", callbacks)
+        self.assertTrue(
+            any(c.startswith(f"entry:grams:{entry.entry_id}|") for c in callbacks)
+        )
+        self.assertIn(f"entry:name:{entry.entry_id}|0|{day.isoformat()}", callbacks)
+        self.assertIn(
+            f"entry:field:{entry.entry_id}:calories|0|{day.isoformat()}", callbacks
+        )
         self.assertIn(f"entry:list:{day.isoformat()}:0", callbacks)
 
     async def test_week_stats_without_entries_report_empty_period(self) -> None:
@@ -925,7 +929,7 @@ class NewFeatureTests(unittest.IsolatedAsyncioTestCase):
         stored = self.database.get_entry(1, entry.entry_id)
         self.assertAlmostEqual(80.0, stored.nutrition.grams)
         self.assertAlmostEqual(200.0, stored.nutrition.calories)
-        self.assertIn("updated", grams_update.effective_message.replies[-1][0])
+        self.assertIn("updated", grams_update.effective_message.replies[-2][0])
 
     async def test_serving_wizard_bypasses_per_100g_macro_limit(self) -> None:
         for text in ("Add Food", "Pizza", "Per Serving", "900", "0.5", "40", "30"):
@@ -1049,7 +1053,7 @@ class NewFeatureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             SessionState.WAIT_ENTRY_AMENDMENT, self.database.get_session(1, 10).state
         )
-        self.assertIn("per 100g", query.message.replies[-1][0])
+        self.assertIn("per 100 g", query.message.replies[-1][0])
 
         await handle_text(make_update("300"), self.context)
 
@@ -1068,7 +1072,7 @@ class NewFeatureTests(unittest.IsolatedAsyncioTestCase):
 
         stored = self.database.get_entry(1, entry.entry_id)
         self.assertEqual("Buckwheat", stored.name)
-        self.assertIn("renamed", rename_update.effective_message.replies[-1][0])
+        self.assertIn("renamed", rename_update.effective_message.replies[-2][0])
 
     async def test_weight_command_logs_and_reports_average(self) -> None:
         update = make_update("/weight 82.5")
@@ -1078,7 +1082,7 @@ class NewFeatureTests(unittest.IsolatedAsyncioTestCase):
         stored = self.database.latest_weight(1)
         self.assertEqual(82.5, stored.weight_kg)
         reply = update.effective_message.replies[-1][0]
-        self.assertIn("Weight recorded", reply)
+        self.assertIn("Recorded 82.5 kg", reply)
         self.assertIn("7-day average: 82.5 kg", reply)
 
     async def test_weight_menu_flow_records_measurement(self) -> None:

@@ -65,6 +65,7 @@ class SessionState(str, Enum):
     WAIT_ENTRY_NAME = "wait_entry_name"
     WAIT_ENTRY_AMENDMENT = "wait_entry_amendment"
     WAIT_WEIGHT = "wait_weight"
+    WAIT_WEIGHT_EDIT = "wait_weight_edit"
 
 
 class Period(str, Enum):
@@ -94,6 +95,10 @@ class Session:
     draft_servings: Optional[float] = None
     revision: int = 0
     updated_at_utc: int = 0
+    return_day: Optional[str] = None
+    return_offset: int = 0
+    selected_weight_id: Optional[int] = None
+    prompt_text: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -655,7 +660,9 @@ def _timezone_index() -> tuple[dict[str, str], dict[str, tuple[str, ...]]]:
 def canonical_timezone(value: str) -> str:
     candidate = value.strip().replace(" ", "_")
     if not candidate or len(candidate) > 128:
-        raise ValidationError("Enter a valid IANA timezone, such as Europe/Moscow.")
+        raise ValidationError(
+            "Choose a timezone below, or type a timezone name such as Europe/Paris."
+        )
 
     full, suffixes = _timezone_index()
     canonical = full.get(candidate.casefold())
@@ -665,11 +672,12 @@ def canonical_timezone(value: str) -> str:
             canonical = matches[0]
         elif len(matches) > 1:
             raise ValidationError(
-                "That city is ambiguous. Enter its full IANA timezone, such as Europe/London."
+                "More than one timezone uses that city name. Type the region and city, such as Europe/London."
             )
     if canonical is None:
         raise ValidationError(
-            "Unknown timezone. Try an IANA name such as Europe/Moscow."
+            "Timezone not recognized. Choose a button below, or type a timezone name such as Europe/Paris. "
+            "Only cities used in timezone names are recognized; try a nearby major city in the same timezone."
         )
     try:
         return ZoneInfo(canonical).key

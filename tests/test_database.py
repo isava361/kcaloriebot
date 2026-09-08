@@ -8,7 +8,7 @@ from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
-from kcaloriebot.database import Database
+from kcaloriebot.database import Database, SCHEMA_VERSION
 from kcaloriebot.domain import NotFound, SessionState, StateConflict, ValidationError
 
 
@@ -761,7 +761,7 @@ class SchemaTests(DatabaseTestCase):
         with sqlite3.connect(version_two_path) as connection:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
 
-        self.assertEqual(4, version)
+        self.assertEqual(SCHEMA_VERSION, version)
         self.assertEqual("wait_grams", migrated.get_session(1, 10).state.value)
         migrated.set_daily_goal(1, 2000.0, 2)
         self.assertEqual(2000.0, migrated.get_daily_goal(1))
@@ -790,7 +790,7 @@ class SchemaTests(DatabaseTestCase):
                 row[1] for row in connection.execute("PRAGMA table_info(users)")
             }
 
-        self.assertEqual(4, version)
+        self.assertEqual(SCHEMA_VERSION, version)
         self.assertIn("prompt_pending", session_columns)
         self.assertIn("last_message_id", session_columns)
         self.assertIn("selected_entry_id", session_columns)
@@ -841,7 +841,7 @@ class SchemaTests(DatabaseTestCase):
                 )
             }
 
-        self.assertEqual(4, version)
+        self.assertEqual(SCHEMA_VERSION, version)
         self.assertIn("weights", table_names)
         entry = migrated.get_entry(1, 7)
         self.assertEqual("Rice", entry.name)

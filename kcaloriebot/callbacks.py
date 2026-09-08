@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from typing import Optional
 
@@ -30,6 +30,39 @@ class CallbackAction:
 
 
 def parse_callback(data: str) -> Optional[CallbackAction]:
+    # Carry the source list through edits and confirmations, including old messages.
+    if "|" in data:
+        parts = data.split("|")
+        if len(parts) != 3:
+            return None
+        action = parse_callback(parts[0])
+        if action is None or action.kind not in {
+            "entry_view",
+            "entry_grams",
+            "entry_time",
+            "entry_name",
+            "entry_field",
+            "entry_delete",
+            "entry_delete_confirm",
+            "entry_undo",
+            "favorite_view",
+            "favorite_edit",
+            "favorite_field",
+            "favorite_to_serving",
+            "favorite_delete",
+            "favorite_delete_confirm",
+        }:
+            return None
+        try:
+            return replace(
+                action,
+                offset=_parse_offset(parts[1]),
+                day=_parse_day(parts[2]) if parts[2] else None,
+            )
+        except ValueError:
+            return None
+    if data in {"menu:add", "menu:search", "menu:progress", "menu:settings"}:
+        return CallbackAction(data.replace(":", "_"))
     if data in {"cancel", "cancel_all"}:
         return CallbackAction("cancel")
     if data == "dismiss":
@@ -37,6 +70,18 @@ def parse_callback(data: str) -> Optional[CallbackAction]:
 
     parts = data.split(":")
     try:
+        if (
+            len(parts) == 3
+            and parts[0] == "weight"
+            and parts[1] in {"edit", "undo", "view"}
+        ):
+            return CallbackAction(f"weight_{parts[1]}", record_id=_parse_id(parts[2]))
+        if len(parts) == 4 and parts[:2] == ["entry", "undo"]:
+            return CallbackAction(
+                "entry_undo",
+                record_id=_parse_id(parts[2]),
+                issued_at=_parse_timestamp(parts[3]),
+            )
         if len(parts) == 3 and parts[:2] == ["entry", "list"]:
             return CallbackAction("entry_list", offset=_parse_offset(parts[2]))
         if len(parts) == 4 and parts[:2] == ["entry", "list"]:
@@ -89,7 +134,11 @@ def parse_callback(data: str) -> Optional[CallbackAction]:
                 offset=_parse_offset(parts[3]),
                 day=_parse_day(parts[4]) if len(parts) == 5 else None,
             )
-        if len(parts) == 4 and parts[:2] == ["entry", "delete-confirm"]:
+        if (
+            len(parts) == 4
+            and parts[0] == "entry"
+            and parts[1] in {"delete-confirm", "dc"}
+        ):
             return CallbackAction(
                 "entry_delete_confirm",
                 record_id=_parse_id(parts[2]),

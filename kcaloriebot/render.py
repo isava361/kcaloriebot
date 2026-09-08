@@ -26,6 +26,7 @@ from .domain import (
     SessionState,
     Stats,
     local_datetime,
+    per_unit_from_totals,
 )
 
 
@@ -33,18 +34,9 @@ Markup = Union[ReplyKeyboardMarkup, ReplyKeyboardRemove]
 
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [
-        [KeyboardButton("Add Food"), KeyboardButton("Food Today")],
-        [
-            KeyboardButton("Recent Foods"),
-            KeyboardButton("Search Favorites"),
-            KeyboardButton("My Favorites"),
-        ],
-        [
-            KeyboardButton("Statistics"),
-            KeyboardButton("Daily Goal"),
-            KeyboardButton("Weight"),
-        ],
-        [KeyboardButton("Update Timezone")],
+        [KeyboardButton("Add food"), KeyboardButton("Diary")],
+        [KeyboardButton("Recent foods"), KeyboardButton("Favorites")],
+        [KeyboardButton("Progress"), KeyboardButton("Settings")],
     ],
     resize_keyboard=True,
 )
@@ -52,7 +44,15 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
 STATS_KEYBOARD = ReplyKeyboardMarkup(
     [
         [KeyboardButton("Week Stats"), KeyboardButton("Month Stats")],
-        [KeyboardButton("Back")],
+        [KeyboardButton("Weight"), KeyboardButton("Main menu")],
+    ],
+    resize_keyboard=True,
+)
+
+SETTINGS_KEYBOARD = ReplyKeyboardMarkup(
+    [
+        [KeyboardButton("Daily goal"), KeyboardButton("Timezone")],
+        [KeyboardButton("Main menu")],
     ],
     resize_keyboard=True,
 )
@@ -106,18 +106,29 @@ FAVORITE_SERVINGS_MANUAL_KEYBOARD = ReplyKeyboardMarkup(
     resize_keyboard=True,
 )
 
-TIMEZONE_REQUIRED_MARKUP = ReplyKeyboardRemove()
+TIMEZONE_CHOICES = [
+    [KeyboardButton("Europe/Moscow"), KeyboardButton("Europe/London")],
+    [KeyboardButton("America/New_York"), KeyboardButton("Asia/Dubai")],
+]
+TIMEZONE_REQUIRED_MARKUP = ReplyKeyboardMarkup(TIMEZONE_CHOICES, resize_keyboard=True)
+TIMEZONE_CHANGE_KEYBOARD = ReplyKeyboardMarkup(
+    TIMEZONE_CHOICES + [[KeyboardButton("Cancel")]],
+    resize_keyboard=True,
+)
 
 
 TIMEZONE_ONBOARDING_PROMPT = (
-    "Enter your IANA timezone or city, for example Europe/Moscow or New York:"
+    "Track meals and see your daily totals. First, choose your timezone so meals "
+    "appear on the right day.\n\nTap a timezone below, or type your region/city "
+    "in this format: Europe/Paris."
 )
 TIMEZONE_SETUP_REQUIRED_PROMPT = (
-    "Timezone setup is required. Enter an IANA timezone such as Europe/Moscow."
+    "Choose your timezone so meals appear on the right day. Tap a choice below, "
+    "or type a timezone name such as Europe/Paris:"
 )
 TIMEZONE_CHANGE_PROMPT = (
-    "Enter your new IANA timezone or city. Changing it also changes how existing "
-    "entries near midnight are grouped into calendar days:"
+    "Choose your new timezone below, or type a timezone name such as Europe/Paris. "
+    "Meals near midnight may move to the previous or next day in your diary:"
 )
 FOOD_NAME_PROMPT = "Enter the food name, or choose Skip:"
 CALORIES_PROMPT = "Enter calories per 100g:"
@@ -163,11 +174,13 @@ QUICK_ADD_USAGE = (
 
 def session_prompt(session: Session, has_timezone: bool) -> tuple[str, Markup]:
     """Return the prompt and keyboard that re-ask the session's current step."""
+    if session.prompt_text is not None:
+        return session.prompt_text, CANCEL_KEYBOARD
     serving_mode = session.draft_unit == UNIT_SERVING
     prompts: dict[SessionState, tuple[str, Markup]] = {
         SessionState.WAIT_TIMEZONE: (
             TIMEZONE_CHANGE_PROMPT if has_timezone else TIMEZONE_ONBOARDING_PROMPT,
-            CANCEL_KEYBOARD if has_timezone else TIMEZONE_REQUIRED_MARKUP,
+            TIMEZONE_CHANGE_KEYBOARD if has_timezone else TIMEZONE_REQUIRED_MARKUP,
         ),
         SessionState.WAIT_FOOD_NAME: (FOOD_NAME_PROMPT, SKIP_KEYBOARD),
         SessionState.WAIT_CALORIES: (
@@ -234,6 +247,10 @@ def session_prompt(session: Session, has_timezone: bool) -> tuple[str, Markup]:
             CANCEL_KEYBOARD,
         ),
         SessionState.WAIT_WEIGHT: (WEIGHT_PROMPT, CANCEL_KEYBOARD),
+        SessionState.WAIT_WEIGHT_EDIT: (
+            "Enter the corrected weight in kg:",
+            CANCEL_KEYBOARD,
+        ),
     }
     return prompts[session.state]
 
@@ -261,8 +278,23 @@ def short(value: str, limit: int = 42) -> str:
     return value if len(value) <= limit else value[: limit - 3] + "..."
 
 
+def number(value: float) -> str:
+    return f"{value:.2f}".rstrip("0").rstrip(".")
+
+
 def optional_grams(value: Optional[float]) -> str:
-    return "not set" if value is None else f"{value:.2f}g"
+    return "not recorded" if value is None else f"{number(value)} g"
+
+
+def macro_text(
+    protein: Optional[float], fat: Optional[float], carbs: Optional[float]
+) -> str:
+    if protein is None and fat is None and carbs is None:
+        return "Macros not recorded"
+    return " · ".join(
+        f"{label}: {optional_grams(value)}"
+        for label, value in (("Protein", protein), ("Fat", fat), ("Carbs", carbs))
+    )
 
 
 def stat_macro_line(
@@ -279,7 +311,7 @@ def stat_macro_line(
 
 
 def stats_totals_text(title: str, stats: Stats, goal: Optional[float] = None) -> str:
-    calories_line = f"Calories: {stats.calories:.2f}"
+    calories_line = f"Calories: {stats.calories:.0f} kcal"
     if goal is not None:
         remaining = goal - stats.calories
         calories_line += (
@@ -287,6 +319,8 @@ def stats_totals_text(title: str, stats: Stats, goal: Optional[float] = None) ->
             if remaining >= 0
             else f" / {goal:.0f} goal ({-remaining:.0f} over)"
         )
+    if stats.protein is None and stats.fat is None and stats.carbs is None:
+        return f"{title}:\n{calories_line}\nMacros not recorded"
     return (
         f"{title}:\n"
         f"{calories_line}\n"
@@ -338,7 +372,9 @@ def day_stats_block(stats: DayStats) -> str:
             ("Carbs", stats.carbs, stats.carbs_coverage),
         )
     )
-    return f"{stats.day.isoformat()} — {stats.calories:.2f} kcal\n{macros}"
+    if stats.protein is None and stats.fat is None and stats.carbs is None:
+        macros = "Macros not recorded"
+    return f"{stats.day.isoformat()} — {stats.calories:.0f} kcal\n{macros}"
 
 
 def amount_text(nutrition: NutritionTotals) -> str:
@@ -347,26 +383,23 @@ def amount_text(nutrition: NutritionTotals) -> str:
         label = "serving" if nutrition.servings == 1 else "servings"
         rendered = f"{nutrition.servings:g} {label}"
         if nutrition.grams is not None:
-            rendered += f" ({nutrition.grams:.0f}g)"
+            rendered += f" ({number(nutrition.grams)} g)"
         return rendered
     assert nutrition.grams is not None
-    return f"{nutrition.grams:.2f}g"
+    return f"{number(nutrition.grams)} g"
 
 
 def entry_button_text(entry: FoodEntry, timezone_name: Optional[str] = None) -> str:
-    name = short(entry.name or "Unnamed food", 30)
+    name = short(entry.name or "Unnamed food", 22)
     prefix = ""
     if timezone_name is not None:
         prefix = f"{local_datetime(entry.eaten_at_utc, timezone_name):%H:%M} "
-    return (
-        f"{prefix}{name} - {entry.nutrition.calories:.2f} kcal, "
-        f"{amount_text(entry.nutrition)}"
-    )
+    return f"{prefix}{name} · {entry.nutrition.calories:.0f} kcal"
 
 
 def favorite_button_text(favorite: FavoriteFood) -> str:
     unit = "serving" if favorite.unit == UNIT_SERVING else "100g"
-    return f"{short(favorite.name, 30)} - {favorite.calories_per_100g:.2f} kcal/{unit}"
+    return f"{short(favorite.name, 22)} · {favorite.calories_per_100g:.0f} kcal/{unit}"
 
 
 def entry_details(entry: FoodEntry, timezone_name: Optional[str] = None) -> str:
@@ -375,13 +408,10 @@ def entry_details(entry: FoodEntry, timezone_name: Optional[str] = None) -> str:
         eaten_at = local_datetime(entry.eaten_at_utc, timezone_name)
         time_line = f"Time: {eaten_at:%Y-%m-%d %H:%M}\n"
     return (
-        f"{entry.name or 'Unnamed food'}\n"
+        f"{entry.name or 'Unnamed food'} · {amount_text(entry.nutrition)}\n"
         f"{time_line}"
-        f"Calories: {entry.nutrition.calories:.2f}\n"
-        f"Serving: {amount_text(entry.nutrition)}\n"
-        f"Protein: {optional_grams(entry.nutrition.protein)}\n"
-        f"Fat: {optional_grams(entry.nutrition.fat)}\n"
-        f"Carbs: {optional_grams(entry.nutrition.carbs)}"
+        f"{entry.nutrition.calories:.0f} kcal\n"
+        f"{macro_text(entry.nutrition.protein, entry.nutrition.fat, entry.nutrition.carbs)}"
     )
 
 
@@ -389,16 +419,94 @@ def favorite_details(favorite: FavoriteFood) -> str:
     if favorite.unit == UNIT_SERVING:
         header = f"{favorite.name} per serving"
         if favorite.serving_grams is not None:
-            header += f" ({favorite.serving_grams:.0f}g)"
+            header += f" ({number(favorite.serving_grams)} g)"
     else:
         header = f"{favorite.name} per 100g"
     return (
         f"{header}\n"
-        f"Calories: {favorite.calories_per_100g:.2f}\n"
-        f"Protein: {optional_grams(favorite.protein_per_100g)}\n"
-        f"Fat: {optional_grams(favorite.fat_per_100g)}\n"
-        f"Carbs: {optional_grams(favorite.carbs_per_100g)}"
+        f"{favorite.calories_per_100g:.0f} kcal\n"
+        f"{macro_text(favorite.protein_per_100g, favorite.fat_per_100g, favorite.carbs_per_100g)}"
     )
+
+
+def nutrient_edit_prompt(item: Union[FoodEntry, FavoriteFood], nutrient: str) -> str:
+    """Explain the editable label value separately from the amount consumed."""
+    suffix = "kcal" if nutrient == "calories" else "g"
+    if isinstance(item, FoodEntry):
+        unit, *values = per_unit_from_totals(item.nutrition)
+        value = dict(zip(("calories", "protein", "fat", "carbs"), values))[nutrient]
+        total = getattr(item.nutrition, nutrient)
+        header = f"{item.name or 'Unnamed food'} · {amount_text(item.nutrition)}"
+        logged = "not recorded" if total is None else f"{number(total)} {suffix} logged"
+    else:
+        unit = item.unit
+        value = getattr(item, f"{nutrient}_per_100g")
+        header, logged = item.name, ""
+    basis = "per serving" if unit == UNIT_SERVING else "per 100 g"
+    current = "not recorded" if value is None else f"{number(value)} {suffix} {basis}"
+    explanation = f"Current {nutrient}: {current}"
+    if logged:
+        explanation += f" → {logged}"
+    return f"{header}\n{explanation}\n\nEnter the new {nutrient} in {suffix} {basis}:"
+
+
+def contextual(data: str, offset: int = 0, day: Optional[str] = None) -> str:
+    return f"{data}|{offset}|{day or ''}" if offset or day else data
+
+
+def entry_action_rows(
+    entry: FoodEntry, offset: int, day: Optional[str]
+) -> list[list[InlineKeyboardButton]]:
+    def button(label: str, action: str) -> InlineKeyboardButton:
+        return InlineKeyboardButton(
+            label, callback_data=contextual(action, offset, day)
+        )
+
+    prefix = f"entry:field:{entry.entry_id}"
+    back = f"entry:list:{day}:{offset}" if day else f"entry:list:{offset}"
+    return [
+        [
+            button("Edit amount", f"entry:grams:{entry.entry_id}"),
+            button("Edit time", f"entry:time:{entry.entry_id}"),
+            button("Edit name", f"entry:name:{entry.entry_id}"),
+        ],
+        [
+            button("Edit calories", f"{prefix}:calories"),
+            button("Edit protein", f"{prefix}:protein"),
+        ],
+        [button("Edit fat", f"{prefix}:fat"), button("Edit carbs", f"{prefix}:carbs")],
+        [
+            button("Delete", f"entry:delete:{entry.entry_id}"),
+            InlineKeyboardButton("Back to diary", callback_data=back),
+        ],
+    ]
+
+
+def favorite_action_rows(
+    favorite: FavoriteFood, offset: int
+) -> list[list[InlineKeyboardButton]]:
+    def button(label: str, action: str) -> InlineKeyboardButton:
+        return InlineKeyboardButton(label, callback_data=contextual(action, offset))
+
+    rows = [
+        [
+            InlineKeyboardButton(
+                "Log food", callback_data=f"fav:use:{favorite.favorite_id}"
+            ),
+            button("Edit nutrition", f"fav:edit:{favorite.favorite_id}"),
+        ],
+        [
+            button("Delete", f"fav:delete:{favorite.favorite_id}"),
+            InlineKeyboardButton(
+                "Back to favorites", callback_data=f"fav:list:{offset}"
+            ),
+        ],
+    ]
+    if favorite.unit != UNIT_SERVING:
+        rows.insert(
+            1, [button("Set serving size", f"fav:serving:{favorite.favorite_id}")]
+        )
+    return rows
 
 
 def day_navigation_row(
