@@ -25,15 +25,17 @@ const {chromium} = require(process.env.PLAYWRIGHT_MODULE_PATH || path.resolve('d
     await page.locator('#previous').click();
     await page.waitForFunction(() => !document.getElementById('next').disabled);
     const day = await page.locator('#day').inputValue();
-    await page.locator('#quick-button').click();
-    assert.equal(await page.locator('#quick-form [name=eaten_at]').inputValue(), day+'T12:00');
-    await page.locator('[name=quick_add]').fill('овсянка 370 60 б12 ж6 у62');
+    await page.locator('#add-button').click();
+    assert.equal(await page.locator('#food-form [name=eaten_at]').inputValue(), day+'T12:00');
+    await page.locator('#food-form [name=name]').fill('овсянка');
+    await page.locator('#food-form [name=calories]').fill('370');
+    await page.locator('#food-form [name=grams]').fill('60');
     await page.evaluate(() => Telegram.WebApp.BackButton.click());
-    await page.locator('#quick-dialog').waitFor({state:'hidden'});
+    await page.locator('#food-dialog').waitFor({state:'hidden'});
     await page.reload();
     await page.locator('#drafts').waitFor({state:'visible'});
     await page.locator('#drafts').getByRole('button', {name:'Продолжить'}).click();
-    assert.equal(await page.locator('#quick-form [name=eaten_at]').inputValue(), day+'T12:00');
+    assert.equal(await page.locator('#food-form [name=eaten_at]').inputValue(), day+'T12:00');
     // Commit the first request, then lose its response. Retrying must replay it.
     let lost = false;
     await page.route('**/api/entries', async route => {
@@ -41,11 +43,13 @@ const {chromium} = require(process.env.PLAYWRIGHT_MODULE_PATH || path.resolve('d
       else await route.continue();
     });
     await page.evaluate(() => Telegram.WebApp.MainButton.click());
-    await page.locator('#quick-dialog').waitFor({state:'hidden'});
+    await page.locator('#food-dialog').waitFor({state:'hidden'});
     await page.waitForFunction(() => document.getElementById('calories').textContent === '222');
     assert.equal(await page.locator('#entries .entry').count(), 1);
+    assert.equal(await page.locator('#entries .meal-head').count(), 1);
+    assert.equal(await page.locator('#week .week-day').count(), 7);
     assert.equal(await page.locator('#day').inputValue(), day);
-    await page.getByRole('button', {name:'Редактировать',exact:true}).click();
+    await page.getByRole('button', {name:'Редактировать: овсянка',exact:true}).click();
     await page.locator('#food-form [name=grams]').fill('100');
     await page.locator('#food-save').click();
     await page.waitForFunction(() => document.getElementById('calories').textContent === '370');
@@ -68,8 +72,10 @@ const {chromium} = require(process.env.PLAYWRIGHT_MODULE_PATH || path.resolve('d
     await page.locator('#favorites-dialog .close').click();
     await page.locator('#add-button').click();
     await page.setViewportSize({width:320,height:360});
+    await page.waitForFunction(() => getComputedStyle(document.documentElement).getPropertyValue('--visible-height').trim() === '360px');
+    await page.locator('#food-dialog').evaluate(el => Promise.all(el.getAnimations().map(animation => animation.finished)));
     const box=await page.locator('#food-dialog').boundingBox();
-    assert.ok(box.height<=336 && box.y>=0);
+    assert.ok(box.y >= 0 && box.y + box.height <= 361, JSON.stringify(box));
     assert.ok(await page.locator('#food-dialog').evaluate(el=>el.scrollWidth<=el.clientWidth));
     await page.locator('#food-dialog .close').click();
     await page.setViewportSize({width:320,height:740});

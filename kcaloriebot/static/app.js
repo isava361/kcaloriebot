@@ -2,11 +2,13 @@
 const tg = window.Telegram?.WebApp;
 const $ = (id) => document.getElementById(id);
 const fmt = (value) => new Intl.NumberFormat("ru-RU", {maximumFractionDigits: 1}).format(value);
+const whole = (value) => new Intl.NumberFormat("ru-RU", {maximumFractionDigits: 0}).format(value);
 let state, selectedFavorite, editingEntry, favoriteOffset = 0;
 let diaryGeneration = 0, desiredDay = "", receivedAt = 0, storageUser = null;
 let drafts = {}, baselines = new WeakMap(), toastTimer;
 let foodTemplate = null, favoriteGeneration = 0, searchTimer;
 let statsGeneration = 0, weightOffset = 0, editingWeight = null;
+let mealHead = null, weekGeneration = 0;
 let pending = {};
 function readStorage(key) { try { const value = JSON.parse(localStorage.getItem(key) || "{}"); return value && typeof value === "object" && !Array.isArray(value) ? value : {}; } catch { return {}; } }
 function saveStorage(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* storage unavailable */ } }
@@ -15,6 +17,8 @@ function setStorageUser(id) {
   storageUser = id;
   pending = readStorage(`kcalorie-pending-${id}`);
   drafts = readStorage(`kcalorie-drafts-${id}`);
+  const stale = Object.keys(drafts).filter((form) => !draftNames[form]);
+  if (stale.length) { stale.forEach((form) => delete drafts[form]); saveStorage(`kcalorie-drafts-${id}`, drafts); }
   renderDrafts();
 }
 function persistPending() {
@@ -78,15 +82,42 @@ function action(text, handler, className = "text-button") {
   });
   return button;
 }
+const MEALS = [
+  {id: "breakfast", name: "Завтрак", from: 5, to: 11},
+  {id: "lunch", name: "Обед", from: 11, to: 16},
+  {id: "afternoon", name: "Полдник", from: 16, to: 18},
+  {id: "dinner", name: "Ужин", from: 18, to: 23},
+  {id: "night", name: "Ночной перекус", from: 23, to: 5},
+];
+function mealOf(epoch) {
+  const hour = Number(new Intl.DateTimeFormat("ru-RU", {hour: "2-digit", hourCycle: "h23", timeZone: state.timezone}).format(new Date(epoch * 1000)));
+  return MEALS.find(meal => meal.from < meal.to ? hour >= meal.from && hour < meal.to : hour >= meal.from || hour < meal.to);
+}
+function appendEntry(entry) {
+  const meal = mealOf(entry.eaten_at_utc);
+  if (mealHead?.dataset.meal !== meal.id) {
+    mealHead = node("div", "", "meal-head");
+    mealHead.dataset.meal = meal.id;
+    mealHead.dataset.total = "0";
+    mealHead.append(node("span", meal.name), node("span", "", "meal-total"));
+    $("entries").append(mealHead);
+  }
+  mealHead.dataset.total = Number(mealHead.dataset.total) + entry.nutrition.calories;
+  mealHead.lastElementChild.textContent = `${fmt(Number(mealHead.dataset.total))} ккал`;
+  $("entries").append(renderEntry(entry));
+}
 function renderEntry(entry) {
   const card = node("article", "", "entry");
-  const row = node("div", "", "row");
-  row.append(node("span", entry.name || "Без названия", "entry-name"), node("strong", `${fmt(entry.nutrition.calories)} ккал`));
+  const name = entry.name || "Без названия";
   const time = new Intl.DateTimeFormat("ru-RU", {hour: "2-digit", minute: "2-digit", timeZone: state.timezone}).format(new Date(entry.eaten_at_utc * 1000));
   const amount = entry.nutrition.servings == null ? `${fmt(entry.nutrition.grams)} г` : `${fmt(entry.nutrition.servings)} порц.`;
-  card.append(row, node("p", `${time} · ${amount}`, "muted small"));
+  const main = action("", async () => openFood(await api(`entries/${entry.entry_id}`)), "entry-main");
+  main.setAttribute("aria-label", `Редактировать: ${name}`);
+  main.append(node("span", name, "entry-name"), node("span", `${fmt(entry.nutrition.calories)} ккал`, "entry-kcal"));
+  const foot = node("div", "", "entry-foot");
+  foot.append(node("span", `${time} · ${amount}`, "entry-meta"));
+  card.append(main, foot);
   const controls = node("div", "", "entry-actions");
-  controls.append(action("Редактировать", async () => openFood(await api(`entries/${entry.entry_id}`))));
   if (entry.name) controls.append(action("♡ В избранное", async () => { await api(`entries/${entry.entry_id}/favorite`, "POST", {}); notice("Сохранено в избранное."); }));
   controls.append(action("Удалить", async () => {
     await api(`entries/${entry.entry_id}`, "DELETE", {version: entry.version});
@@ -100,8 +131,71 @@ function renderEntry(entry) {
     setTimeout(() => toast.remove(), 900000);
     await loadDiary(state.day);
   }));
-  card.append(controls);
+  foot.append(controls);
   return card;
+}
+function capitalize(text) { return text.charAt(0).toUpperCase() + text.slice(1); }
+function renderDayLabel() {
+  const date = new Date(`${state.day}T12:00:00Z`);
+  const previous = new Date(`${state.today}T12:00:00Z`);
+  previous.setUTCDate(previous.getUTCDate() - 1);
+  const relative = state.day === state.today ? "Сегодня"
+    : state.day === previous.toISOString().slice(0, 10) ? "Вчера"
+    : new Intl.DateTimeFormat("ru-RU", {weekday: "long", timeZone: "UTC"}).format(date);
+  const full = new Intl.DateTimeFormat("ru-RU", {day: "numeric", month: "long", timeZone: "UTC"}).format(date);
+  $("day-label").textContent = `${capitalize(relative)}, ${full}`;
+}
+/* Meal segments need every entry of the day, so they are drawn on a single complete page only. */
+function mealTotals() {
+  if (state.entries.has_next || state.entries.offset) return null;
+  const sums = MEALS.map(() => 0);
+  for (const entry of state.entries.items) sums[MEALS.indexOf(mealOf(entry.eaten_at_utc))] += entry.nutrition.calories;
+  return sums.map((value, index) => [index, value]).filter(([, value]) => value > 0);
+}
+function renderTrack(consumed, over) {
+  const scale = state.goal ? Math.max(state.goal, consumed) : consumed;
+  $("track").classList.toggle("no-goal", !state.goal);
+  $("track").setAttribute("aria-valuenow", String(state.goal ? Math.round(Math.min(100, consumed / state.goal * 100)) : 0));
+  $("fill").style.width = scale > 0 ? `${Math.min(100, consumed / scale * 100)}%` : "0";
+  $("over-mark").hidden = !over;
+  if (over) $("over-mark").style.left = `${state.goal / scale * 100}%`;
+  const parts = consumed > 0 ? mealTotals() : [];
+  $("fill").replaceChildren(...(parts || [[0, consumed]]).map(([index, value]) => {
+    const segment = node("i", "", index ? `s${index}` : "");
+    segment.style.width = `${parts ? value / consumed * 100 : 100}%`;
+    return segment;
+  }));
+}
+/* Shares of the energy the macros account for; hidden unless all three are known. */
+function renderMacroSplit(partial) {
+  const energy = {protein: 4, fat: 9, carbs: 4};
+  const values = Object.entries(energy).map(([key, factor]) => state.stats[key] * factor);
+  const total = values.reduce((sum, value) => sum + value, 0);
+  $("macro-split").hidden = partial || values.some(value => !Number.isFinite(value)) || !(total > 0);
+  if ($("macro-split").hidden) return;
+  [...$("macro-split").children].forEach((bar, index) => { bar.style.width = `${values[index] / total * 100}%`; });
+}
+async function loadWeek() {
+  const generation = ++weekGeneration;
+  const day = state.day;
+  try {
+    const result = await api(`statistics?${new URLSearchParams({day, period: "week"})}`);
+    if (generation !== weekGeneration) return;
+    const base = state.goal || Math.max(1, ...result.days.map(item => item.calories || 0));
+    $("week").replaceChildren(...result.days.map((item) => {
+      const date = new Date(`${item.day}T12:00:00Z`);
+      const button = action("", () => loadDiary(item.day), "week-day");
+      button.setAttribute("aria-label", `${prettyDay(item.day)}: ${item.calories == null ? "нет записей" : `${fmt(item.calories)} ккал`}`);
+      if (item.day === day) button.setAttribute("aria-current", "date");
+      const bar = node("span", "", "week-bar");
+      const value = node("i", "", state.goal && item.calories > state.goal ? "over" : "");
+      value.style.height = item.calories ? `${Math.max(8, Math.min(100, item.calories / base * 100))}%` : "0";
+      bar.append(value);
+      button.append(node("span", new Intl.DateTimeFormat("ru-RU", {weekday: "short", timeZone: "UTC"}).format(date)), bar, node("span", String(date.getUTCDate())));
+      return button;
+    }));
+    $("week").hidden = false;
+  } catch { /* the strip is an aid, not a requirement */ }
 }
 async function loadDiary(day = "", append = false) {
   const generation = ++diaryGeneration;
@@ -126,24 +220,30 @@ async function loadDiary(day = "", append = false) {
     $("day").max = state.today;
     $("day").min = state.earliest_day;
     $("zone").textContent = state.timezone;
-    $("calories").textContent = fmt(state.stats.calories);
-    $("progress").classList.toggle("over-goal", Boolean(state.goal && state.stats.calories > state.goal));
-    $("progress").value = state.goal ? Math.min(100, state.stats.calories / state.goal * 100) : 0;
-    const left = state.goal - state.stats.calories;
-    $("budget").textContent = state.goal ? (left >= 0 ? `Осталось ${fmt(left)} из ${fmt(state.goal)} ккал` : `Выше цели на ${fmt(-left)} ккал`) : "Задайте дневную цель для отслеживания прогресса";
+    renderDayLabel();
+    const consumed = state.stats.calories;
+    const over = Boolean(state.goal && consumed > state.goal);
+    $("summary").classList.toggle("over", over);
+    $("energy-label").textContent = state.goal ? (over ? "ПРЕВЫШЕНИЕ ЦЕЛИ" : "ОСТАЛОСЬ") : "ЭНЕРГИЯ ЗА ДЕНЬ";
+    $("calories").textContent = whole(state.goal ? Math.abs(state.goal - consumed) : consumed);
+    $("budget").textContent = state.goal ? `Съедено ${fmt(consumed)} из ${fmt(state.goal)} ккал` : "Задайте дневную цель, чтобы видеть остаток";
+    renderTrack(consumed, over);
     let partial = false;
     for (const key of ["protein", "fat", "carbs"]) {
       const value = state.stats[key];
       const incomplete = value !== null && state.stats[`${key}_coverage`] < state.stats.entry_count;
       partial ||= incomplete;
       $(key).textContent = value === null ? "—" : `${incomplete ? "≈ " : ""}${fmt(value)} г`;
+      $(key).classList.toggle("unknown", value === null);
     }
     $("partial").hidden = !partial;
+    renderMacroSplit(partial);
     $("count").textContent = `${state.stats.entry_count} зап.`;
-    if (!append) $("entries").replaceChildren();
+    if (!append) { $("entries").replaceChildren(); mealHead = null; }
     if (!state.stats.entry_count) $("entries").append(node("p", "Здесь пока пусто. Добавьте первый приём пищи — он появится в дневнике.", "empty"));
-    state.entries.items.forEach((entry) => $("entries").append(renderEntry(entry)));
+    state.entries.items.forEach(appendEntry);
     $("more").hidden = !state.entries.has_next;
+    if (!append) loadWeek();
   } catch (error) {
     if (generation !== diaryGeneration) return;
     desiredDay = state?.day || "";
@@ -251,11 +351,6 @@ submit("food-form", async (form) => {
   await added("food-dialog", data.eaten_at.slice(0, 10));
 });
 submit("goal-form", async (form) => { await api("profile", "PUT", {goal: form.get("goal") === "" ? null : Number(form.get("goal"))}); $("goal-dialog").close(); await loadDiary(state.day); });
-submit("quick-form", async (form) => {
-  await api("entries", "POST", {quick_add: form.get("quick_add"), eaten_at: form.get("eaten_at")});
-  $("quick-form").reset();
-  await added("quick-dialog", form.get("eaten_at").slice(0, 10));
-});
 submit("favorite-form", async (form) => { await api("entries", "POST", {favorite_id: selectedFavorite.favorite_id, amount: Number(form.get("amount")), eaten_at: form.get("eaten_at")}); await added("favorites-dialog", form.get("eaten_at").slice(0, 10)); });
 async function loadFavorites(append = false) {
   const generation = ++favoriteGeneration;
@@ -316,7 +411,6 @@ onClick("recent-button", async () => {
   if (!result.items.length) $("recent-list").append(node("p", "Здесь появится недавно записанная еда.", "empty"));
   openDialog("recent-dialog");
 });
-onClick("quick-button", () => { $("quick-form").reset(); $("quick-form").elements.eaten_at.value = defaultTime(); $("quick-form").elements.eaten_at.min = state.earliest_entry_time; $("quick-form").elements.eaten_at.max = currentLocalTime(); openDialog("quick-dialog"); });
 onClick("favorites-more", () => loadFavorites(true));
 onClick("more", () => loadDiary(state.day, true));
 onClick("today-button", () => loadDiary());
@@ -348,7 +442,7 @@ async function loadStats() {
     for (const day of result.days) {
       const button = action(`${prettyDay(day.day)} · ${day.calories == null ? "нет записей" : `${fmt(day.calories)} ккал`}`, async () => { $("stats-dialog").close(); await loadDiary(day.day); }, "chart-row");
       if (day.calories != null) {
-        const bar = document.createElement("progress"); bar.max=max; bar.value=day.calories; bar.setAttribute("aria-label", `${prettyDay(day.day)}: ${fmt(day.calories)} ккал`); button.append(bar);
+        const bar = document.createElement("progress"); bar.max=max; bar.value=day.calories; bar.className = state.goal && day.calories > state.goal ? "over-goal" : ""; bar.setAttribute("aria-label", `${prettyDay(day.day)}: ${fmt(day.calories)} ккал`); button.append(bar);
       }
       content.append(button);
     }
@@ -427,7 +521,7 @@ function clearDraft(id) {
   saveStorage(`kcalorie-drafts-${storageUser}`, drafts);
   renderDrafts();
 }
-const draftNames = {"food-form": "Еда", "quick-form": "Одной строкой", "favorite-form": "Избранное", "weight-form": "Вес"};
+const draftNames = {"food-form": "Еда", "favorite-form": "Избранное", "weight-form": "Вес"};
 function saveDraft(form) {
   if (!storageUser || !draftNames[form.id] || !dirty(form)) return;
   drafts[form.id] = {values: JSON.parse(formValues(form)), editingEntry, foodTemplate, selectedFavorite, editingWeight, timezone: state.timezone};
@@ -529,6 +623,7 @@ if (tg?.initData) {
 }
 window.visualViewport?.addEventListener("resize", resizeViewport);
 window.visualViewport?.addEventListener("scroll", resizeViewport);
+window.addEventListener("resize", resizeViewport);
 applyTheme();
 resizeViewport();
 tg?.ready();

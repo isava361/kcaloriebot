@@ -10,8 +10,8 @@ partial/unknown macro indicators, and these workflows:
   defaults to the current time; past days default to noon. New or moved entries
   must be within the last 366 days. Existing older entries can still be edited
   without changing their time.
-- Enter nutrition per 100 g or per serving, repeat recent food, search favorites,
-  or use a quick line such as `овсянка 370 60 б12 ж6 у62`.
+- Enter nutrition per 100 g or per serving, repeat recent food, or search
+  favorites.
 - Edit names, amounts, nutrition and dates. Concurrent changes in the bot or
   another window produce a conflict instead of overwriting newer data.
 - Delete a food entry and undo it using the toast for 15 minutes. The undo
@@ -22,6 +22,12 @@ partial/unknown macro indicators, and these workflows:
 - Record, correct and delete weight measurements. The journal shows measurements
   through the selected day, a 30-day chart of daily means, and means of all
   measurements in the last 7 days and preceding 7 days.
+
+Entries are grouped into meals by their local time (breakfast, lunch, afternoon
+snack, dinner, night snack) with per-meal totals. The summary shows the calories
+left against the goal, the day's energy split by meal on one bar, and the share
+of energy from each macronutrient. The strip under the date shows the seven days
+ending on the selected one, scaled to the goal when one is set.
 
 Telegram's theme takes precedence over the system theme and updates live.
 MainButton submits the open form; BackButton closes dialogs with a dirty-form
