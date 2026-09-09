@@ -1032,21 +1032,24 @@ class Database:
         self, user_id: int, query: str, limit: int = 20, offset: int = 0
     ) -> tuple[FavoriteFood, ...]:
         self._validate_page(offset, limit)
-        escaped = (
-            query.casefold()
-            .replace("\\", "\\\\")
-            .replace("%", "\\%")
-            .replace("_", "\\_")
-        )
+        # Match every word fragment, in any order; SQL wildcards stay literal.
+        terms = tuple(dict.fromkeys(query.casefold().split())) or ("",)
+        patterns = [
+            "%"
+            + term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            + "%"
+            for term in terms
+        ]
+        conditions = " AND ".join("name_key LIKE ? ESCAPE '\\'" for _ in terms)
         with self._connect() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT * FROM favorite_foods
-                WHERE user_id = ? AND name_key LIKE ? ESCAPE '\\'
+                WHERE user_id = ? AND {conditions}
                 ORDER BY name_key, favorite_id DESC
                 LIMIT ? OFFSET ?
                 """,
-                (user_id, f"%{escaped}%", limit, offset),
+                (user_id, *patterns, limit, offset),
             ).fetchall()
         return tuple(self._row_to_favorite(row) for row in rows)
 

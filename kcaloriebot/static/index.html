@@ -45,7 +45,12 @@
   <div class="row"><h2 id="food-title">Добавить еду</h2><button type="button" class="close" aria-label="Закрыть">×</button></div>
   <label>Дата и время<input name="eaten_at" type="datetime-local" required></label>
   <p class="muted small" id="food-timezone"></p>
-  <label>Название<input name="name" placeholder="Например, овсянка" required maxlength="200"></label>
+  <label>Название<input name="name" placeholder="Например, овсянка" required maxlength="200" autocomplete="off" aria-describedby="food-name-help"></label>
+  <p class="muted small" id="food-name-help">Начните вводить название — предложим еду из избранного.</p>
+  <section id="food-suggestions" aria-label="Подсказки из избранного" hidden>
+    <p id="food-suggestions-status" class="muted small" role="status"></p>
+    <div id="food-suggestions-list"></div>
+  </section>
   <label>Значения указаны<select name="unit"><option value="100g">На 100 г</option><option value="serving">На одну порцию</option></select></label>
   <div class="field-pair"><label>Килокалории<input name="calories" type="number" inputmode="decimal" min="0" max="10000" step="any" required></label><label><span id="amount-label">Съедено, г</span><input name="grams" type="number" inputmode="decimal" min="0.001" max="100000" step="any" value="100" required></label></div>
   <p class="muted small">БЖУ в выбранной единице · можно оставить пустыми</p>

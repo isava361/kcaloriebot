@@ -515,6 +515,20 @@ input,select,textarea{
 .wide{
   width:100%
 }
+#food-suggestions{
+  margin:var(--s3) 0;
+  padding:var(--s3);
+  border:1px solid var(--border);
+  border-radius:var(--r-sm)
+}
+#food-suggestions-list button{
+  display:block;
+  width:100%;
+  text-align:left;
+  white-space:normal;
+  overflow-wrap:anywhere;
+  margin-top:var(--s2)
+}
 .danger,.form-error{
   color:var(--danger)
 }

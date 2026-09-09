@@ -176,6 +176,64 @@ const {chromium, webkit} = require(process.env.PLAYWRIGHT_MODULE_PATH || path.re
     await page.locator('#weight-list').getByRole('button',{name:'Удалить',exact:true}).click();
     await page.waitForFunction(() => !document.querySelector('#weight-list .entry'));
     await page.locator('#weights-dialog .close').click();
+    // Inline favorites: reversed fragments, explicit selection, preserved date
+    // and quantity, then a serving-based favorite restored from a draft.
+    await page.locator('#weights-dialog').waitFor({state:'hidden'});
+    await page.locator('#add-button').click();
+    const foodName = page.locator('#food-form [name=name]');
+    const mealTime = await page.locator('#food-form [name=eaten_at]').inputValue();
+    await page.locator('#food-form [name=grams]').fill('55');
+    await foodName.fill('КУР БЕД');
+    const chicken = page.locator('#food-suggestions-list button').filter({hasText:'Бедро куриное'});
+    await chicken.waitFor();
+    assert.equal(await page.locator('#food-form [name=calories]').inputValue(), '');
+    await chicken.click();
+    assert.equal(await foodName.inputValue(), 'Бедро куриное');
+    assert.equal(await page.locator('#food-form [name=calories]').inputValue(), '170');
+    assert.equal(await page.locator('#food-form [name=carbs]').inputValue(), '');
+    assert.equal(await page.locator('#food-form [name=grams]').inputValue(), '55');
+    assert.equal(await page.locator('#food-form [name=eaten_at]').inputValue(), mealTime);
+    assert.ok(await page.locator('#food-suggestions').isHidden());
+    // A stale response must not resurrect suggestions after the text is cleared.
+    let releaseSearch, searchStarted, searchFinished;
+    const started = new Promise(resolve => {searchStarted=resolve});
+    const release = new Promise(resolve => {releaseSearch=resolve});
+    const finished = new Promise(resolve => {searchFinished=resolve});
+    await page.route('**/api/favorites?*', async route => {
+      const response = await route.fetch();
+      searchStarted();
+      await release;
+      await route.fulfill({response});
+      searchFinished();
+    });
+    await foodName.fill('кур');
+    await started;
+    await foodName.fill('');
+    releaseSearch();
+    await finished;
+    await page.unroute('**/api/favorites?*');
+    assert.ok(await page.locator('#food-suggestions').isHidden());
+    await foodName.fill('неизвестная еда');
+    await page.waitForFunction(() => document.getElementById('food-suggestions-status').textContent.includes('не найдено'));
+    assert.equal(await page.locator('#food-form [name=calories]').inputValue(), '170');
+    await foodName.fill('орех бат');
+    await page.locator('#food-suggestions-list button').filter({hasText:'Батончик ореховый'}).click();
+    assert.equal(await page.locator('#food-form [name=unit]').inputValue(), 'serving');
+    assert.equal(await page.locator('#food-form [name=grams]').inputValue(), '1');
+    assert.equal(await page.locator('#food-form [name=calories]').inputValue(), '200');
+    await page.locator('#food-dialog .close').click();
+    await page.locator('#food-dialog').waitFor({state:'hidden'});
+    await page.reload();
+    await page.locator('#drafts').getByRole('button', {name:'Продолжить'}).click();
+    assert.equal(await foodName.inputValue(), 'Батончик ореховый');
+    assert.equal(await page.locator('#food-form [name=eaten_at]').inputValue(), mealTime);
+    const saved = page.waitForResponse(response => response.url().endsWith('/api/entries') && response.request().method() === 'POST');
+    await page.evaluate(() => Telegram.WebApp.MainButton.click());
+    const savedEntry = await (await saved).json();
+    assert.equal(savedEntry.nutrition.calories, 200);
+    assert.equal(savedEntry.nutrition.grams, 50);
+    assert.equal(savedEntry.nutrition.servings, 1);
+    await page.locator('#food-dialog').waitFor({state:'hidden'});
     assert.deepEqual(errors, []);
     console.log('Mobile flow, retry, draft, edit, undo and Telegram theme: OK');
   } finally { await browser.close(); }

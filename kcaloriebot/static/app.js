@@ -395,6 +395,7 @@ function foodUnit() {
   for (const key of ["protein", "fat", "carbs"]) form.elements[key].max = serving ? "10000" : "100";
 }
 function openFood(entry = null, template = false) {
+  clearFoodSuggestions();
   editingEntry = template ? null : entry;
   foodTemplate = template ? entry : null;
   const form = $("food-form");
@@ -408,6 +409,7 @@ function openFood(entry = null, template = false) {
   $("food-timezone").textContent = `Часовой пояс: ${state.timezone}`;
   $("food-title").textContent = editingEntry ? "Редактировать запись" : "Добавить еду";
   $("food-save").textContent = editingEntry ? "Сохранить изменения" : "Добавить в дневник";
+  $("food-name-help").hidden = Boolean(editingEntry);
   if (entry) {
     form.elements.name.value = entry.name || "";
     form.elements.grams.value = entry.nutrition.servings ?? entry.nutrition.grams;
@@ -416,6 +418,62 @@ function openFood(entry = null, template = false) {
   foodUnit();
   openDialog("food-dialog");
 }
+let foodSearchTimer, foodSearchGeneration = 0;
+function clearFoodSuggestions() {
+  clearTimeout(foodSearchTimer);
+  foodSearchGeneration++;
+  $("food-suggestions").hidden = true;
+  $("food-suggestions-list").replaceChildren();
+  $("food-suggestions-status").textContent = "";
+}
+function useFoodFavorite(favorite) {
+  const form = $("food-form");
+  if (editingEntry || form.dataset.submitting) return;
+  const unitChanged = form.elements.unit.value !== favorite.unit;
+  form.elements.name.value = favorite.name;
+  form.elements.unit.value = favorite.unit;
+  if (unitChanged || !form.elements.grams.value) form.elements.grams.value = favorite.unit === "serving" ? "1" : "100";
+  const values = {};
+  for (const key of ["calories", "protein", "fat", "carbs"]) {
+    values[key] = favorite[`${key}_per_100g`];
+    form.elements[key].value = values[key] ?? "";
+  }
+  // Reuse the existing template/draft path, including the mass of a serving.
+  foodTemplate = {name: favorite.name, unit: favorite.unit, values,
+    nutrition: {grams: favorite.unit === "serving" ? favorite.serving_grams : 100,
+      servings: favorite.unit === "serving" ? 1 : null}};
+  foodUnit();
+  clearFoodSuggestions();
+  saveDraft(form);
+  syncTelegram();
+  form.elements.grams.focus({preventScroll:true});
+}
+$("food-form").elements.name.addEventListener("input", event => {
+  clearFoodSuggestions();
+  const query = event.target.value.trim();
+  if (!query || editingEntry || event.isComposing) return;
+  const generation = foodSearchGeneration;
+  foodSearchTimer = setTimeout(async () => {
+    const current = () => generation === foodSearchGeneration && $("food-dialog").open && !$("food-form").dataset.submitting;
+    if (!current()) return;
+    $("food-suggestions").hidden = false;
+    $("food-suggestions-status").textContent = "Ищем в избранном…";
+    try {
+      const page = await api(`favorites?${new URLSearchParams({q: query})}`);
+      if (!current()) return;
+      $("food-suggestions-status").textContent = page.items.length
+        ? "Из избранного · нажмите, чтобы заполнить форму"
+        : "В избранном не найдено — можно заполнить вручную.";
+      for (const favorite of page.items.slice(0, 5)) {
+        const unit = favorite.unit === "serving" ? "порцию" : "100 г";
+        $("food-suggestions-list").append(action(`${favorite.name} · ${fmt(favorite.calories_per_100g)} ккал на ${unit}`, () => useFoodFavorite(favorite), ""));
+      }
+    } catch {
+      if (current()) $("food-suggestions-status").textContent = "Не удалось загрузить избранное. Можно продолжить вручную.";
+    }
+  }, 250);
+});
+$("food-dialog").addEventListener("close", clearFoodSuggestions);
 $("food-form").elements.unit.addEventListener("change", () => { foodUnit(); $("food-form").elements.grams.value = $("food-form").elements.unit.value === "serving" ? "1" : "100"; });
 submit("timezone-form", async (form) => { await api("profile", "PUT", {timezone: form.get("timezone")}); await loadDiary(); });
 submit("food-form", async (form) => {

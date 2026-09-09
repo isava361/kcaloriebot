@@ -12,6 +12,11 @@ partial/unknown macro indicators, and these workflows:
   without changing their time.
 - Enter nutrition per 100 g or per serving, repeat recent food, or search
   favorites.
+- While adding food, typing a name shows up to five favorites below the field.
+  Search matches every word fragment in any order, ignoring case:
+  `кур бед` finds `Бедро куриное`. Selecting a suggestion fills nutrition and
+  the unit without changing the date; an existing quantity is kept when the
+  unit stays the same. Serving weight is preserved in saved entries and drafts.
 - Edit names, amounts, nutrition and dates. Concurrent changes in the bot or
   another window produce a conflict instead of overwriting newer data.
 - Delete a food entry and undo it using the toast for 15 minutes. The undo

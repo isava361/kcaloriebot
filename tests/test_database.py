@@ -391,6 +391,40 @@ class PaginationAndStatsTests(DatabaseTestCase):
             tuple(x.favorite_id for x in self.database.search_favorites(1, "йогурт")),
         )
 
+    def test_favorite_search_matches_all_fragments_in_any_order(self) -> None:
+        first = self.database.add_favorite(1, "Бедро куриное", 170, 20, 10, 0)
+        second = self.database.add_favorite(
+            1, "Куриное бедро запечённое", 190, 20, 12, 0
+        )
+        self.database.add_favorite(1, "Куриное филе", 110, 20, 3, 0)
+        self.database.add_favorite(2, "Бедро куриное", 170, 20, 10, 0)
+        expected = [first.favorite_id, second.favorite_id]
+        for query in (
+            "куриное бедро",
+            "БЕД КУР",
+            "  кур\tбед  ",
+            "дро рин",
+            "кур кур бед",
+        ):
+            with self.subTest(query=query):
+                self.assertEqual(
+                    [
+                        item.favorite_id
+                        for item in self.database.search_favorites(1, query)
+                    ],
+                    expected,
+                )
+        self.assertEqual(self.database.search_favorites(1, "кур рыба"), ())
+        self.assertEqual(
+            [
+                item.favorite_id
+                for item in self.database.search_favorites(
+                    1, "кур бед", limit=1, offset=1
+                )
+            ],
+            expected[1:],
+        )
+
     def test_stats_preserve_unknown_macros(self) -> None:
         session = self.database.start_session(
             1,
