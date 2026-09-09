@@ -8,7 +8,7 @@ let diaryGeneration = 0, desiredDay = "", receivedAt = 0, storageUser = null;
 let drafts = {}, baselines = new WeakMap(), toastTimer;
 let foodTemplate = null, favoriteGeneration = 0, searchTimer;
 let statsGeneration = 0, weightOffset = 0, editingWeight = null;
-let mealHead = null, weekGeneration = 0;
+let mealHead = null, weekGeneration = 0, confirmingClose = false, draftTimer;
 let pending = {};
 function readStorage(key) { try { const value = JSON.parse(localStorage.getItem(key) || "{}"); return value && typeof value === "object" && !Array.isArray(value) ? value : {}; } catch { return {}; } }
 function saveStorage(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* storage unavailable */ } }
@@ -533,6 +533,7 @@ function formValues(form) {
 function activeForm() { return [...document.querySelectorAll("dialog[open] form")].find(form => !form.hidden); }
 function dirty(form) { return Boolean(form && baselines.has(form) && baselines.get(form) !== formValues(form)); }
 function clearDraft(id) {
+  clearTimeout(draftTimer);
   delete drafts[id];
   saveStorage(`kcalorie-drafts-${storageUser}`, drafts);
   renderDrafts();
@@ -597,24 +598,38 @@ function syncTelegram() {
   const dialog = document.querySelector("dialog[open]");
   const form = activeForm();
   document.documentElement.classList.toggle("locked", Boolean(dialog));
-  if (supports("6.1")) {
+  if (supports("6.1") && tg.BackButton?.isVisible !== Boolean(dialog)) {
     if (dialog) tg.BackButton?.show(); else tg.BackButton?.hide();
   }
   if (supports("6.2")) {
-    if (dirty(form) || form?.dataset.submitting) tg.enableClosingConfirmation?.(); else tg.disableClosingConfirmation?.();
+    const wanted = Boolean(dirty(form) || form?.dataset.submitting);
+    if (wanted !== confirmingClose) {
+      confirmingClose = wanted;
+      if (wanted) tg.enableClosingConfirmation?.(); else tg.disableClosingConfirmation?.();
+    }
   }
   if (tg?.initData && tg.MainButton) {
+    const main = tg.MainButton;
     const button = form?.querySelector("button:not([type=button])");
     if (button) {
       // MainButton submits this form, so the form's own button would duplicate it.
       button.hidden = true;
-      tg.MainButton.setText(button.textContent).show();
-      if (form.dataset.submitting) { tg.MainButton.disable(); tg.MainButton.showProgress(); }
-      else { tg.MainButton.hideProgress(); tg.MainButton.enable(); }
-    } else { tg.MainButton.hideProgress(); tg.MainButton.hide(); }
+      if (main.text !== button.textContent) main.setText(button.textContent);
+      if (main.isVisible !== true) main.show();
+      const busy = Boolean(form.dataset.submitting);
+      if (main.isProgressVisible !== busy) { if (busy) main.showProgress(); else main.hideProgress(); }
+      if (main.isActive === busy) { if (busy) main.disable(); else main.enable(); }
+    } else if (main.isVisible !== false) {
+      main.hideProgress();
+      main.hide();
+    }
   }
 }
-document.querySelectorAll("form").forEach(form => form.addEventListener("input", () => { saveDraft(form); syncTelegram(); }));
+document.querySelectorAll("form").forEach(form => form.addEventListener("input", () => {
+  clearTimeout(draftTimer);
+  draftTimer = setTimeout(() => saveDraft(form), 400);
+  syncTelegram();
+}));
 window.addEventListener("beforeunload", event => {
   const form = activeForm();
   if (dirty(form) || form?.dataset.submitting) { saveDraft(form); event.preventDefault(); event.returnValue = ""; }
