@@ -7,6 +7,8 @@ import subprocess
 import tempfile
 import unittest
 
+UPDATE_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "update.sh"
+
 BASH = shutil.which("bash")
 if not BASH and os.name == "nt":
     candidate = Path("C:/Program Files/Git/bin/bash.exe")
@@ -132,7 +134,7 @@ class UpdateScriptTests(unittest.TestCase):
             # A copy also makes the test immune to Windows checkout line endings.
             script = root / "update.sh"
             script.write_text(
-                Path("scripts/update.sh").read_text(encoding="utf-8"),
+                UPDATE_SCRIPT.read_text(encoding="utf-8"),
                 encoding="utf-8",
                 newline="\n",
             )
@@ -157,6 +159,7 @@ class UpdateScriptTests(unittest.TestCase):
                     *args,
                 ],
                 env=env,
+                cwd=root,
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -171,6 +174,17 @@ class UpdateScriptTests(unittest.TestCase):
                 "services": (root / "services").read_text().strip(),
                 "db": database.read_text().strip(),
             }
+
+    def test_fixture_works_outside_checkout(self):
+        previous = Path.cwd()
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                os.chdir(directory)
+                result = self.run_update("", "--check")
+            finally:
+                os.chdir(previous)
+        self.assertEqual(result["code"], 0, result["output"])
+        self.assertNotIn("systemctl stop", result["trace"])
 
     def test_success_stops_both_and_migrates_before_start(self):
         result = self.run_update("slow")

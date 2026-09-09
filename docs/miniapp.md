@@ -276,6 +276,33 @@ sudo kcaloriebot-update
 остановленными для ручного разбора. Бэкапы больше не удаляются автоматически.
 Список переопределяемых настроек и тесты скрипта — в разделе обновления README.
 
+Если старая установленная команда падает в `tests.test_update_script` с
+`FileNotFoundError: scripts/update.sh`, причина — запуск тестов не из корня
+проекта. Тесты теперь находят скрипт относительно собственного файла, а новая
+версия обновлятора сама переходит в каталог проекта. Установленная команда
+`/usr/local/sbin/kcaloriebot-update` не обновляется вместе с Git checkout.
+
+После публикации исправления в `origin/main` можно заменить только установленный
+обновлятор, даже если предыдущая попытка откатила checkout. Выполни из root-shell:
+
+```bash
+(
+set -euo pipefail
+UPDATE_TMP=$(mktemp)
+trap 'rm -f -- "$UPDATE_TMP"' EXIT
+sudo -u kcaloriebot git -C /opt/kcaloriebot/app fetch origin main
+sudo -u kcaloriebot git -C /opt/kcaloriebot/app show FETCH_HEAD:scripts/update.sh > "$UPDATE_TMP"
+bash -n "$UPDATE_TMP"
+install -m 755 "$UPDATE_TMP" /usr/local/sbin/kcaloriebot-update
+)
+```
+
+При успешной установке запусти `sudo kcaloriebot-update`. Получение скрипта через
+`git show` не меняет работающий checkout; его обновление и резервное копирование
+БД выполняет уже новая команда. После отката старой версией отдельно проверь
+`sudo systemctl status kcalculatorbot kcaloriebot-web --no-pager`: её сообщение
+о запуске бота не подтверждает состояние Mini App.
+
 ### 3. Проверить после обновления
 
 ```bash
