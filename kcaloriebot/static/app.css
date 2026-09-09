@@ -31,7 +31,9 @@
   --shadow:0 1px 2px rgba(16,32,24,.05),0 10px 30px rgba(16,32,24,.05);
   color:var(--text);
   background:var(--page);
-  color-scheme:light
+  color-scheme:light;
+  /* Reserve the scrollbar so locking the page behind a sheet shifts nothing. */
+  scrollbar-gutter:stable
 }
 *{
   box-sizing:border-box
@@ -40,6 +42,11 @@ body{
   margin:0;
   font-size:var(--t-body);
   line-height:1.45
+}
+/* The page must not move behind an open sheet, keyboard or not. The lock has to
+   sit on the root element: overflow on body does not reach the viewport here. */
+:root.locked{
+  overflow:hidden
 }
 main{
   max-width:540px;
@@ -624,22 +631,31 @@ progress.over-goal::-moz-progress-bar{
   #entries,.energy strong{
     transition:opacity .2s ease
   }
+  /* allow-discrete keeps the sheet on screen long enough to animate out too. */
+  dialog{
+    opacity:0;
+    translate:0 24px;
+    transition:opacity .2s ease,translate .2s ease,overlay .2s allow-discrete,display .2s allow-discrete
+  }
   dialog[open]{
-    animation:sheet-in .22s ease-out
+    opacity:1;
+    translate:0 0
+  }
+  dialog::backdrop{
+    opacity:0;
+    transition:opacity .2s ease,overlay .2s allow-discrete,display .2s allow-discrete
   }
   dialog[open]::backdrop{
-    animation:fade-in .22s ease-out
+    opacity:1
   }
-}
-@keyframes sheet-in{
-  from{
-    transform:translateY(24px);
-    opacity:.6
-  }
-}
-@keyframes fade-in{
-  from{
-    opacity:0
+  @starting-style{
+    dialog[open]{
+      opacity:0;
+      translate:0 24px
+    }
+    dialog[open]::backdrop{
+      opacity:0
+    }
   }
 }
 @media(max-width:360px){

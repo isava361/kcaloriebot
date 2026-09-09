@@ -175,26 +175,42 @@ function renderMacroSplit(partial) {
   if ($("macro-split").hidden) return;
   [...$("macro-split").children].forEach((bar, index) => { bar.style.width = `${values[index] / total * 100}%`; });
 }
+/* Drawn synchronously so the card never grows under the user once totals arrive. */
+function renderWeek() {
+  const days = [];
+  for (let offset = 6; offset >= 0; offset--) {
+    const date = new Date(`${state.day}T12:00:00Z`);
+    date.setUTCDate(date.getUTCDate() - offset);
+    days.push(date.toISOString().slice(0, 10));
+  }
+  $("week").replaceChildren(...days.map((day) => {
+    const date = new Date(`${day}T12:00:00Z`);
+    const button = action("", () => loadDiary(day), "week-day");
+    button.dataset.day = day;
+    button.disabled = day < state.earliest_day || day > state.today;
+    button.setAttribute("aria-label", prettyDay(day));
+    if (day === state.day) button.setAttribute("aria-current", "date");
+    const bar = node("span", "", "week-bar");
+    bar.append(node("i", ""));
+    button.append(node("span", new Intl.DateTimeFormat("ru-RU", {weekday: "short", timeZone: "UTC"}).format(date)), bar, node("span", String(date.getUTCDate())));
+    return button;
+  }));
+  $("week").hidden = false;
+}
 async function loadWeek() {
   const generation = ++weekGeneration;
-  const day = state.day;
   try {
-    const result = await api(`statistics?${new URLSearchParams({day, period: "week"})}`);
+    const result = await api(`statistics?${new URLSearchParams({day: state.day, period: "week"})}`);
     if (generation !== weekGeneration) return;
     const base = state.goal || Math.max(1, ...result.days.map(item => item.calories || 0));
-    $("week").replaceChildren(...result.days.map((item) => {
-      const date = new Date(`${item.day}T12:00:00Z`);
-      const button = action("", () => loadDiary(item.day), "week-day");
+    for (const item of result.days) {
+      const button = $("week").querySelector(`[data-day="${item.day}"]`);
+      if (!button) continue;
       button.setAttribute("aria-label", `${prettyDay(item.day)}: ${item.calories == null ? "нет записей" : `${fmt(item.calories)} ккал`}`);
-      if (item.day === day) button.setAttribute("aria-current", "date");
-      const bar = node("span", "", "week-bar");
-      const value = node("i", "", state.goal && item.calories > state.goal ? "over" : "");
+      const value = button.querySelector("i");
       value.style.height = item.calories ? `${Math.max(8, Math.min(100, item.calories / base * 100))}%` : "0";
-      bar.append(value);
-      button.append(node("span", new Intl.DateTimeFormat("ru-RU", {weekday: "short", timeZone: "UTC"}).format(date)), bar, node("span", String(date.getUTCDate())));
-      return button;
-    }));
-    $("week").hidden = false;
+      value.classList.toggle("over", Boolean(state.goal && item.calories > state.goal));
+    }
   } catch { /* the strip is an aid, not a requirement */ }
 }
 async function loadDiary(day = "", append = false) {
@@ -243,7 +259,7 @@ async function loadDiary(day = "", append = false) {
     if (!state.stats.entry_count) $("entries").append(node("p", "Здесь пока пусто. Добавьте первый приём пищи — он появится в дневнике.", "empty"));
     state.entries.items.forEach(appendEntry);
     $("more").hidden = !state.entries.has_next;
-    if (!append) loadWeek();
+    if (!append) { renderWeek(); loadWeek(); }
   } catch (error) {
     if (generation !== diaryGeneration) return;
     desiredDay = state?.day || "";
@@ -268,7 +284,7 @@ function openDialog(id) {
 document.querySelectorAll(".close").forEach((button) => button.addEventListener("click", () => closeDialog(button.closest("dialog"))));
 document.querySelectorAll("dialog").forEach(dialog => {
   dialog.addEventListener("cancel", event => { event.preventDefault(); closeDialog(dialog); });
-  dialog.addEventListener("close", syncTelegram);
+  dialog.addEventListener("close", () => { syncTelegram(); renderDrafts(); });
 });
 function submit(id, handler) {
   $(id).addEventListener("submit", async (event) => {
@@ -532,6 +548,7 @@ function renderDrafts() {
   $("drafts").replaceChildren();
   for (const [id, draft] of Object.entries(drafts)) {
     if (!draftNames[id] || !draft?.values) continue;
+    if ($(id).closest("dialog")?.open) continue;
     const row = node("div", "", "draft-row");
     row.append(node("p", `${draftNames[id]} · ${(draft.values.eaten_at || draft.values.measured_at)?.replace("T", " ") || "черновик"}`));
     row.append(action("Продолжить", () => {
@@ -579,6 +596,7 @@ async function closeDialog(dialog) {
 function syncTelegram() {
   const dialog = document.querySelector("dialog[open]");
   const form = activeForm();
+  document.documentElement.classList.toggle("locked", Boolean(dialog));
   if (supports("6.1")) {
     if (dialog) tg.BackButton?.show(); else tg.BackButton?.hide();
   }
@@ -588,6 +606,8 @@ function syncTelegram() {
   if (tg?.initData && tg.MainButton) {
     const button = form?.querySelector("button:not([type=button])");
     if (button) {
+      // MainButton submits this form, so the form's own button would duplicate it.
+      button.hidden = true;
       tg.MainButton.setText(button.textContent).show();
       if (form.dataset.submitting) { tg.MainButton.disable(); tg.MainButton.showProgress(); }
       else { tg.MainButton.hideProgress(); tg.MainButton.enable(); }

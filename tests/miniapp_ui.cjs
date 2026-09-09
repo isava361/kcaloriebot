@@ -27,6 +27,8 @@ const {chromium} = require(process.env.PLAYWRIGHT_MODULE_PATH || path.resolve('d
     const day = await page.locator('#day').inputValue();
     await page.locator('#add-button').click();
     assert.equal(await page.locator('#food-form [name=eaten_at]').inputValue(), day+'T12:00');
+    // Telegram's MainButton is the only submit control while the sheet is open.
+    assert.ok(await page.locator('#food-save').isHidden());
     await page.locator('#food-form [name=name]').fill('овсянка');
     await page.locator('#food-form [name=calories]').fill('370');
     await page.locator('#food-form [name=grams]').fill('60');
@@ -51,7 +53,7 @@ const {chromium} = require(process.env.PLAYWRIGHT_MODULE_PATH || path.resolve('d
     assert.equal(await page.locator('#day').inputValue(), day);
     await page.getByRole('button', {name:'Редактировать: овсянка',exact:true}).click();
     await page.locator('#food-form [name=grams]').fill('100');
-    await page.locator('#food-save').click();
+    await page.evaluate(() => Telegram.WebApp.MainButton.click());
     await page.waitForFunction(() => document.getElementById('calories').textContent === '370');
     await page.getByRole('button', {name:'Удалить',exact:true}).click();
     await page.waitForFunction(() => document.getElementById('calories').textContent === '0');
@@ -77,7 +79,11 @@ const {chromium} = require(process.env.PLAYWRIGHT_MODULE_PATH || path.resolve('d
     const box=await page.locator('#food-dialog').boundingBox();
     assert.ok(box.y >= 0 && box.y + box.height <= 361, JSON.stringify(box));
     assert.ok(await page.locator('#food-dialog').evaluate(el=>el.scrollWidth<=el.clientWidth));
+    // The page behind an open sheet is frozen, so the keyboard cannot scroll it.
+    assert.equal(await page.evaluate(() => getComputedStyle(document.documentElement).overflow), 'hidden');
     await page.locator('#food-dialog .close').click();
+    await page.locator('#food-dialog').waitFor({state:'hidden'});
+    assert.equal(await page.evaluate(() => getComputedStyle(document.documentElement).overflow), 'visible');
     await page.setViewportSize({width:320,height:740});
     if(process.env.MINIAPP_SCREENSHOTS) await page.screenshot({path:path.join(process.env.MINIAPP_SCREENSHOTS,'miniapp-updated-dark.png'),fullPage:true});
     await page.evaluate(() => {Telegram.WebApp.colorScheme='light';Telegram.WebApp.emit('themeChanged')});
@@ -90,12 +96,12 @@ const {chromium} = require(process.env.PLAYWRIGHT_MODULE_PATH || path.resolve('d
     await page.locator('#stats-dialog .close').click();
     await page.locator('#weights-button').click();
     await page.locator('#weight-form [name=weight_kg]').fill('80');
-    await page.locator('#weight-save').click();
+    await page.evaluate(() => Telegram.WebApp.MainButton.click());
     await page.locator('#weight-list .entry').waitFor();
     assert.equal(await page.locator('#weight-list .entry').count(),1);
     await page.locator('#weight-list').getByRole('button',{name:'Изменить',exact:true}).click();
     await page.locator('#weight-form [name=weight_kg]').fill('79');
-    await page.locator('#weight-save').click();
+    await page.evaluate(() => Telegram.WebApp.MainButton.click());
     await page.waitForFunction(() => document.getElementById('weight-list').textContent.includes('79 кг'));
     await page.locator('#weight-list').getByRole('button',{name:'Удалить',exact:true}).click();
     await page.waitForFunction(() => !document.querySelector('#weight-list .entry'));
