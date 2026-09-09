@@ -236,9 +236,11 @@ systemctl is-active "$BOT_SERVICE" "$WEB_SERVICE"
 данные из WAL. Не заменяй её копированием только файла `.db` работающего бота.
 См. [команды SQLite CLI](https://www.sqlite.org/cli.html).
 
-`scripts/update.sh` рассчитан на значения из общей инструкции и останавливает
-web через связь systemd `PartOf`. Пока имена, пути и эта связь не сверены,
-используй явное обновление обоих процессов выше.
+`scripts/update.sh` рассчитан на значения из общей инструкции: он ставит
+`.[miniapp]`, запускает `kcaloriebot-web` явно после бота и проваливает
+обновление, если web-юнит не удержался. Имя юнита в скрипте — `kcaloriebot-web`;
+пока имена и пути не сверены с сервером, используй явное обновление обоих
+процессов выше.
 
 ### 3. Проверить после обновления
 
@@ -400,8 +402,11 @@ Wants=kcaloriebot-web.service
 
 This ties the web process to bot stop/restart operations. Both writers stop for
 the README's update/restore procedure; starting the bot also starts the web
-server. The current update script checks only bot health, so also check the web
-service after updates. Reinstall `.[miniapp]` when its dependencies change.
+server. `PartOf=` alone propagates stop and restart but never start, which is
+why `scripts/update.sh` starts `kcaloriebot-web` explicitly: without that, an
+update leaves the Mini App down and Nginx answering 502. The script also
+installs `.[miniapp]` and fails the update if the web unit does not stay
+running, printing its last journal lines.
 
 This release upgrades SQLite schema 5 to 6, adding durable operation receipts
 and temporary deleted-entry snapshots. Back up the database and stop **both**

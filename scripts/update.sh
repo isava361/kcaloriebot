@@ -20,6 +20,7 @@ VENV_PY=/opt/kcaloriebot/.venv/bin/python
 DB_PATH=/var/lib/kcaloriebot/kcaloriebot.db
 BACKUP_DIR=/var/backups/kcaloriebot
 SERVICE=kcalculatorbot
+WEB_SERVICE=kcaloriebot-web
 RUN_AS=kcaloriebot
 KEEP_BACKUPS=10
 EXPECTED_SCHEMA=6
@@ -32,6 +33,7 @@ ROLLBACK=1
 OLD_COMMIT=""
 BACKUP_PATH=""
 SERVICE_STOPPED=0
+HAS_WEB=0
 
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!!\033[0m  %s\n' "$*" >&2; }
@@ -79,14 +81,14 @@ on_error() {
 
     if [ -n "$OLD_COMMIT" ]; then
         git_bot reset --hard "$OLD_COMMIT" || rollback_ok=0
-        as_bot "$VENV_PY" -m pip install -q -e "$APP_DIR" || rollback_ok=0
+        install_app || rollback_ok=0
     fi
 
     if [ -n "$BACKUP_PATH" ] && [ -f "$BACKUP_PATH" ]; then
         as_bot sqlite3 "$DB_PATH" ".restore '$BACKUP_PATH'" || rollback_ok=0
     fi
 
-    systemctl start "$SERVICE" || rollback_ok=0
+    start_services || rollback_ok=0
 
     if [ "$rollback_ok" -eq 1 ] && systemctl is-active --quiet "$SERVICE"; then
         warn "Rollback complete: the bot is running on the previous version."
@@ -103,6 +105,22 @@ on_error() {
 }
 trap 'on_error $LINENO' ERR
 
+# The Mini App needs the aiohttp extra; a bot-only server must not pull it in.
+install_app() {
+    if [ "$HAS_WEB" -eq 1 ]; then
+        as_bot "$VENV_PY" -m pip install -q -e "$APP_DIR[miniapp]"
+    else
+        as_bot "$VENV_PY" -m pip install -q -e "$APP_DIR"
+    fi
+}
+
+# PartOf= propagates stop and restart to the web unit but never start, so the
+# Mini App has to be started explicitly or Nginx keeps answering 502.
+start_services() {
+    systemctl start "$SERVICE" || return 1
+    [ "$HAS_WEB" -eq 0 ] || systemctl start "$WEB_SERVICE" || return 1
+}
+
 # --------------------------------------------------------------------------
 # Preflight
 # --------------------------------------------------------------------------
@@ -117,6 +135,11 @@ done
 [ -f "$DB_PATH" ]       || die "Database not found: $DB_PATH"
 id "$RUN_AS" >/dev/null 2>&1 || die "Service account missing: $RUN_AS"
 systemctl cat "$SERVICE" >/dev/null 2>&1 || die "No such service: $SERVICE"
+
+if systemctl cat "$WEB_SERVICE" >/dev/null 2>&1; then
+    HAS_WEB=1
+    log "Mini App unit found: $WEB_SERVICE will be reinstalled, restarted and checked."
+fi
 
 # A dirty checkout means someone edited code on the server. Fast-forwarding
 # over it would silently discard their work, so refuse instead.
@@ -175,18 +198,23 @@ log "Updating the checkout..."
 git_bot pull --quiet --ff-only origin "$BRANCH"
 
 log "Installing dependencies..."
-as_bot "$VENV_PY" -m pip install -q -e "$APP_DIR"
+install_app
 
 log "Running tests..."
 as_bot "$VENV_PY" -m unittest discover -s "$APP_DIR/tests" -t "$APP_DIR"
 
-log "Starting $SERVICE..."
-systemctl start "$SERVICE"
+log "Starting services..."
+start_services
 
-# The unit restarts on failure, so a crash loop can still look "activating"
-# for a moment. Give it a few seconds before believing it started.
+# The units restart on failure, so a crash loop can still look "activating"
+# for a moment. Give them a few seconds before believing they started.
 sleep 5
 systemctl is-active --quiet "$SERVICE" || die "$SERVICE did not stay running."
+
+if [ "$HAS_WEB" -eq 1 ] && ! systemctl is-active --quiet "$WEB_SERVICE"; then
+    journalctl -u "$WEB_SERVICE" -n 30 --no-pager >&2 || true
+    die "$WEB_SERVICE did not stay running; the Mini App would answer 502."
+fi
 
 SCHEMA=$(as_bot sqlite3 "$DB_PATH" 'PRAGMA user_version;')
 [ "$SCHEMA" = "$EXPECTED_SCHEMA" ] \
@@ -204,5 +232,7 @@ if [ "$KEEP_BACKUPS" -gt 0 ]; then
         | tail -n "+$((KEEP_BACKUPS + 1))" | xargs -r rm -f
 fi
 
-log "Updated $(echo "$OLD_COMMIT" | cut -c1-7) -> $(echo "$NEW_COMMIT" | cut -c1-7), schema v$SCHEMA, $SERVICE is running."
+RUNNING="$SERVICE"
+[ "$HAS_WEB" -eq 0 ] || RUNNING="$SERVICE and $WEB_SERVICE"
+log "Updated $(echo "$OLD_COMMIT" | cut -c1-7) -> $(echo "$NEW_COMMIT" | cut -c1-7), schema v$SCHEMA, $RUNNING running."
 log "Backup kept at $BACKUP_PATH"
