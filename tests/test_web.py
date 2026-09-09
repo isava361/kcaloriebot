@@ -156,7 +156,11 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         response = await self.request(
             "POST",
             "/api/entries",
-            json={"favorite_id": favorite["favorite_id"], "amount": 100},
+            json={
+                "favorite_id": favorite["favorite_id"],
+                "favorite_version": favorite["version"],
+                "amount": 100,
+            },
         )
         self.assertEqual(response.status, 201)
         response = await self.request("GET", "/api/diary")
@@ -240,16 +244,82 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         )
         favorite = self.store.convert_favorite_to_serving(123, 123, 400)
         session = self.store.start_session(123, 123, SessionState.WAIT_FOOD_NAME)
+        response = await self.request("GET", "/api/favorites")
+        version = (await response.json())["items"][0]["version"]
         response = await self.request(
             "POST",
             "/api/entries",
-            json={"favorite_id": favorite.favorite_id, "amount": 0.5},
+            json={
+                "favorite_id": favorite.favorite_id,
+                "favorite_version": version,
+                "amount": 0.5,
+            },
         )
         self.assertEqual(response.status, 201)
         nutrition = (await response.json())["nutrition"]
         self.assertEqual(nutrition["calories"], 500)
         self.assertEqual(nutrition["servings"], 0.5)
         self.assertEqual(self.store.get_session(123, 123), session)
+
+    async def test_favorite_changes_conflict_but_committed_retries_replay(self):
+        self.store.set_timezone(123, "UTC")
+        favorite = self.store.add_favorite(123, "Food", 200, None, None, None)
+        response = await self.request("GET", "/api/favorites")
+        selected = (await response.json())["items"][0]
+        response = await self.request("GET", "/api/favorites?q=Food")
+        self.assertEqual((await response.json())["items"][0], selected)
+        data = {
+            "favorite_id": favorite.favorite_id,
+            "favorite_version": selected["version"],
+            "amount": 100,
+            "eaten_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M"),
+        }
+        # Existing clients/drafts without a version must reselect the favorite.
+        response = await self.request(
+            "POST",
+            "/api/entries",
+            json={
+                key: value for key, value in data.items() if key != "favorite_version"
+            },
+        )
+        self.assertEqual(response.status, 409)
+        self.store.start_session(
+            123,
+            123,
+            SessionState.WAIT_FAVORITE_TO_SERVING,
+            selected_favorite_id=favorite.favorite_id,
+        )
+        self.store.convert_favorite_to_serving(123, 123, 50)
+        headers = {"Idempotency-Key": str(uuid4())}
+        response = await self.request(
+            "POST", "/api/entries", json=data, headers=headers
+        )
+        self.assertEqual(response.status, 409)
+        response = await self.request("GET", "/api/diary")
+        self.assertEqual((await response.json())["stats"]["entry_count"], 0)
+        response = await self.request("GET", "/api/favorites")
+        data.update(
+            favorite_version=(await response.json())["items"][0]["version"], amount=1
+        )
+        response = await self.request(
+            "POST", "/api/entries", json=data, headers=headers
+        )
+        self.assertEqual(response.status, 201)
+        committed = await response.json()
+        self.assertEqual(committed["nutrition"]["calories"], 100)
+        self.assertEqual(committed["nutrition"]["grams"], 50)
+        # Saving a changed entry to this favorite also changes its version.
+        replacement = self.store.add_entry(123, int(time.time()), "Food", 300, 100)
+        self.store.add_favorite_from_entry(123, replacement.entry_id)
+        response = await self.request(
+            "POST", "/api/entries", json=data, headers=headers
+        )
+        self.assertEqual(response.status, 201)
+        self.assertEqual(await response.json(), committed)
+        response = await self.request("POST", "/api/entries", json=data)
+        self.assertEqual(response.status, 409)
+        response = await self.request("GET", "/api/diary")
+        self.assertEqual((await response.json())["stats"]["entry_count"], 2)
 
     async def test_concurrent_retries_share_one_committed_entry_and_survive_restart(
         self,

@@ -29,7 +29,7 @@ from .domain import (
     local_datetime,
     parse_daily_goal,
 )
-from .web_store import WebStore, entry_data, number
+from .web_store import WebStore, entry_data, favorite_data, number
 
 DATABASE = web.AppKey("database", Database)
 SETTINGS = web.AppKey("settings", Settings)
@@ -202,7 +202,7 @@ async def favorites(request: web.Request) -> web.Response:
         )
         return web.json_response(
             {
-                "items": [asdict(item) for item in items[:30]],
+                "items": [favorite_data(item) for item in items[:30]],
                 "offset": offset,
                 "has_previous": offset > 0,
                 "has_next": len(items) > 30,
@@ -214,7 +214,9 @@ async def favorites(request: web.Request) -> web.Response:
         int(request.query.get("offset", "0")),
         30,
     )
-    return web.json_response(asdict(result))
+    return web.json_response(
+        {**asdict(result), "items": [favorite_data(item) for item in result.items]}
+    )
 
 
 async def recent(request: web.Request) -> web.Response:
@@ -303,7 +305,7 @@ async def save_favorite(request: web.Request) -> web.Response:
         request["user_id"],
         int(request.match_info["entry_id"]),
     )
-    return web.json_response(asdict(result), status=201)
+    return web.json_response(favorite_data(result), status=201)
 
 
 async def static_file(request: web.Request) -> web.Response:

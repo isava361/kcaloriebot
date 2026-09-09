@@ -42,6 +42,7 @@ const {chromium, webkit} = require(process.env.PLAYWRIGHT_MODULE_PATH || path.re
     const inputScale = await page.evaluate(() => visualViewport.scale);
     await page.locator('#food-form [name=name]').fill('овсянка');
     await page.locator('#food-form [name=calories]').fill('370');
+    await page.locator('#food-form [name=protein]').fill('12');
     await page.locator('#food-form [name=grams]').fill('60');
     assert.equal(await page.evaluate(() => Telegram.WebApp.MainButton.showCount), mainShows);
     assert.equal(await page.evaluate(() => visualViewport.scale), inputScale);
@@ -61,13 +62,18 @@ const {chromium, webkit} = require(process.env.PLAYWRIGHT_MODULE_PATH || path.re
     await page.locator('#food-dialog').waitFor({state:'hidden'});
     await page.waitForFunction(() => document.getElementById('calories').textContent === '222');
     assert.equal(await page.locator('#entries .entry').count(), 1);
+    // Known protein with unknown fat/carbs must not look like 100% protein.
+    assert.ok(await page.locator('#macro-split').isHidden());
     assert.equal(await page.locator('#entries .meal-head').count(), 1);
     assert.equal(await page.locator('#week .week-day').count(), 7);
     assert.equal(await page.locator('#day').inputValue(), day);
     await page.getByRole('button', {name:'Редактировать: овсянка',exact:true}).click();
     await page.locator('#food-form [name=grams]').fill('100');
+    await page.locator('#food-form [name=fat]').fill('0');
+    await page.locator('#food-form [name=carbs]').fill('0');
     await page.evaluate(() => Telegram.WebApp.MainButton.click());
     await page.waitForFunction(() => document.getElementById('calories').textContent === '370');
+    assert.ok(await page.locator('#macro-split').isVisible());
     await page.getByRole('button', {name:'Удалить',exact:true}).click();
     await page.waitForFunction(() => document.getElementById('calories').textContent === '0');
     await page.getByRole('button', {name:'Отменить',exact:true}).click();
@@ -234,6 +240,63 @@ const {chromium, webkit} = require(process.env.PLAYWRIGHT_MODULE_PATH || path.re
     assert.equal(savedEntry.nutrition.grams, 50);
     assert.equal(savedEntry.nutrition.servings, 1);
     await page.locator('#food-dialog').waitFor({state:'hidden'});
+    // Restoring a gram draft after selecting a serving restores its limits too.
+    await page.locator('#favorites-button').click();
+    await page.locator('#favorites button').filter({hasText:'Бедро куриное'}).click();
+    await page.locator('#favorite-form [name=amount]').fill('2000');
+    await page.locator('#favorites-dialog .close').click();
+    await page.locator('#favorites-dialog').waitFor({state:'hidden'});
+    await page.locator('#favorites-button').click();
+    await page.locator('#favorites button').filter({hasText:'Батончик ореховый'}).click();
+    await page.locator('#favorites-dialog .close').click();
+    await page.locator('#favorites-dialog').waitFor({state:'hidden'});
+    await page.locator('#drafts').getByRole('button', {name:'Продолжить'}).click();
+    const amount = page.locator('#favorite-form [name=amount]');
+    assert.equal(await amount.inputValue(), '2000');
+    assert.equal(await amount.getAttribute('max'), '100000');
+    assert.ok(await amount.evaluate(el => el.checkValidity()));
+    assert.ok((await page.locator('#favorite-amount-label').textContent()).includes('Съедено, г'));
+    await page.locator('#favorites-dialog .close').click();
+    await page.locator('#favorites-dialog').waitFor({state:'hidden'});
+    await page.locator('#drafts').getByRole('button', {name:'Убрать'}).click();
+    // A default-valued submission needs a draft even though the form is clean.
+    await page.unroute('**/api/entries');
+    await page.locator('#favorites-button').click();
+    await page.locator('#favorites button').filter({hasText:'Батончик ореховый'}).click();
+    const originalTime = await page.locator('#favorite-form [name=eaten_at]').inputValue();
+    let committedFavorite, originalKey;
+    await page.route('**/api/entries', async route => {
+      if (!committedFavorite) {
+        originalKey = route.request().headers()['idempotency-key'];
+        committedFavorite = await (await route.fetch()).json();
+      }
+      await route.abort();
+    });
+    await page.evaluate(() => Telegram.WebApp.MainButton.click());
+    await page.waitForFunction(() => document.querySelector('#favorite-form .form-error').textContent.includes('Связь прервалась'));
+    assert.ok(committedFavorite.entry_id);
+    await page.reload();
+    await page.locator('#drafts').getByRole('button', {name:'Продолжить'}).click();
+    assert.equal(await amount.inputValue(), '1');
+    assert.equal(await amount.getAttribute('max'), '1000');
+    assert.ok((await page.locator('#favorite-amount-label').textContent()).includes('Количество порций'));
+    assert.equal(await page.locator('#favorite-form [name=eaten_at]').inputValue(), originalTime);
+    // Reload opens today, whereas this draft belongs to yesterday.
+    const countBeforeRetry = await page.evaluate(async day => {
+      const response = await fetch(`/api/diary?day=${day}`, {headers:{Authorization:`tma ${Telegram.WebApp.initData}`}});
+      if (!response.ok) throw new Error('Could not read the draft day');
+      return (await response.json()).stats.entry_count;
+    }, originalTime.slice(0, 10));
+    await page.unroute('**/api/entries');
+    const replayed = page.waitForResponse(response => response.url().endsWith('/api/entries') && response.request().method() === 'POST');
+    await page.evaluate(() => Telegram.WebApp.MainButton.click());
+    const replay = await replayed;
+    assert.equal(replay.request().headers()['idempotency-key'], originalKey);
+    assert.equal((await replay.json()).entry_id, committedFavorite.entry_id);
+    await page.locator('#favorites-dialog').waitFor({state:'hidden'});
+    await page.waitForFunction(() => document.getElementById('entries').getAttribute('aria-busy') === 'false');
+    assert.equal(await page.locator('#entries .entry').count(), countBeforeRetry);
+    assert.ok(await page.locator('#drafts').isHidden());
     assert.deepEqual(errors, []);
     console.log('Mobile flow, retry, draft, edit, undo and Telegram theme: OK');
   } finally { await browser.close(); }

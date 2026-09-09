@@ -171,7 +171,7 @@ function renderMacroSplit(partial) {
   const energy = {protein: 4, fat: 9, carbs: 4};
   const values = Object.entries(energy).map(([key, factor]) => state.stats[key] * factor);
   const total = values.reduce((sum, value) => sum + value, 0);
-  $("macro-split").hidden = partial || values.some(value => !Number.isFinite(value)) || !(total > 0);
+  $("macro-split").hidden = partial || Object.keys(energy).some(key => state.stats[key] == null) || values.some(value => !Number.isFinite(value)) || !(total > 0);
   if ($("macro-split").hidden) return;
   [...$("macro-split").children].forEach((bar, index) => { bar.style.width = `${values[index] / total * 100}%`; });
 }
@@ -359,7 +359,7 @@ function submit(id, handler) {
     buttons.forEach((button) => { button.disabled = true; });
     const errorBox = form.querySelector(".form-error");
     if (errorBox) errorBox.textContent = "";
-    saveDraft(form);
+    saveDraft(form, true);
     const values = new FormData(form);
     const fields = [...form.querySelectorAll("input,select")].map(field => [field, field.disabled]);
     fields.forEach(([field]) => { field.disabled = true; });
@@ -487,7 +487,19 @@ submit("food-form", async (form) => {
   await added("food-dialog", data.eaten_at.slice(0, 10));
 });
 submit("goal-form", async (form) => { await api("profile", "PUT", {goal: form.get("goal") === "" ? null : Number(form.get("goal"))}); $("goal-dialog").close(); await loadDiary(state.day); });
-submit("favorite-form", async (form) => { await api("entries", "POST", {favorite_id: selectedFavorite.favorite_id, amount: Number(form.get("amount")), eaten_at: form.get("eaten_at")}); await added("favorites-dialog", form.get("eaten_at").slice(0, 10)); });
+submit("favorite-form", async (form) => { await api("entries", "POST", {favorite_id: selectedFavorite.favorite_id, amount: Number(form.get("amount")), eaten_at: form.get("eaten_at"), favorite_version: selectedFavorite.version}); await added("favorites-dialog", form.get("eaten_at").slice(0, 10)); });
+function resetFavorite(favorite) {
+  selectedFavorite = favorite;
+  const form = $("favorite-form");
+  form.hidden = false;
+  form.elements.eaten_at.value = defaultTime();
+  form.elements.eaten_at.min = state.earliest_entry_time;
+  form.elements.eaten_at.max = currentLocalTime();
+  const serving = favorite.unit === "serving";
+  $("favorite-amount-label").firstChild.textContent = serving ? "Количество порций" : "Съедено, г";
+  form.elements.amount.value = serving ? "1" : "100";
+  form.elements.amount.max = serving ? "1000" : "100000";
+}
 async function loadFavorites(append = false) {
   const generation = ++favoriteGeneration;
   const query = $("favorite-search").value.trim();
@@ -502,17 +514,9 @@ async function loadFavorites(append = false) {
   for (const favorite of page.items) {
     const unit = favorite.unit === "serving" ? "порцию" : "100 г";
     const button = action(`${favorite.name} · ${fmt(favorite.calories_per_100g)} ккал на ${unit}`, () => {
-      selectedFavorite = favorite;
+      resetFavorite(favorite);
       $("favorites").querySelectorAll("button").forEach((item) => item.setAttribute("aria-pressed", String(item === button)));
-      $("favorite-form").hidden = false;
-      $("favorite-form").elements.eaten_at.value = defaultTime();
-      $("favorite-form").elements.eaten_at.min = state.earliest_entry_time;
-      $("favorite-form").elements.eaten_at.max = currentLocalTime();
-      const input = $("favorite-form").elements.amount;
-      $("favorite-amount-label").firstChild.textContent = favorite.unit === "serving" ? "Количество порций" : "Съедено, г";
-      input.value = favorite.unit === "serving" ? "1" : "100";
-      input.max = favorite.unit === "serving" ? "1000" : "100000";
-      input.focus();
+      $("favorite-form").elements.amount.focus();
       baselines.set($("favorite-form"), formValues($("favorite-form")));
       syncTelegram();
     }, "");
@@ -659,8 +663,8 @@ function clearDraft(id) {
   renderDrafts();
 }
 const draftNames = {"food-form": "Еда", "favorite-form": "Избранное", "weight-form": "Вес"};
-function saveDraft(form) {
-  if (!storageUser || !draftNames[form.id] || !dirty(form)) return;
+function saveDraft(form, force = false) {
+  if (!storageUser || !draftNames[form.id] || (!force && !dirty(form))) return;
   drafts[form.id] = {values: JSON.parse(formValues(form)), editingEntry, foodTemplate, selectedFavorite, editingWeight, timezone: state.timezone};
   saveStorage(`kcalorie-drafts-${storageUser}`, drafts);
   renderDrafts();
@@ -683,7 +687,7 @@ function renderDrafts() {
           $("weight-cancel").hidden = !editingWeight;
           loadWeights();
         }
-        if (id === "favorite-form") { selectedFavorite = draft.selectedFavorite; $("favorite-form").hidden = false; $("favorites").replaceChildren(node("p", selectedFavorite.name)); $("favorites-more").hidden = true; }
+        if (id === "favorite-form") { resetFavorite(draft.selectedFavorite); $("favorites").replaceChildren(node("p", selectedFavorite.name)); $("favorites-more").hidden = true; }
         openDialog($(id).closest("dialog").id);
       }
       const form = $(id);

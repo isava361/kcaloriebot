@@ -12,6 +12,10 @@ partial/unknown macro indicators, and these workflows:
   without changing their time.
 - Enter nutrition per 100 g or per serving, repeat recent food, or search
   favorites.
+- Adding from the favorites list checks the selected favorite's version. If its
+  unit or nutrition changed in the bot, select it again before saving. Older
+  favorite drafts without a version also require reselection. Already committed
+  requests still replay their original result when retried.
 - While adding food, typing a name shows up to five favorites below the field.
   Search matches every word fragment in any order, ignoring case:
   `кур бед` finds `Бедро куриное`. Selecting a suggestion fills nutrition and
@@ -21,6 +25,8 @@ partial/unknown macro indicators, and these workflows:
   another window produce a conflict instead of overwriting newer data.
 - Delete a food entry and undo it using the toast for 15 minutes. The undo
   button lasts until dismissed, expired, or the page is reloaded.
+- Food, favorite and weight forms save a local draft before submission, including
+  unchanged default values, so a lost response can be retried after a reload.
 - View 7 days ending on the selected date, or its calendar month (through today
   for the current month), with daily calorie bars. Missing days remain missing;
   the calorie average uses only days with entries. Tap a bar to open that day.

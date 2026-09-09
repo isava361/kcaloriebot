@@ -11,6 +11,7 @@ from datetime import date, datetime, timedelta
 
 from .database import Database
 from .domain import (
+    FavoriteFood,
     FoodEntry,
     NotFound,
     NutritionTotals,
@@ -57,6 +58,12 @@ def entry_data(entry: FoodEntry) -> dict:
 
 def weight_data(record) -> dict:
     result = asdict(record)
+    result["version"] = hashlib.sha256(json_text(result).encode()).hexdigest()
+    return result
+
+
+def favorite_data(favorite: FavoriteFood) -> dict:
+    result = asdict(favorite)
     result["version"] = hashlib.sha256(json_text(result).encode()).hexdigest()
     return result
 
@@ -385,6 +392,10 @@ class WebStore(Database):
             if row is None:
                 raise NotFound("Избранное не найдено.")
             favorite = self._row_to_favorite(row)
+            if data.get("favorite_version") != favorite_data(favorite)["version"]:
+                raise StateConflict(
+                    "Избранное изменилось. Найдите и выберите продукт заново."
+                )
             values = {
                 key: getattr(favorite, key + "_per_100g")
                 for key in ("calories", "protein", "fat", "carbs")
