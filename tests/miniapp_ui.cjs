@@ -105,6 +105,41 @@ const {chromium, webkit} = require(process.env.PLAYWRIGHT_MODULE_PATH || path.re
     const box=await page.locator('#food-dialog').boundingBox();
     assert.ok(box.y >= 0 && box.y + box.height <= 361, JSON.stringify(box));
     assert.ok(await page.locator('#food-dialog').evaluate(el=>el.scrollWidth<=el.clientWidth));
+    // With a short keyboard-sized viewport, gestures may scroll the form but
+    // must not pan the page sideways, on the backdrop, or past either edge.
+    const gestures = await page.locator('#food-dialog').evaluate(sheet => {
+      const field = sheet.querySelector('[name=name]');
+      field.focus({preventScroll:true});
+      function drag(target, x, y, dx, dy) {
+        function send(type, point) {
+          const event = new Event(type, {bubbles:true, cancelable:true});
+          Object.defineProperty(event, 'touches', {value:point ? [point] : []});
+          target.dispatchEvent(event);
+          return event.defaultPrevented;
+        }
+        send('touchstart', {clientX:x, clientY:y});
+        const blocked = send('touchmove', {clientX:x+dx, clientY:y+dy});
+        send('touchend');
+        return blocked;
+      }
+      const box = sheet.getBoundingClientRect();
+      const x = box.left+box.width/2, y = box.top+box.height/2;
+      sheet.scrollTop = 0;
+      const top = drag(field,x,y,0,30);
+      const down = drag(field,x,y,0,-30);
+      sheet.scrollTop = (sheet.scrollHeight-sheet.clientHeight)/2;
+      const middleUp = drag(field,x,y,0,30);
+      const middleDown = drag(field,x,y,0,-30);
+      const right = drag(field,x,y,30,0);
+      const left = drag(field,x,y,-30,0);
+      sheet.scrollTop = sheet.scrollHeight;
+      const bottom = drag(field,x,y,0,-30);
+      const backdrop = drag(sheet,box.left+2,box.top-5,0,-30);
+      sheet.scrollTop = 0;
+      field.blur();
+      return {top,down,middleUp,middleDown,right,left,bottom,backdrop};
+    });
+    assert.deepEqual(gestures, {top:true,down:false,middleUp:false,middleDown:false,right:true,left:true,bottom:true,backdrop:true});
     // The page behind an open sheet is frozen, so the keyboard cannot scroll it.
     assert.equal(await page.evaluate(() => getComputedStyle(document.documentElement).overflow), 'hidden');
     await page.locator('#food-dialog .close').click();

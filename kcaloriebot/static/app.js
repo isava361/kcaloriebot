@@ -275,6 +275,42 @@ async function loadDiary(day = "", append = false) {
   }
 }
 let lockedPage = null;
+// iOS can pan its visual viewport despite overflow:hidden when the keyboard is
+// open. Only let a touch scroll content inside the sheet, within its bounds.
+let sheetTouch = null;
+document.addEventListener("touchstart", event => {
+  sheetTouch = null;
+  if (!lockedPage || event.touches.length !== 1) return;
+  const touch = event.touches[0];
+  const sheet = document.querySelector("dialog[open]");
+  const box = sheet?.getBoundingClientRect();
+  sheetTouch = {
+    x: touch.clientX, y: touch.clientY, target: event.target,
+    sheet: box && touch.clientX >= box.left && touch.clientX <= box.right
+      && touch.clientY >= box.top && touch.clientY <= box.bottom ? sheet : null,
+  };
+}, {passive: true});
+document.addEventListener("touchmove", event => {
+  if (!lockedPage || !sheetTouch || event.touches.length !== 1) return;
+  const touch = event.touches[0];
+  const dx = touch.clientX - sheetTouch.x;
+  const dy = touch.clientY - sheetTouch.y;
+  sheetTouch.x = touch.clientX;
+  sheetTouch.y = touch.clientY;
+  if (!dx && !dy) return;
+  const sheet = sheetTouch.sheet;
+  if (sheet?.open && Math.abs(dy) > Math.abs(dx)) {
+    for (let el = sheetTouch.target; el instanceof Element && sheet.contains(el); el = el.parentElement) {
+      if (!/^(auto|scroll)$/.test(getComputedStyle(el).overflowY)) continue;
+      const remaining = el.scrollHeight - el.clientHeight;
+      if (remaining > 1 && (dy < 0 ? el.scrollTop < remaining - 1 : el.scrollTop > 0)) return;
+    }
+  }
+  if (event.cancelable) event.preventDefault();
+}, {passive: false});
+for (const type of ["touchend", "touchcancel"]) {
+  document.addEventListener(type, () => { sheetTouch = null; }, {passive: true});
+}
 function setPageLocked(locked) {
   const root = document.documentElement;
   if (locked && !lockedPage) {

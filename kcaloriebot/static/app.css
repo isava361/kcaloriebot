@@ -49,13 +49,16 @@ body{
 /* The page must not move behind an open sheet, keyboard or not. The lock has to
    sit on the root element: overflow on body does not reach the viewport here. */
 :root.locked{
-  overflow:hidden
+  height:100%;
+  overflow:hidden;
+  overscroll-behavior:none
 }
 :root.locked body{
   position:fixed;
   top:var(--locked-top);
   left:var(--locked-left);
   width:var(--locked-width);
+  height:100%;
   overflow:hidden
 }
 main{
@@ -453,8 +456,10 @@ dialog{
   max-width:540px;
   max-height:calc(var(--visible-height,100dvh) - var(--s5));
   margin:0 auto;
-  overflow:auto;
-  overscroll-behavior:contain;
+  overflow-x:hidden;
+  overflow-y:auto;
+  overscroll-behavior:none;
+  touch-action:pan-y;
   padding:var(--s5) var(--s4) calc(var(--s5) + env(safe-area-inset-bottom));
   border:0;
   border-radius:var(--r-lg) var(--r-lg) 0 0;
@@ -462,6 +467,7 @@ dialog{
   color:inherit
 }
 dialog::backdrop{
+  touch-action:none;
   background:#10251888;
   backdrop-filter:blur(3px)
 }
