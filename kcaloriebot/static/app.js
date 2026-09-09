@@ -274,10 +274,36 @@ async function loadDiary(day = "", append = false) {
     }
   }
 }
+let lockedPage = null;
+function setPageLocked(locked) {
+  const root = document.documentElement;
+  if (locked && !lockedPage) {
+    lockedPage = {x: window.scrollX, y: window.scrollY};
+    // overflow:hidden alone does not stop iOS from panning the background to
+    // reveal a focused field. Preserve its width too (including scrollbar gap).
+    root.style.setProperty("--locked-width", `${document.body.getBoundingClientRect().width}px`);
+    root.style.setProperty("--locked-top", `${-lockedPage.y}px`);
+    root.style.setProperty("--locked-left", `${-lockedPage.x}px`);
+    root.classList.add("locked");
+  } else if (!locked && lockedPage) {
+    const position = lockedPage;
+    lockedPage = null;
+    root.classList.remove("locked");
+    for (const name of ["--locked-width", "--locked-top", "--locked-left"]) root.style.removeProperty(name);
+    window.scrollTo({left: position.x, top: position.y, behavior: "instant"});
+  }
+}
 function openDialog(id) {
   const dialog = $(id);
   dialog.querySelectorAll(".form-error").forEach((el) => { el.textContent = ""; });
-  dialog.showModal();
+  // Pick a non-editable initial focus before showModal's native focusing steps.
+  // Blurring an input afterwards is too late to cancel an iOS keyboard/zoom.
+  const close = dialog.querySelector(".close");
+  if (close) close.autofocus = true;
+  setPageLocked(true);
+  try { dialog.showModal(); }
+  catch (error) { setPageLocked(Boolean(document.querySelector("dialog[open]"))); throw error; }
+  resizeViewport();
   dialog.querySelectorAll("form").forEach(form => baselines.set(form, formValues(form)));
   syncTelegram();
 }
@@ -597,7 +623,7 @@ async function closeDialog(dialog) {
 function syncTelegram() {
   const dialog = document.querySelector("dialog[open]");
   const form = activeForm();
-  document.documentElement.classList.toggle("locked", Boolean(dialog));
+  setPageLocked(Boolean(dialog));
   if (supports("6.1") && tg.BackButton?.isVisible !== Boolean(dialog)) {
     if (dialog) tg.BackButton?.show(); else tg.BackButton?.hide();
   }
@@ -645,9 +671,15 @@ function applyTheme() {
   }
 }
 function resizeViewport() {
-  const height = Math.min(window.visualViewport?.height || innerHeight, tg?.viewportStableHeight || innerHeight);
+  const view = window.visualViewport;
+  // A stable Telegram height lags behind keyboard/MainButton transitions.
+  // Use one coordinate system when VisualViewport is available.
+  const height = view?.height || tg?.viewportStableHeight || innerHeight;
+  const top = view?.offsetTop || 0;
+  const bottom = Math.max(0, document.documentElement.clientHeight - top - height);
   document.documentElement.style.setProperty("--visible-height", `${height}px`);
-  document.documentElement.style.setProperty("--visible-top", `${window.visualViewport?.offsetTop || 0}px`);
+  document.documentElement.style.setProperty("--visible-top", `${top}px`);
+  document.documentElement.style.setProperty("--keyboard-bottom", `${bottom}px`);
 }
 if (tg?.initData) {
   tg.onEvent?.("themeChanged", applyTheme);
@@ -656,6 +688,25 @@ if (tg?.initData) {
   tg.MainButton?.onClick(() => { const form = activeForm(); if (!form?.dataset.submitting) form?.requestSubmit(); });
   if (supports("7.7")) tg.disableVerticalSwipes?.();
 }
+/* Diagnostics for the iOS zoom report: tap the timezone line five times to make
+   it read the live visual viewport instead. scale > 1 means the browser really
+   is zooming; scale staying 1 means what moves is the layout. */
+let zoneTaps = 0;
+$("zone").addEventListener("click", () => {
+  if (++zoneTaps < 5) return;
+  const report = () => {
+    const view = window.visualViewport;
+    const sheet = document.querySelector("dialog[open]");
+    $("zone").textContent = `x${view?.scale.toFixed(2)} ${Math.round(view?.width)}×${Math.round(view?.height)}`
+      + ` top ${Math.round(view?.offsetTop)} · лист ${sheet ? Math.round(sheet.getBoundingClientRect().height) : "—"}`
+      + ` · ${document.activeElement?.name || document.activeElement?.tagName}`;
+  };
+  report();
+  for (const event of ["resize", "scroll"]) window.visualViewport?.addEventListener(event, report);
+  document.addEventListener("focusin", report);
+  document.addEventListener("focusout", report);
+  setInterval(report, 500);
+});
 window.visualViewport?.addEventListener("resize", resizeViewport);
 window.visualViewport?.addEventListener("scroll", resizeViewport);
 window.addEventListener("resize", resizeViewport);

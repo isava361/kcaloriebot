@@ -32,6 +32,9 @@
   color:var(--text);
   background:var(--page);
   color-scheme:light;
+  /* Keep WebKit's text autosizing stable when a sheet/keyboard changes height. */
+  -webkit-text-size-adjust:100%;
+  text-size-adjust:100%;
   /* Reserve the scrollbar so locking the page behind a sheet shifts nothing. */
   scrollbar-gutter:stable
 }
@@ -46,6 +49,13 @@ body{
 /* The page must not move behind an open sheet, keyboard or not. The lock has to
    sit on the root element: overflow on body does not reach the viewport here. */
 :root.locked{
+  overflow:hidden
+}
+:root.locked body{
+  position:fixed;
+  top:var(--locked-top);
+  left:var(--locked-left);
+  width:var(--locked-width);
   overflow:hidden
 }
 main{
@@ -77,7 +87,7 @@ h2{
   box-shadow:var(--shadow);
   margin-bottom:var(--s3)
 }
-button,input,select{
+button,input,select,textarea{
   font:inherit
 }
 button{
@@ -438,7 +448,7 @@ dialog{
   top:auto;
   left:0;
   right:0;
-  bottom:calc(100dvh - var(--visible-top,0px) - var(--visible-height,100dvh));
+  bottom:var(--keyboard-bottom,0px);
   width:100%;
   max-width:540px;
   max-height:calc(var(--visible-height,100dvh) - var(--s5));
@@ -471,9 +481,11 @@ label{
   margin:var(--s4) 0
 }
 /* 16px keeps mobile Safari from zooming into the field on focus. */
-input,select{
+input,select,textarea{
   display:block;
   width:100%;
+  min-width:0;
+  max-width:100%;
   margin-top:6px;
   border:1px solid var(--border);
   border-radius:var(--r-sm);

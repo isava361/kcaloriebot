@@ -1,16 +1,19 @@
 const assert = require('node:assert/strict');
 const path = require('node:path');
-const {chromium} = require(process.env.PLAYWRIGHT_MODULE_PATH || path.resolve('data/ui-check/node_modules/playwright'));
+const {chromium, webkit} = require(process.env.PLAYWRIGHT_MODULE_PATH || path.resolve('data/ui-check/node_modules/playwright'));
 
 (async () => {
-  const browser = await chromium.launch({headless: true, ...(process.env.CHROME_PATH ? {executablePath: process.env.CHROME_PATH} : {})});
+  const safari = process.env.MINIAPP_BROWSER === 'webkit';
+  const browser = await (safari ? webkit : chromium).launch({headless: true, ...(!safari && process.env.CHROME_PATH ? {executablePath: process.env.CHROME_PATH} : {})});
   try {
-    const page = await browser.newPage({viewport: {width: 320, height: 740}, colorScheme: 'light'});
+    const page = await browser.newPage({viewport: {width: 320, height: 740}, colorScheme: 'light', isMobile: safari, hasTouch: safari});
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));
     await page.route('https://telegram.org/**', route => route.fulfill({contentType: 'text/javascript', body: `
       const events = {};
-      const main = {setText(){return this},show(){return this},hide(){},disable(){},enable(){},showProgress(){},hideProgress(){},onClick(fn){this.click=fn}};
+      const main = {isVisible:false,isActive:true,isProgressVisible:false,showCount:0,
+        setText(text){this.text=text;return this},show(){this.isVisible=true;this.showCount++;return this},hide(){this.isVisible=false},
+        disable(){this.isActive=false},enable(){this.isActive=true},showProgress(){this.isProgressVisible=true},hideProgress(){this.isProgressVisible=false},onClick(fn){this.click=fn}};
       window.Telegram = {WebApp: {initData: ${JSON.stringify(process.argv[3])}, colorScheme:'dark', themeParams:{},
         isVersionAtLeast:()=>true, ready(){},expand(){},disableVerticalSwipes(){},setHeaderColor(){},setBackgroundColor(){},
         onEvent(name,fn){events[name]=fn}, emit(name){events[name]?.()},
@@ -32,9 +35,16 @@ const {chromium} = require(process.env.PLAYWRIGHT_MODULE_PATH || path.resolve('d
     assert.equal(await page.locator('#food-form [name=eaten_at]').inputValue(), day+'T12:00');
     // Telegram's MainButton is the only submit control while the sheet is open.
     assert.ok(await page.locator('#food-save').isHidden());
+    // Opening a sheet must not focus a field: iOS zooms to the focused control.
+    assert.ok(await page.evaluate(() => !['INPUT','SELECT','TEXTAREA'].includes(document.activeElement.tagName)));
+    assert.ok(await page.locator('#food-dialog .close').evaluate(el => el === document.activeElement));
+    const mainShows = await page.evaluate(() => Telegram.WebApp.MainButton.showCount);
+    const inputScale = await page.evaluate(() => visualViewport.scale);
     await page.locator('#food-form [name=name]').fill('овсянка');
     await page.locator('#food-form [name=calories]').fill('370');
     await page.locator('#food-form [name=grams]').fill('60');
+    assert.equal(await page.evaluate(() => Telegram.WebApp.MainButton.showCount), mainShows);
+    assert.equal(await page.evaluate(() => visualViewport.scale), inputScale);
     await page.evaluate(() => Telegram.WebApp.BackButton.click());
     await page.locator('#food-dialog').waitFor({state:'hidden'});
     await page.reload();
@@ -75,7 +85,20 @@ const {chromium} = require(process.env.PLAYWRIGHT_MODULE_PATH || path.resolve('d
     await page.locator('#favorites button').click();
     assert.equal(await page.locator('#favorite-form [name=eaten_at]').inputValue(),day+'T12:00');
     await page.locator('#favorites-dialog .close').click();
+    await page.locator('#favorites-dialog').waitFor({state:'hidden'});
+    // Open from a scrolled diary. The fixed background must retain its geometry.
+    await page.locator('#add-button').scrollIntoViewIfNeeded();
+    const background = await page.locator('#summary').boundingBox();
+    const scrollBefore = await page.evaluate(() => scrollY);
     await page.locator('#add-button').click();
+    const backgroundLocked = await page.locator('#summary').boundingBox();
+    assert.ok(Math.abs(background.width-backgroundLocked.width)<1);
+    assert.ok(Math.abs(background.y-backgroundLocked.y)<1);
+    assert.equal(await page.evaluate(() => getComputedStyle(document.body).position), 'fixed');
+    // Telegram's previous stable height must not override the current viewport.
+    await page.evaluate(() => {Telegram.WebApp.viewportStableHeight=200;Telegram.WebApp.emit('viewportChanged')});
+    assert.equal(await page.evaluate(() => parseFloat(document.documentElement.style.getPropertyValue('--visible-height'))), await page.evaluate(() => visualViewport.height));
+    await page.evaluate(() => {delete Telegram.WebApp.viewportStableHeight;Telegram.WebApp.emit('viewportChanged')});
     await page.setViewportSize({width:320,height:360});
     await page.waitForFunction(() => getComputedStyle(document.documentElement).getPropertyValue('--visible-height').trim() === '360px');
     await page.locator('#food-dialog').evaluate(el => Promise.all(el.getAnimations().map(animation => animation.finished)));
@@ -87,7 +110,16 @@ const {chromium} = require(process.env.PLAYWRIGHT_MODULE_PATH || path.resolve('d
     await page.locator('#food-dialog .close').click();
     await page.locator('#food-dialog').waitFor({state:'hidden'});
     assert.equal(await page.evaluate(() => getComputedStyle(document.documentElement).overflow), 'visible');
+    assert.equal(await page.evaluate(() => getComputedStyle(document.body).position), 'static');
     await page.setViewportSize({width:320,height:740});
+    // The shorter viewport may clamp scroll, but opening/closing again must not drift.
+    await page.evaluate(y => scrollTo(0, y), scrollBefore);
+    await page.locator('#add-button').scrollIntoViewIfNeeded();
+    const restoredScroll = await page.evaluate(() => scrollY);
+    await page.locator('#add-button').click();
+    await page.locator('#food-dialog .close').click();
+    await page.locator('#food-dialog').waitFor({state:'hidden'});
+    assert.equal(await page.evaluate(() => scrollY), restoredScroll);
     if(process.env.MINIAPP_SCREENSHOTS) await page.screenshot({path:path.join(process.env.MINIAPP_SCREENSHOTS,'miniapp-updated-dark.png'),fullPage:true});
     await page.evaluate(() => {Telegram.WebApp.colorScheme='light';Telegram.WebApp.emit('themeChanged')});
     assert.equal(await page.evaluate(() => getComputedStyle(document.documentElement).colorScheme), 'light');

@@ -71,6 +71,22 @@ set `CHROME_PATH` to an installed Chrome executable, or `PLAYWRIGHT_MODULE_PATH`
 to another Playwright installation. These checks simulate Telegram integration;
 also verify keyboard, back gestures and theme switching on a real phone.
 
+To run the same flow in WebKit with mobile viewport emulation:
+
+```bash
+data/ui-check/node_modules/.bin/playwright install webkit
+RUN_MINIAPP_UI=1 MINIAPP_BROWSER=webkit python -m unittest tests.test_miniapp_ui -v
+```
+
+On PowerShell set `$env:MINIAPP_BROWSER='webkit'` and `$env:RUN_MINIAPP_UI='1'`
+before running the test. The flow checks initial focus, background width/scroll
+preservation, and viewport resizing with a stale Telegram height. Desktop WebKit
+does not reproduce the native iOS keyboard; finish validation in Telegram on an
+iPhone: open food entry from a scrolled diary, type in name/amount/macros, dismiss
+the keyboard and close the form. The background should keep its size and return
+to its previous scroll position. Input text stays at least 16px, WebKit text
+autosizing is fixed at 100%, and opening a dialog focuses its close button.
+
 <a id="deploy-food-server"></a>
 
 ## Деплой изменений на food.ivansavelyev.ru
