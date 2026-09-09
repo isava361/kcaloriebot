@@ -179,8 +179,8 @@ sudo journalctl -u kcalculatorbot -n 100 --no-pager
 
 ### Using the update script
 
-`scripts/update.sh` performs the whole procedure below and rolls back
-automatically if any step fails. Install it once, outside the repository so
+`scripts/update.sh` performs the procedure below and attempts rollback on failure.
+Install it outside the repository so
 that updating the checkout cannot replace the script while it is running:
 
 ```bash
@@ -194,21 +194,37 @@ Afterwards each update is one command:
 sudo kcaloriebot-update
 ```
 
-It refuses to run if the checkout has local changes or if the branch has
-diverged from origin, stops the service before taking the backup so a rollback
-cannot lose entries, verifies the backup with `PRAGMA integrity_check`, runs
-the test suite before starting the service, and confirms the service stayed
-running afterwards. If anything fails after the service was stopped, it
-restores the previous commit and the backup and starts the service again, so a
-failed update leaves a working bot. Useful flags:
+It locks against concurrent updates and refuses dirty or diverged checkouts.
+When the web unit is installed, it explicitly stops **both** services before
+backing up SQLite, installs `.[miniapp]`, runs tests and migrates the database
+before starting either writer. It checks the schema against the installed
+release, verifies database integrity, and waits for three consecutive healthy
+service checks (including HTTP 200 from `127.0.0.1:18081` for the Mini App).
+
+Failure handling stops both services before rollback. Unverified backups are
+never restored. If code, dependencies or database cannot be restored, services
+remain stopped for manual recovery. A database snapshot taken after a failed
+migration/startup is retained as `failed-before-*.db`; writes received during
+that startup are preserved there, not in the restored live database. Useful flags:
 
 ```bash
-sudo kcaloriebot-update --check        # report pending commits, change nothing
+sudo kcaloriebot-update --check        # fetch/report; do not deploy or stop services
+sudo kcaloriebot-update --force        # reinstall/restart even if HEAD is current
 sudo kcaloriebot-update --no-rollback  # leave a failure in place to inspect
 ```
 
-The last ten backups are kept in `/var/backups/kcaloriebot`; older ones are
-pruned. Reinstall the script after an update that changes it.
+Backups are retained in `/var/backups/kcaloriebot` without automatic pruning.
+Reinstall the script after an update that changes it. Defaults match the server
+documented in [miniapp.md](docs/miniapp.md#deploy-food-server); no preceding shell
+variable setup is needed. For other installations, override `KCALORIE_APP_DIR`,
+`KCALORIE_PYTHON`, `KCALORIE_DATABASE`, `KCALORIE_BACKUPS`, `KCALORIE_BOT_SERVICE`,
+`KCALORIE_WEB_SERVICE`, `KCALORIE_RUN_AS`, `KCALORIE_WEB_URL` or `KCALORIE_LOCK`
+with `sudo env NAME=value kcaloriebot-update`. Use the same service account for
+the checkout, virtualenv and DB, as in the installation instructions.
+
+Run isolated updater failure tests with `python -m unittest tests.test_update_script`.
+They execute Bash against fake server commands and temporary files, never the
+live services or database.
 
 ### Updating by hand
 
