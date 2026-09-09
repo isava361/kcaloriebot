@@ -861,6 +861,30 @@ class SchemaTests(DatabaseTestCase):
         with self.assertRaises(ValidationError):
             self.database.add_favorite(1, "Rice", 100, math.nan, None, None, 1)
 
+    def test_v5_upgrade_preserves_entries_weights_and_chat_session(self):
+        self.database.set_timezone(1, "Europe/Moscow")
+        entry = self.database.add_entry(1, 1700000100, "Rice", 100, 40)
+        weight = self.database.add_weight(1, 1700000100, 80)
+        session = self.database.start_session(1, 1, SessionState.WAIT_FOOD_NAME)
+        with sqlite3.connect(self.database.path) as connection:
+            connection.executescript(
+                "DROP TABLE web_operations; DROP TABLE web_deleted_entries; PRAGMA user_version=5;"
+            )
+        self.database.initialize()
+        self.database.initialize()
+        self.assertEqual(self.database.get_entry(1, entry.entry_id), entry)
+        self.assertEqual(self.database.latest_weight(1), weight)
+        self.assertEqual(self.database.get_session(1, 1), session)
+        with sqlite3.connect(self.database.path) as connection:
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 6)
+            self.assertEqual(
+                connection.execute("PRAGMA integrity_check").fetchone()[0], "ok"
+            )
+            self.assertEqual(
+                connection.execute("SELECT count(*) FROM web_operations").fetchone()[0],
+                0,
+            )
+
     def test_unversioned_legacy_schema_is_rejected(self) -> None:
         legacy_path = Path(self.temporary_directory.name) / "legacy.db"
         with sqlite3.connect(legacy_path) as connection:

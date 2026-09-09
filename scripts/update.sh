@@ -22,7 +22,7 @@ BACKUP_DIR=/var/backups/kcaloriebot
 SERVICE=kcalculatorbot
 RUN_AS=kcaloriebot
 KEEP_BACKUPS=10
-EXPECTED_SCHEMA=4
+EXPECTED_SCHEMA=6
 
 CHECK_ONLY=0
 ROLLBACK=1

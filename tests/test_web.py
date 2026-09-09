@@ -1,4 +1,5 @@
 import hashlib
+import asyncio
 import hmac
 import importlib.util
 import json
@@ -6,7 +7,8 @@ import logging
 import tempfile
 import time
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+from uuid import uuid4
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -19,6 +21,8 @@ from aiohttp.test_utils import TestClient, TestServer
 from kcaloriebot.config import Settings
 from kcaloriebot.database import Database
 from kcaloriebot.domain import SessionState
+from kcaloriebot.domain import local_datetime
+from kcaloriebot.web_store import entry_data
 from kcaloriebot.web import authenticate, build_web_app
 
 TOKEN = "test-only-token"
@@ -58,6 +62,20 @@ class AuthTests(unittest.TestCase):
 
 
 class WebTests(unittest.IsolatedAsyncioTestCase):
+    async def test_static_revalidation_and_private_api(self):
+        for path in ("/", "/static/app.js", "/static/app.css"):
+            response = await self.client.get(path)
+            self.assertEqual(response.headers["Cache-Control"], "no-cache")
+            etag = response.headers["ETag"]
+            self.assertTrue(await response.read())
+            response = await self.client.get(
+                path, headers={"If-None-Match": "W/" + etag}
+            )
+            self.assertEqual(response.status, 304)
+            self.assertEqual(await response.read(), b"")
+        response = await self.request("GET", "/api/diary")
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+
     async def asyncSetUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
@@ -69,7 +87,31 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         self.headers = {"Authorization": "tma " + signed()}
 
     async def request(self, method, path, **kwargs):
-        return await self.client.request(method, path, headers=self.headers, **kwargs)
+        headers = {
+            **self.headers,
+            "Idempotency-Key": str(uuid4()),
+            **kwargs.pop("headers", {}),
+        }
+        if (
+            method == "POST"
+            and path == "/api/entries"
+            and isinstance(kwargs.get("json"), dict)
+        ):
+            zone = self.store.get_timezone(123) or "UTC"
+            kwargs["json"] = {
+                "eaten_at": local_datetime(int(time.time()), zone).strftime(
+                    "%Y-%m-%dT%H:%M"
+                ),
+                **kwargs["json"],
+            }
+        if (
+            method == "DELETE"
+            and path.startswith("/api/entries/")
+            and "json" not in kwargs
+        ):
+            entry = self.store.get_entry(123, int(path.rsplit("/", 1)[1]))
+            kwargs["json"] = {"version": entry_data(entry)["version"]} if entry else {}
+        return await self.client.request(method, path, headers=headers, **kwargs)
 
     async def test_static_public_but_all_api_routes_require_auth(self):
         response = await self.client.get("/")
@@ -207,4 +249,284 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         nutrition = (await response.json())["nutrition"]
         self.assertEqual(nutrition["calories"], 500)
         self.assertEqual(nutrition["servings"], 0.5)
+        self.assertEqual(self.store.get_session(123, 123), session)
+
+    async def test_concurrent_retries_share_one_committed_entry_and_survive_restart(
+        self,
+    ):
+        self.store.set_timezone(123, "UTC")
+        key = str(uuid4())
+        data = {
+            "name": "Retry",
+            "calories": 100,
+            "grams": 50,
+            "eaten_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M"),
+        }
+        responses = await asyncio.gather(
+            *[
+                self.request(
+                    "POST", "/api/entries", json=data, headers={"Idempotency-Key": key}
+                )
+                for _ in range(5)
+            ]
+        )
+        results = [await response.json() for response in responses]
+        self.assertTrue(all(response.status == 201 for response in responses))
+        self.assertTrue(all(result == results[0] for result in results))
+        self.assertEqual(self.store.stats(123, 0, int(time.time()) + 10).entry_count, 1)
+        from kcaloriebot.web_store import WebStore
+
+        self.assertEqual(
+            WebStore(self.store.path).mutate(123, key, "entry.create", data), results[0]
+        )
+        changed = await self.request(
+            "POST",
+            "/api/entries",
+            json={**data, "grams": 200},
+            headers={"Idempotency-Key": key},
+        )
+        self.assertEqual(changed.status, 409)
+
+    async def test_backdating_edit_conflict_and_undo_keep_chat_session(self):
+        self.store.set_timezone(123, "Europe/Moscow")
+        session = self.store.start_session(123, 123, SessionState.WAIT_FOOD_NAME)
+        yesterday = (
+            local_datetime(int(time.time()), "Europe/Moscow") - timedelta(days=1)
+        ).strftime("%Y-%m-%d")
+        data = {
+            "name": "Dinner",
+            "calories": 200,
+            "grams": 150,
+            "eaten_at": yesterday + "T12:00",
+        }
+        response = await self.request("POST", "/api/entries", json=data)
+        entry = await response.json()
+        response = await self.request("GET", "/api/diary?day=" + yesterday)
+        self.assertEqual((await response.json())["stats"]["calories"], 300)
+        path = f"/api/entries/{entry['entry_id']}"
+        update = {**data, "name": "Lunch", "grams": 100, "version": entry["version"]}
+        response = await self.request("PATCH", path, json=update)
+        self.assertEqual(response.status, 200)
+        edited = await response.json()
+        self.assertEqual(edited["nutrition"]["calories"], 200)
+        response = await self.request("PATCH", path, json={**update, "grams": 300})
+        self.assertEqual(response.status, 409)
+        response = await self.request(
+            "DELETE", path, json={"version": edited["version"]}
+        )
+        self.assertEqual(response.status, 200)
+        self.assertIsNone(self.store.get_entry(123, entry["entry_id"]))
+        response = await self.request("POST", path + "/restore", json={})
+        self.assertEqual(response.status, 200)
+        self.assertEqual((await response.json())["nutrition"]["calories"], 200)
+        self.assertEqual(self.store.get_session(123, 123), session)
+
+    async def test_time_validation_and_missing_key(self):
+        self.store.set_timezone(123, "America/New_York")
+        for timestamp in (
+            None,
+            "bad",
+            "2026-03-08T02:30",
+            "2999-01-01T12:00",
+            "2020-01-01T12:00",
+        ):
+            response = await self.request(
+                "POST",
+                "/api/entries",
+                json={
+                    "name": "Food",
+                    "calories": 100,
+                    "grams": 100,
+                    "eaten_at": timestamp,
+                },
+            )
+            self.assertEqual(response.status, 400)
+        response = await self.client.post(
+            "/api/entries", headers=self.headers, json={"name": "Food"}
+        )
+        self.assertEqual(response.status, 400)
+
+    async def test_edit_unnamed_and_serving_entries(self):
+        self.store.set_timezone(123, "UTC")
+        now = int(time.time())
+        timestamp = local_datetime(now, "UTC").strftime("%Y-%m-%dT%H:%M")
+        unnamed = self.store.add_entry(123, now, None, 100, 100)
+        response = await self.request(
+            "PATCH",
+            f"/api/entries/{unnamed.entry_id}",
+            json={
+                "name": "",
+                "eaten_at": timestamp,
+                "calories": 100,
+                "grams": 50,
+                "version": entry_data(self.store.get_entry(123, unnamed.entry_id))[
+                    "version"
+                ],
+            },
+        )
+        self.assertEqual(response.status, 200)
+        self.assertIsNone((await response.json())["name"])
+        response = await self.request(
+            "POST",
+            "/api/entries",
+            json={
+                "name": "Soup",
+                "unit": "serving",
+                "amount": 0.5,
+                "serving_grams": 400,
+                "calories": 200,
+                "protein": 10,
+            },
+        )
+        serving = await response.json()
+        response = await self.request(
+            "PATCH",
+            f"/api/entries/{serving['entry_id']}",
+            json={
+                "name": "Soup",
+                "eaten_at": timestamp,
+                "amount": 2,
+                "calories": 200,
+                "protein": 10,
+                "version": serving["version"],
+            },
+        )
+        self.assertEqual(response.status, 200)
+        totals = (await response.json())["nutrition"]
+        self.assertEqual(totals["grams"], 800)
+        self.assertEqual(totals["calories"], 400)
+        self.assertEqual(totals["protein"], 20)
+        self.assertIsNone(totals["fat"])
+
+    async def test_other_user_cannot_edit_or_restore(self):
+        self.store.set_timezone(123, "UTC")
+        self.store.set_timezone(999, "UTC")
+        entry = self.store.add_entry(999, int(time.time()), "Private", 100, 100)
+        path = f"/api/entries/{entry.entry_id}"
+        for method, suffix in (("GET", ""), ("PATCH", ""), ("POST", "/restore")):
+            response = await self.request(method, path + suffix, json={})
+            self.assertEqual(response.status, 404)
+
+    async def test_quick_add_recent_and_literal_favorite_search(self):
+        self.store.set_timezone(123, "UTC")
+        self.store.set_timezone(999, "UTC")
+        self.store.add_entry(999, int(time.time()), "Private", 100, 100)
+        yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime(
+            "%Y-%m-%d"
+        )
+        response = await self.request(
+            "POST",
+            "/api/entries",
+            json={
+                "quick_add": "овсянка 370 60 б12 ж6 у62",
+                "eaten_at": yesterday + "T12:00",
+            },
+        )
+        self.assertEqual(response.status, 201, await response.text())
+        self.assertEqual((await response.json())["nutrition"]["calories"], 222)
+        response = await self.request("GET", "/api/recent")
+        items = (await response.json())["items"]
+        self.assertEqual([item["name"] for item in items], ["овсянка"])
+        self.assertEqual(items[0]["values"]["protein"], 12)
+        response = await self.request("POST", "/api/entries", json={"quick_add": "???"})
+        self.assertEqual(response.status, 400)
+        for index in range(32):
+            self.store.add_favorite(123, f"Йогурт 5%_{index}", 100, None, None, None)
+        self.store.add_favorite(123, "Йогурт 50", 100, None, None, None)
+        self.store.add_favorite(999, "Йогурт 5%_private", 100, None, None, None)
+        response = await self.request(
+            "GET", "/api/favorites", params={"q": "йОГУРТ 5%_"}
+        )
+        page = await response.json()
+        self.assertEqual(len(page["items"]), 30)
+        self.assertTrue(page["has_next"])
+        response = await self.request(
+            "GET", "/api/favorites", params={"q": "йогурт 5%_", "offset": 30}
+        )
+        page = await response.json()
+        self.assertEqual(len(page["items"]), 2)
+        self.assertFalse(page["has_next"])
+
+    async def test_statistics_dst_missing_days_and_owner_scope(self):
+        self.store.set_timezone(123, "America/New_York")
+        self.store.set_timezone(999, "UTC")
+        start = int(datetime(2026, 3, 8, 5, tzinfo=timezone.utc).timestamp())
+        self.store.add_entry(123, start, "Breakfast", 200, 100, 10)
+        self.store.add_entry(123, start + 23 * 3600 - 1, "Dinner", 300, 100)
+        self.store.add_entry(123, start + 23 * 3600, "Next day", 900, 100)
+        self.store.add_entry(999, start, "Private", 9999, 100)
+        response = await self.request(
+            "GET", "/api/statistics?day=2026-03-08&period=week"
+        )
+        data = await response.json()
+        self.assertEqual(data["totals"]["calories"], 500)
+        self.assertEqual(data["average_logged_day"], 500)
+        self.assertEqual(data["logged_days"], 1)
+        self.assertEqual(len(data["days"]), 7)
+        self.assertIsNone(data["days"][0]["calories"])
+        self.assertEqual(data["days"][-1]["protein_coverage"], 1)
+        response = await self.request(
+            "GET", "/api/statistics?day=2026-03-08&period=month"
+        )
+        data = await response.json()
+        self.assertEqual(len(data["days"]), 31)
+        self.assertEqual(data["totals"]["calories"], 1400)
+        response = await self.request("GET", "/api/statistics?period=forever")
+        self.assertEqual(response.status, 400)
+
+    async def test_weights_retries_edit_conflict_paging_and_isolation(self):
+        self.store.set_timezone(123, "Europe/Moscow")
+        self.store.set_timezone(999, "UTC")
+        now = int(time.time())
+        foreign = self.store.add_weight(999, now, 150)
+        session = self.store.start_session(123, 123, SessionState.WAIT_FOOD_NAME)
+        data = {
+            "measured_at": local_datetime(now, "Europe/Moscow").strftime(
+                "%Y-%m-%dT%H:%M"
+            ),
+            "weight_kg": 80,
+        }
+        key = str(uuid4())
+        response = await self.request(
+            "POST", "/api/weights", json=data, headers={"Idempotency-Key": key}
+        )
+        self.assertEqual(response.status, 201)
+        weight = await response.json()
+        response = await self.request(
+            "POST", "/api/weights", json=data, headers={"Idempotency-Key": key}
+        )
+        self.assertEqual(await response.json(), weight)
+        path = f"/api/weights/{weight['weight_id']}"
+        response = await self.request(
+            "PATCH", path, json={"weight_kg": 79, "version": weight["version"]}
+        )
+        updated = await response.json()
+        self.assertEqual(updated["weight_kg"], 79)
+        response = await self.request(
+            "DELETE", path, json={"version": weight["version"]}
+        )
+        self.assertEqual(response.status, 409)
+        for method in ("PATCH", "DELETE"):
+            response = await self.request(
+                method, f"/api/weights/{foreign.weight_id}", json={"weight_kg": 10}
+            )
+            self.assertEqual(response.status, 404)
+        for value in (None, True, 0, 501):
+            response = await self.request(
+                "POST", "/api/weights", json={**data, "weight_kg": value}
+            )
+            self.assertEqual(response.status, 400)
+        for i in range(30):
+            self.store.add_weight(123, now - 60 - i, 81)
+        response = await self.request("GET", "/api/weights")
+        result = await response.json()
+        self.assertEqual(len(result["items"]), 30)
+        self.assertTrue(result["has_next"])
+        self.assertAlmostEqual(result["average"], (79 + 30 * 81) / 31)
+        response = await self.request("GET", "/api/weights?offset=30")
+        self.assertEqual(len((await response.json())["items"]), 1)
+        response = await self.request(
+            "DELETE", path, json={"version": updated["version"]}
+        )
+        self.assertEqual(response.status, 200)
         self.assertEqual(self.store.get_session(123, 123), session)

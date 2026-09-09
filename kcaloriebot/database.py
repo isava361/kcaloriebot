@@ -39,7 +39,7 @@ from .domain import (
 )
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # The favorite_foods and sessions nutrition columns keep their historical
 # *_per_100g names; for unit = 'serving' rows they hold per-serving values.
@@ -274,6 +274,28 @@ class Database:
                     COMMIT;
                 """)
                 version = 5
+            if version == 5:
+                connection.executescript("""
+                    BEGIN IMMEDIATE;
+                    CREATE TABLE IF NOT EXISTS web_operations (
+                        user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                        operation_key TEXT NOT NULL,
+                        request_hash TEXT NOT NULL,
+                        response_json TEXT NOT NULL,
+                        created_at_utc INTEGER NOT NULL,
+                        PRIMARY KEY (user_id, operation_key)
+                    );
+                    CREATE TABLE IF NOT EXISTS web_deleted_entries (
+                        user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                        entry_id INTEGER NOT NULL,
+                        entry_json TEXT NOT NULL,
+                        deleted_at_utc INTEGER NOT NULL,
+                        PRIMARY KEY (user_id, entry_id)
+                    );
+                    PRAGMA user_version = 6;
+                    COMMIT;
+                """)
+                version = 6
             if version != SCHEMA_VERSION:
                 raise RuntimeError(
                     f"Unsupported database schema version {version}; expected {SCHEMA_VERSION}."
@@ -1007,10 +1029,9 @@ class Database:
         return Page(items, offset, offset > 0, len(rows) > limit)
 
     def search_favorites(
-        self, user_id: int, query: str, limit: int = 20
+        self, user_id: int, query: str, limit: int = 20, offset: int = 0
     ) -> tuple[FavoriteFood, ...]:
-        if not 1 <= limit <= 100:
-            raise ValueError("limit must be between 1 and 100")
+        self._validate_page(offset, limit)
         escaped = (
             query.casefold()
             .replace("\\", "\\\\")
@@ -1023,9 +1044,9 @@ class Database:
                 SELECT * FROM favorite_foods
                 WHERE user_id = ? AND name_key LIKE ? ESCAPE '\\'
                 ORDER BY name_key, favorite_id DESC
-                LIMIT ?
+                LIMIT ? OFFSET ?
                 """,
-                (user_id, f"%{escaped}%", limit),
+                (user_id, f"%{escaped}%", limit, offset),
             ).fetchall()
         return tuple(self._row_to_favorite(row) for row in rows)
 

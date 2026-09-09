@@ -20,18 +20,20 @@ from .config import Settings, load_settings
 from .database import Database
 from .domain import (
     EARLIEST_DIARY_DATE,
+    MAX_ENTRY_AGE_SECONDS,
     NotFound,
+    StateConflict,
     ValidationError,
-    check_calories_per_100g,
-    check_serving_grams,
-    check_servings,
     day_bounds,
     local_date,
+    local_datetime,
     parse_daily_goal,
 )
+from .web_store import WebStore, entry_data, number
 
 DATABASE = web.AppKey("database", Database)
 SETTINGS = web.AppKey("settings", Settings)
+ASSETS = web.AppKey("assets", dict)
 STATIC = Path(__file__).with_name("static")
 LOGGER = logging.getLogger(__name__)
 
@@ -83,7 +85,23 @@ async def boundary(request: web.Request, handler):
         )
     except NotFound:
         response = web.json_response({"error": "Запись не найдена."}, status=404)
-    except (ValidationError, ValueError, TypeError, KeyError, OverflowError):
+    except StateConflict as exc:
+        response = web.json_response({"error": str(exc)}, status=409)
+    except ValidationError as exc:
+        message = str(exc)
+        if not any("А" <= char <= "я" for char in message):
+            if "future" in message:
+                message = "Дата и время не могут быть в будущем."
+            elif "year in the past" in message:
+                message = (
+                    "Можно добавить или перенести запись не более чем на год назад."
+                )
+            elif "Weight" in message:
+                message = "Укажите вес от 1 до 500 кг."
+            else:
+                message = "Проверьте формат и допустимые значения полей."
+        response = web.json_response({"error": message}, status=400)
+    except (ValueError, TypeError, KeyError, OverflowError):
         response = web.json_response(
             {"error": "Проверьте введённые данные и допустимые значения."}, status=400
         )
@@ -93,7 +111,8 @@ async def boundary(request: web.Request, handler):
         response = web.json_response(
             {"error": "Не удалось выполнить запрос. Попробуйте ещё раз."}, status=500
         )
-    response.headers["Cache-Control"] = "no-store"
+    if request.path.startswith("/api/") or response.status >= 400:
+        response.headers["Cache-Control"] = "no-store"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["Content-Security-Policy"] = (
@@ -113,35 +132,35 @@ async def payload(request: web.Request) -> dict:
     return data
 
 
-def number(data: dict, key: str, optional: bool = False) -> float | None:
-    value = data.get(key)
-    if optional and value is None:
-        return None
-    if type(value) not in (int, float):
-        raise ValueError
-    return float(value)
-
-
 def snapshot(store: Database, user_id: int, query) -> dict:
     zone = store.get_timezone(user_id)
     if zone is None:
-        return {"needs_timezone": True}
+        return {"needs_timezone": True, "user_id": user_id}
     today = local_date(store.now_epoch(), zone)
     day = date.fromisoformat(query.get("day", today.isoformat()))
     if not EARLIEST_DIARY_DATE <= day <= today:
         raise ValueError
     bounds = day_bounds(day, zone)
     offset = int(query.get("offset", "0"))
+    page = store.page_entries(user_id, bounds.start_utc, bounds.end_utc, offset, 30)
     return {
         "needs_timezone": False,
+        "user_id": user_id,
+        "server_now": store.now_epoch(),
         "timezone": zone,
         "today": today.isoformat(),
         "day": day.isoformat(),
+        "local_now": local_datetime(store.now_epoch(), zone).strftime("%Y-%m-%dT%H:%M"),
+        "earliest_day": EARLIEST_DIARY_DATE.isoformat(),
+        "earliest_entry_time": local_datetime(
+            store.now_epoch() - MAX_ENTRY_AGE_SECONDS, zone
+        ).strftime("%Y-%m-%dT%H:%M"),
         "goal": store.get_daily_goal(user_id),
         "stats": asdict(store.stats(user_id, bounds.start_utc, bounds.end_utc)),
-        "entries": asdict(
-            store.page_entries(user_id, bounds.start_utc, bounds.end_utc, offset, 30)
-        ),
+        "entries": {
+            **asdict(page),
+            "items": [entry_data(entry) for entry in page.items],
+        },
     }
 
 
@@ -169,6 +188,26 @@ async def profile(request: web.Request) -> web.Response:
 
 
 async def favorites(request: web.Request) -> web.Response:
+    query = request.query.get("q", "").strip()
+    if len(query) > 200:
+        raise ValidationError("Поисковый запрос слишком длинный.")
+    offset = int(request.query.get("offset", "0"))
+    if query:
+        items = await asyncio.to_thread(
+            request.app[DATABASE].search_favorites,
+            request["user_id"],
+            query,
+            31,
+            offset,
+        )
+        return web.json_response(
+            {
+                "items": [asdict(item) for item in items[:30]],
+                "offset": offset,
+                "has_previous": offset > 0,
+                "has_next": len(items) > 30,
+            }
+        )
     result = await asyncio.to_thread(
         request.app[DATABASE].page_favorites,
         request["user_id"],
@@ -178,52 +217,84 @@ async def favorites(request: web.Request) -> web.Response:
     return web.json_response(asdict(result))
 
 
-def create_entry(store: Database, user_id: int, data: dict):
-    if store.get_timezone(user_id) is None:
-        raise ValidationError("Timezone required")
-    now = store.now_epoch()
-    if "favorite_id" in data:
-        favorite_id = data["favorite_id"]
-        if type(favorite_id) is not int:
-            raise ValueError
-        favorite = store.get_favorite(user_id, favorite_id)
-        if favorite is None:
-            raise NotFound
-        amount = number(data, "amount")
-        if favorite.unit == "serving":
-            check_servings(amount)
-        else:
-            check_serving_grams(amount)
-        return store.log_favorite(user_id, favorite_id, amount, now)
-    if not isinstance(data.get("name"), str):
-        raise ValueError
-    return store.add_entry(
-        user_id,
-        now,
-        data["name"],
-        check_calories_per_100g(number(data, "calories")),
-        check_serving_grams(number(data, "grams")),
-        number(data, "protein", True),
-        number(data, "fat", True),
-        number(data, "carbs", True),
+async def recent(request: web.Request) -> web.Response:
+    items = await asyncio.to_thread(
+        request.app[DATABASE].recent_entry_templates, request["user_id"], 20
     )
+    return web.json_response({"items": [entry_data(item) for item in items]})
+
+
+async def mutate(request: web.Request, action: str, status: int = 200) -> web.Response:
+    data = await payload(request)
+    if "entry_id" in request.match_info:
+        data["entry_id"] = int(request.match_info["entry_id"])
+    if "weight_id" in request.match_info:
+        data["weight_id"] = int(request.match_info["weight_id"])
+    result = await asyncio.to_thread(
+        WebStore(request.app[DATABASE].path).mutate,
+        request["user_id"],
+        request.headers.get("Idempotency-Key", ""),
+        action,
+        data,
+    )
+    return web.json_response(result, status=status)
 
 
 async def add_entry(request: web.Request) -> web.Response:
-    data = await payload(request)
-    entry = await asyncio.to_thread(
-        create_entry, request.app[DATABASE], request["user_id"], data
+    return await mutate(request, "entry.create", 201)
+
+
+async def statistics(request: web.Request) -> web.Response:
+    result = await asyncio.to_thread(
+        WebStore(request.app[DATABASE].path).statistics,
+        request["user_id"],
+        dict(request.query),
     )
-    return web.json_response(asdict(entry), status=201)
+    return web.json_response(result)
+
+
+async def weights(request: web.Request) -> web.Response:
+    result = await asyncio.to_thread(
+        WebStore(request.app[DATABASE].path).weight_snapshot,
+        request["user_id"],
+        dict(request.query),
+    )
+    return web.json_response(result)
+
+
+async def add_weight(request: web.Request) -> web.Response:
+    return await mutate(request, "weight.create", 201)
+
+
+async def edit_weight(request: web.Request) -> web.Response:
+    return await mutate(request, "weight.update")
+
+
+async def delete_weight(request: web.Request) -> web.Response:
+    return await mutate(request, "weight.delete")
+
+
+async def edit_entry(request: web.Request) -> web.Response:
+    return await mutate(request, "entry.update")
+
+
+async def restore_entry(request: web.Request) -> web.Response:
+    return await mutate(request, "entry.restore")
 
 
 async def delete_entry(request: web.Request) -> web.Response:
-    await asyncio.to_thread(
-        request.app[DATABASE].delete_entry,
+    return await mutate(request, "entry.delete")
+
+
+async def get_entry(request: web.Request) -> web.Response:
+    entry = await asyncio.to_thread(
+        request.app[DATABASE].get_entry,
         request["user_id"],
         int(request.match_info["entry_id"]),
     )
-    return web.json_response({"ok": True})
+    if entry is None:
+        raise NotFound
+    return web.json_response(entry_data(entry))
 
 
 async def save_favorite(request: web.Request) -> web.Response:
@@ -244,7 +315,12 @@ async def static_file(request: web.Request) -> web.Response:
     }
     if name not in types:
         raise web.HTTPNotFound()
-    return web.Response(body=(STATIC / name).read_bytes(), content_type=types[name])
+    body, etag = request.app[ASSETS][name]
+    headers = {"ETag": etag, "Cache-Control": "no-cache"}
+    validators = request.headers.get("If-None-Match", "").split(",")
+    if any(value.strip().removeprefix("W/") in (etag, "*") for value in validators):
+        return web.Response(status=304, headers=headers)
+    return web.Response(body=body, content_type=types[name], headers=headers)
 
 
 def build_web_app(
@@ -254,6 +330,11 @@ def build_web_app(
     store = database or Database(settings.database_path)
     store.initialize()
     app[DATABASE], app[SETTINGS] = store, settings
+    # Restart on deployment: each process serves one consistent asset snapshot.
+    app[ASSETS] = {}
+    for name in ("index.html", "app.js", "app.css"):
+        body = (STATIC / name).read_bytes()
+        app[ASSETS][name] = (body, '"' + hashlib.sha256(body).hexdigest() + '"')
     app.add_routes(
         [
             web.get("/", static_file),
@@ -261,8 +342,17 @@ def build_web_app(
             web.get("/api/diary", diary),
             web.put("/api/profile", profile),
             web.get("/api/favorites", favorites),
+            web.get("/api/recent", recent),
+            web.get("/api/statistics", statistics),
+            web.get("/api/weights", weights),
+            web.post("/api/weights", add_weight),
+            web.patch("/api/weights/{weight_id}", edit_weight),
+            web.delete("/api/weights/{weight_id}", delete_weight),
             web.post("/api/entries", add_entry),
+            web.get("/api/entries/{entry_id}", get_entry),
+            web.patch("/api/entries/{entry_id}", edit_entry),
             web.delete("/api/entries/{entry_id}", delete_entry),
+            web.post("/api/entries/{entry_id}/restore", restore_entry),
             web.post("/api/entries/{entry_id}/favorite", save_favorite),
         ]
     )

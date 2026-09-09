@@ -18,7 +18,8 @@
     <form id="timezone-form"><label>Часовой пояс<input name="timezone" required placeholder="Europe/Moscow" maxlength="100"></label><button class="primary">Продолжить</button></form>
   </section>
   <div id="app" hidden>
-    <nav class="day-nav" aria-label="Выбор дня"><button id="previous" aria-label="Предыдущий день">←</button><label><span class="sr-only">Дата дневника</span><input id="day" type="date" min="2020-01-01"></label><button id="next" aria-label="Следующий день">→</button></nav>
+    <div id="drafts" class="card" hidden></div>
+    <nav class="day-nav" aria-label="Выбор дня"><button id="previous" aria-label="Предыдущий день">←</button><label><span class="sr-only">Дата дневника</span><input id="day" type="date"></label><button id="next" aria-label="Следующий день">→</button></nav>
     <section class="card summary">
       <div class="row"><span class="eyebrow">ЭНЕРГИЯ ЗА ДЕНЬ</span><button id="goal-button" class="text-button">Цель</button></div>
       <div class="energy"><strong id="calories">0</strong><span>ккал</span></div>
@@ -28,21 +29,29 @@
       <p id="partial" class="muted small" hidden>Значения со знаком ≈ неполные: БЖУ указаны не для всех записей.</p>
     </section>
     <div class="actions"><button id="add-button" class="primary">＋ Добавить еду</button><button id="favorites-button">♡ Избранное</button></div>
+    <div class="actions compact"><button id="recent-button">Недавнее</button><button id="quick-button">Одной строкой</button></div>
+    <div class="actions compact"><button id="stats-button">Статистика</button><button id="weights-button">Вес</button></div>
     <section><div class="row section-title"><h2>Приёмы пищи</h2><span id="count" class="muted"></span></div><div id="entries"></div><button id="more" class="wide" hidden>Показать ещё</button></section>
     <footer><button id="today-button" class="text-button">К сегодняшнему дню</button><span id="zone" class="small muted"></span></footer>
   </div>
 </main>
 <dialog id="food-dialog"><form id="food-form">
-  <div class="row"><h2>Добавить еду</h2><button type="button" class="close" aria-label="Закрыть">×</button></div>
-  <p class="muted">Запись будет добавлена на сегодня.</p>
+  <div class="row"><h2 id="food-title">Добавить еду</h2><button type="button" class="close" aria-label="Закрыть">×</button></div>
+  <label>Дата и время<input name="eaten_at" type="datetime-local" required></label>
+  <p class="muted small" id="food-timezone"></p>
   <label>Название<input name="name" placeholder="Например, овсянка" required maxlength="200"></label>
-  <div class="field-pair"><label>Ккал на 100 г<input name="calories" type="number" inputmode="decimal" min="0" max="10000" step="any" required></label><label>Съедено, г<input name="grams" type="number" inputmode="decimal" min="0.01" max="100000" step="any" value="100" required></label></div>
-  <p class="muted small">БЖУ на 100 г · можно оставить пустыми</p>
+  <label>Значения указаны<select name="unit"><option value="100g">На 100 г</option><option value="serving">На одну порцию</option></select></label>
+  <div class="field-pair"><label>Килокалории<input name="calories" type="number" inputmode="decimal" min="0" max="10000" step="any" required></label><label><span id="amount-label">Съедено, г</span><input name="grams" type="number" inputmode="decimal" min="0.001" max="100000" step="any" value="100" required></label></div>
+  <p class="muted small">БЖУ в выбранной единице · можно оставить пустыми</p>
   <div class="field-triple"><label>Белки<input name="protein" type="number" inputmode="decimal" min="0" max="100" step="any"></label><label>Жиры<input name="fat" type="number" inputmode="decimal" min="0" max="100" step="any"></label><label>Углеводы<input name="carbs" type="number" inputmode="decimal" min="0" max="100" step="any"></label></div>
-  <p class="form-error" role="alert"></p><button class="primary wide">Добавить в дневник</button>
+  <p class="form-error" role="alert"></p><button class="primary wide" id="food-save">Добавить в дневник</button>
 </form></dialog>
 <dialog id="goal-dialog"><form id="goal-form"><div class="row"><h2>Дневная цель</h2><button type="button" class="close" aria-label="Закрыть">×</button></div><label>Килокалории<input name="goal" type="number" inputmode="decimal" min="1" max="50000" step="any"></label><p class="muted small">Оставьте поле пустым, чтобы убрать цель.</p><p class="form-error" role="alert"></p><button class="primary wide">Сохранить</button></form></dialog>
-<dialog id="favorites-dialog"><div class="row"><h2>Избранное</h2><button type="button" class="close" aria-label="Закрыть">×</button></div><div id="favorites"></div><button id="favorites-more" class="wide" hidden>Показать ещё</button><form id="favorite-form" hidden><label id="favorite-amount-label">Количество<input name="amount" type="number" inputmode="decimal" min="0.01" step="any" required></label><p class="form-error" role="alert"></p><button class="primary wide">Добавить на сегодня</button></form></dialog>
-<dialog id="delete-dialog"><form id="delete-form"><h2>Удалить запись?</h2><p id="delete-name"></p><p class="form-error" role="alert"></p><div class="actions"><button type="button" class="close">Отмена</button><button class="danger">Удалить</button></div></form></dialog>
+<dialog id="favorites-dialog"><div class="row"><h2>Избранное</h2><button type="button" class="close" aria-label="Закрыть">×</button></div><label>Поиск<input id="favorite-search" type="search" placeholder="Название продукта" maxlength="200" autocomplete="off"></label><p id="favorite-status" role="status"></p><div id="favorites"></div><button id="favorites-more" class="wide" hidden>Показать ещё</button><form id="favorite-form" hidden><label>Дата и время<input name="eaten_at" type="datetime-local" required></label><label id="favorite-amount-label">Количество<input name="amount" type="number" inputmode="decimal" min="0.001" step="any" required></label><p class="form-error" role="alert"></p><button class="primary wide">Добавить в дневник</button></form></dialog>
+<dialog id="recent-dialog"><div class="row"><h2>Недавняя еда</h2><button type="button" class="close" aria-label="Закрыть">×</button></div><p class="muted">Выберите еду, проверьте количество и дату.</p><div id="recent-list"></div></dialog>
+<dialog id="quick-dialog"><form id="quick-form"><div class="row"><h2>Одной строкой</h2><button type="button" class="close" aria-label="Закрыть">×</button></div><label>Дата и время<input name="eaten_at" type="datetime-local" required></label><label>Еда<input name="quick_add" placeholder="овсянка 370 60 б12 ж6 у62" required maxlength="500"></label><p class="muted small">Название, ккал на 100 г, съедено граммов. БЖУ на 100 г — необязательно.</p><p class="form-error" role="alert"></p><button class="primary wide">Добавить в дневник</button></form></dialog>
+<dialog id="stats-dialog"><div class="row"><h2>Статистика питания</h2><button type="button" class="close" aria-label="Закрыть">×</button></div><label>Период<select id="stats-period"><option value="week">7 дней до выбранной даты</option><option value="month">Выбранный месяц</option></select></label><p id="stats-range" class="muted small"></p><div id="stats-content" aria-live="polite"></div></dialog>
+<dialog id="weights-dialog"><div class="row"><h2>Журнал веса</h2><button type="button" class="close" aria-label="Закрыть">×</button></div><p id="weights-summary" class="muted"></p><form id="weight-form"><label>Дата и время<input name="measured_at" type="datetime-local" required></label><label>Вес, кг<input name="weight_kg" type="number" inputmode="decimal" min="1" max="500" step="any" required></label><p class="form-error" role="alert"></p><div class="actions"><button id="weight-save" class="primary">Записать вес</button><button id="weight-cancel" type="button" hidden>Отмена</button></div></form><h2>Последние 30 дней</h2><p class="small muted">Среднее измерений за день. Дни без измерений пропущены.</p><div id="weight-chart"></div><h2>Измерения</h2><p id="weight-status" role="status"></p><div id="weight-list"></div><button id="weights-more" class="wide" hidden>Показать ещё</button></dialog>
+<div id="toasts" aria-live="polite"></div>
 </body>
 </html>
