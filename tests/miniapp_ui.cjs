@@ -21,6 +21,9 @@ const {chromium} = require(process.env.PLAYWRIGHT_MODULE_PATH || path.resolve('d
     await page.goto(process.argv[2]);
     await page.locator('#app').waitFor({state:'visible'});
     assert.equal(await page.locator('html').getAttribute('data-theme'), 'dark');
+    // Anything under 16px makes mobile WebViews zoom into the field on focus.
+    assert.deepEqual(await page.evaluate(() => [...document.querySelectorAll('input,select,textarea')]
+      .filter(el => parseFloat(getComputedStyle(el).fontSize) < 16).map(el => el.name || el.id)), []);
     assert.equal(await page.evaluate(() => getComputedStyle(document.documentElement).colorScheme), 'dark');
     await page.locator('#previous').click();
     await page.waitForFunction(() => !document.getElementById('next').disabled);
