@@ -107,9 +107,12 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
             "/health/v1/next?user_id=999", headers=headers, json={}
         )
         self.assertEqual(response.status, 400)
-        first = await (
-            await self.client.post("/health/v1/next", headers=headers, json={})
-        ).json()
+        # Apple Shortcuts omits the body for a JSON request body with no
+        # fields, which must mean the same as an explicit empty object.
+        empty = {"data": "", "headers": {**headers, "Content-Type": "application/json"}}
+        response = await self.client.post("/health/v1/ack", **empty)
+        self.assertEqual(response.status, 400)
+        first = await (await self.client.post("/health/v1/next", **empty)).json()
         self.assertEqual(first["status"], "sample")
         self.assertEqual(first["sample"]["id"], f"food:{entry.entry_id}:calories")
         pending = await (
