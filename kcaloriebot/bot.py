@@ -2234,6 +2234,20 @@ def _health_sample_text(sample: dict | None) -> str:
     return f"{labels[sample['type']]}: {sample['value']:g} {sample['unit']}, {sample['date']}"
 
 
+def _health_window_text(zone: str | None, status: dict) -> str:
+    if zone is None or status.get("start_utc") is None:
+        return ""
+    first = local_date(status["start_utc"], zone)
+    if status.get("end_utc") is None:
+        return f"Период переноса: с {first} и далее."
+    # end_utc is the local midnight after the last exported day.
+    last = local_date(status["end_utc"] - 1, zone)
+    return (
+        f"Период переноса: с {first} по {last} включительно. "
+        "Записи вне этого периода не переносятся."
+    )
+
+
 def _health_keyboard(url: str | None, connected: bool) -> InlineKeyboardMarkup:
     rows = []
     if url:
@@ -2292,29 +2306,36 @@ async def _health_action(
     url = context.application.bot_data.get("miniapp_url")
     guide = urljoin(url, "/static/apple-health.html") if url else None
     try:
-        if args and args[0] == "connect" and len(args) <= 2:
+        if args and args[0] == "connect" and len(args) <= 3:
             if not url:
                 await update.effective_message.reply_text(
                     "Сначала настройте HTTPS-сервер Mini App и MINIAPP_URL по docs/miniapp.md."
                 )
                 return
             token = await _call(
-                store.connect, user_id, args[1] if len(args) == 2 else None
+                store.connect,
+                user_id,
+                args[1] if len(args) >= 2 else None,
+                args[2] if len(args) == 3 else None,
             )
+            zone = await _call(store.get_timezone, user_id)
+            window = _health_window_text(zone, await _call(store.status, user_id))
             await update.effective_message.reply_text(
-                "Apple Health подключён. Осталось один раз собрать команду "
+                "Apple Health подключён. Осталось один раз поставить команду "
                 "на iPhone.\n\n"
                 f"1. Скопируйте адрес сервера:\n{urljoin(url, '/health/v1/')}\n\n"
                 "2. Персональный ключ — скопируйте следующую строку целиком:\n"
                 f"{token}\n\n"
-                f"3. Откройте инструкцию и соберите команду по шагам:\n{guide}\n\n"
+                "3. Откройте инструкцию: команда ставится по ссылке, ключ "
+                f"вставляется в неё один раз.\n{guide}\n\n"
                 "Ключ показывается один раз. Потеряли — нажмите «Подключить Apple "
-                "Health» снова: прогресс переноса и дата начала сохранятся, а старый "
+                "Health» снова: прогресс переноса и период сохранятся, а старый "
                 "ключ перестанет работать.\n"
                 "Не пересылайте ключ и не делитесь готовой командой: ключ лежит "
                 "внутри неё. Запускайте её только на одном iPhone.\n\n"
-                "При первом подключении переносится всё с начала сегодняшнего дня. "
-                "Нужна история: /health connect ГГГГ-ММ-ДД.\n"
+                f"{window}\n"
+                "Перенести всё начиная с даты: /health connect ГГГГ-ММ-ДД\n"
+                "Перенести только период: /health connect ОТ ДО\n"
                 "Отключить доступ: /health disconnect",
                 reply_markup=_health_keyboard(url, True),
                 disable_web_page_preview=True,
@@ -2335,23 +2356,29 @@ async def _health_action(
                 "Apple Health: "
                 + ("подключено" if status["connected"] else "не подключено")
                 + "\n\nБот умеет переносить калории, БЖУ и вес в приложение "
-                "«Здоровье» на iPhone. Для этого один раз собирается команда "
-                "в приложении «Команды», а потом вы запускаете её, когда нужно "
-                "перенести новые записи.\n\n"
+                "«Здоровье» на iPhone. Для этого один раз ставится готовая "
+                "команда для приложения «Команды», а потом вы запускаете её, "
+                "когда нужно перенести новые записи.\n\n"
                 + (
-                    "Пошаговая инструкция по сборке команды — кнопкой ниже.\n"
+                    "Инструкция по установке — кнопкой ниже.\n"
                     if url and status["connected"]
                     else "Что делать:\n1. Нажмите «Подключить Apple Health» — бот "
                     "выдаст адрес сервера и ключ.\n2. Откройте инструкцию кнопкой "
-                    "ниже и соберите команду по шагам.\n"
+                    "ниже и поставьте команду по ссылке.\n"
                     if url
                     else "Подключение пока недоступно: администратору нужно настроить сервер экспорта.\n"
                 )
                 + "\nПодключить или заменить ключ: /health connect\n"
-                "Перенести историю: /health connect ГГГГ-ММ-ДД\nОтключить: /health disconnect"
+                "Перенести всё начиная с даты: /health connect ГГГГ-ММ-ДД\n"
+                "Перенести только период: /health connect ОТ ДО\n"
+                "Отключить: /health disconnect"
             )
             if "confirmed" in status:
                 text += f"\n\nПодтверждено показателей: {status['confirmed']}. Новых: {status['remaining']}."
+                zone = await _call(store.get_timezone, user_id)
+                window = _health_window_text(zone, status)
+                if window:
+                    text += f"\n{window}"
             if status.get("status") == "review":
                 receipt = status["receipt"]
                 text += (

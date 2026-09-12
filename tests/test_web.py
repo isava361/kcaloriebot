@@ -140,6 +140,12 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 404)
         response = await self.client.get("/static/apple-health.html")
         self.assertEqual(response.status, 200)
+        guide = await response.text()
+        # The guide installs the published shortcut and keeps the build as backup.
+        self.assertIn("icloud.com/shortcuts/", guide)
+        self.assertIn("apple-health-manual.html", guide)
+        response = await self.client.get("/static/apple-health-manual.html")
+        self.assertEqual(response.status, 200)
         self.assertIn("Log Health Sample", await response.text())
 
     async def test_static_revalidation_and_private_api(self):

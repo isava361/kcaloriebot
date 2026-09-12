@@ -35,36 +35,56 @@ def revision(value) -> str:
 
 
 class HealthStore(Database):
-    def connect(self, user_id: int, start: str | None = None) -> str:
-        zone = self.get_timezone(user_id)
-        if zone is None:
-            raise ValidationError("Сначала настройте часовой пояс через /start.")
-        today = local_date(self.now_epoch(), zone)
+    @staticmethod
+    def _day(value: str, today: date) -> date:
         try:
-            day = date.fromisoformat(start) if start else today
+            day = date.fromisoformat(value)
         except ValueError:
             raise ValidationError("Дата подключения: ГГГГ-ММ-ДД.") from None
         if not EARLIEST_DIARY_DATE <= day <= today:
             raise ValidationError(
                 f"Укажите дату от {EARLIEST_DIARY_DATE} до сегодняшнего дня."
             )
+        return day
+
+    def connect(
+        self, user_id: int, start: str | None = None, end: str | None = None
+    ) -> str:
+        zone = self.get_timezone(user_id)
+        if zone is None:
+            raise ValidationError("Сначала настройте часовой пояс через /start.")
+        today = local_date(self.now_epoch(), zone)
+        if end is not None and start is None:
+            raise ValidationError("Укажите начало периода: /health connect ОТ ДО.")
+        first = self._day(start, today) if start is not None else today
+        last = self._day(end, today) if end is not None else None
+        if last is not None and last < first:
+            raise ValidationError("Конец периода не может быть раньше его начала.")
         token = secrets.token_urlsafe(32)
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             previous = conn.execute(
-                "SELECT start_utc FROM health_connections WHERE user_id = ?", (user_id,)
+                "SELECT start_utc, end_utc FROM health_connections WHERE user_id = ?",
+                (user_id,),
             ).fetchone()
-            # Rotating a key preserves the import window unless explicitly changed.
-            start_utc = (
-                previous[0]
-                if previous and start is None
-                else day_bounds(day, zone).start_utc
-            )
+            # Rotating a key preserves the window; any given date redefines it,
+            # so a start without an end reopens the export to new records.
+            if previous and start is None:
+                start_utc, end_utc = previous["start_utc"], previous["end_utc"]
+            else:
+                start_utc = day_bounds(first, zone).start_utc
+                end_utc = None if last is None else day_bounds(last, zone).end_utc
             conn.execute(
-                "INSERT INTO health_connections VALUES (?, ?, ?) "
+                "INSERT INTO health_connections "
+                "(user_id, token_hash, start_utc, end_utc) VALUES (?, ?, ?, ?) "
                 "ON CONFLICT(user_id) DO UPDATE SET token_hash=excluded.token_hash, "
-                "start_utc=excluded.start_utc",
-                (user_id, hashlib.sha256(token.encode()).hexdigest(), start_utc),
+                "start_utc=excluded.start_utc, end_utc=excluded.end_utc",
+                (
+                    user_id,
+                    hashlib.sha256(token.encode()).hexdigest(),
+                    start_utc,
+                    end_utc,
+                ),
             )
         return token
 
@@ -80,7 +100,8 @@ class HealthStore(Database):
         if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9_-]{43}", token):
             raise HealthUnauthorized
         row = conn.execute(
-            "SELECT user_id, start_utc FROM health_connections WHERE token_hash=?",
+            "SELECT user_id, start_utc, end_utc FROM health_connections "
+            "WHERE token_hash=?",
             (hashlib.sha256(token.encode()).hexdigest(),),
         ).fetchone()
         if row is None:
@@ -125,7 +146,9 @@ class HealthStore(Database):
             )
         return samples
 
-    def _state(self, conn, user_id: int, start_utc: int) -> dict:
+    def _state(
+        self, conn, user_id: int, start_utc: int, end_utc: int | None = None
+    ) -> dict:
         samples = self._samples(conn, user_id)
         ledger = {
             row["sample_id"]: row
@@ -154,6 +177,8 @@ class HealthStore(Database):
                 for key, sample in samples.items()
                 if key not in ledger
                 and start_utc <= sample["epoch"] <= self.now_epoch()
+                # end_utc is the local midnight after the last exported day.
+                and (end_utc is None or sample["epoch"] < end_utc)
             ),
             key=lambda sample: (sample["epoch"], sample["id"]),
         )
@@ -187,7 +212,10 @@ class HealthStore(Database):
             return {
                 "connected": connection["token_hash"] is not None,
                 "start_utc": connection["start_utc"],
-                **self._state(conn, user_id, connection["start_utc"]),
+                "end_utc": connection["end_utc"],
+                **self._state(
+                    conn, user_id, connection["start_utc"], connection["end_utc"]
+                ),
             }
 
     def request(self, token: str, action: str, data: dict) -> dict:
@@ -203,7 +231,9 @@ class HealthStore(Database):
                 return {"status": "acknowledged"}
             if action not in {"next", "status"} or data:
                 raise ValidationError("Неподдерживаемый запрос экспорта.")
-            result = self._state(conn, user_id, connection["start_utc"])
+            result = self._state(
+                conn, user_id, connection["start_utc"], connection["end_utc"]
+            )
             if action == "next" and result["status"] == "ready":
                 receipt = secrets.token_hex(16)
                 sample = result["sample"]

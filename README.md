@@ -13,11 +13,13 @@ goals, week/month statistics, and weight tracking. It shares the bot's
 SQLite database. The Mini App needs a public HTTPS address; see
 [Mini App setup](docs/miniapp.md).
 
-Apple Health export is available through a manually configured iPhone Shortcut.
-Open **Settings → Apple Health** in a private chat (or send `/health connect`)
-to get a personal export key and setup
-instructions. It transfers nutrition and weight through the Mini App HTTPS server,
-tracks confirmed samples, and pauses interrupted or changed records for review.
+Apple Health export is available through an iPhone Shortcut, installed from a
+published iCloud link and holding the user's own export key. Open
+**Settings → Apple Health** in a private chat (or send `/health connect`) to get
+a personal export key and setup instructions. It transfers nutrition and weight
+through the Mini App HTTPS server, tracks confirmed samples, and pauses
+interrupted or changed records for review. The export window starts at a given
+day, or covers a closed range of days so history can be transferred in chunks.
 See [Apple Health setup and recovery](docs/apple-health.md).
 
 ## Requirements
