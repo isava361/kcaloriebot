@@ -464,6 +464,17 @@ ProtectSystem=strict
 ReadWritePaths=/var/lib/kcaloriebot
 ```
 
+One port has to match in three places: `--port` here, `proxy_pass` in Nginx,
+and `KCALORIE_WEB_URL` for `scripts/update.sh` (default
+`http://127.0.0.1:18081/`). The update script health-checks that URL and rolls
+the deployment back when it does not answer, so a port changed in only two of
+the three turns every update into a rollback. Check the port is free before
+choosing it — 8080 is a popular default for other services:
+
+```bash
+sudo ss -ltnp '( sport = :8080 )'
+```
+
 Create `/etc/systemd/system/kcalculatorbot.service.d/miniapp.conf`
 (create the parent directory first):
 

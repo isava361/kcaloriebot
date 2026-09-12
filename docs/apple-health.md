@@ -58,7 +58,13 @@
 и резервной копии базы.
 
 Проверьте `GET /static/apple-health.html` и `GET /static/apple-health-manual.html`
-(200), а также `POST /health/v1/next` без авторизации (401). Существующий Nginx `location /` уже проксирует новые адреса.
+(200), а также `POST /health/v1/next` без авторизации (401).
+Если на `/health/v1/*` приходит HTML вместо JSON, отвечает не приложение:
+веб-процесс лежит или Nginx проксирует не туда. Диагноз — в логе Nginx
+(`connect() failed (111: Connection refused) ... upstream:` с адресом из
+`proxy_pass`) и в `journalctl -u kcaloriebot-web`. Проверять приложение нужно
+в обход Nginx: `curl -i http://127.0.0.1:<порт из proxy_pass>/health/v1/status`
+должен отдать JSON с 401. Существующий Nginx `location /` уже проксирует новые адреса.
 Не записывайте заголовок Authorization в логи. Ключ нельзя передавать в URL.
 Ответы API используют `Cache-Control: no-store`.
 
