@@ -39,7 +39,7 @@ from .domain import (
 )
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # The favorite_foods and sessions nutrition columns keep their historical
 # *_per_100g names; for unit = 'serving' rows they hold per-serving values.
@@ -318,6 +318,21 @@ class Database:
                     COMMIT;
                 """)
                 version = 7
+            if version == 7:
+                health_columns = {
+                    row[1]
+                    for row in connection.execute(
+                        "PRAGMA table_info(health_connections)"
+                    )
+                }
+                connection.execute("BEGIN IMMEDIATE")
+                if "end_utc" not in health_columns:
+                    connection.execute(
+                        "ALTER TABLE health_connections ADD COLUMN end_utc INTEGER NULL"
+                    )
+                connection.execute("PRAGMA user_version = 8")
+                connection.commit()
+                version = 8
             if version != SCHEMA_VERSION:
                 raise RuntimeError(
                     f"Unsupported database schema version {version}; expected {SCHEMA_VERSION}."

@@ -3,7 +3,7 @@ import sqlite3
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -49,6 +49,13 @@ class HealthTests(unittest.TestCase):
         with sqlite3.connect(self.store.path) as conn:
             self.assertEqual(
                 conn.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION
+            )
+            self.assertIn(
+                "end_utc",
+                {
+                    row[1]
+                    for row in conn.execute("PRAGMA table_info(health_connections)")
+                },
             )
             self.assertEqual(conn.execute("PRAGMA integrity_check").fetchone()[0], "ok")
             self.assertEqual(conn.execute("PRAGMA foreign_key_check").fetchall(), [])
@@ -220,8 +227,78 @@ class HealthTests(unittest.TestCase):
         for start in ("bad", "1999-01-01", "2999-01-01"):
             with self.assertRaises(ValidationError):
                 self.store.connect(1, start)
+        for start, end in (
+            (None, "2020-01-01"),
+            ("2020-02-01", "2020-01-31"),
+            ("2020-01-01", "2999-01-01"),
+            ("2020-01-01", "bad"),
+        ):
+            with self.assertRaises(ValidationError):
+                self.store.connect(1, start, end)
         with self.assertRaises(ValidationError):
             self.store.connect(99)
+        self.assertEqual(self.next()["status"], "done")
+
+    def test_closed_window_exports_only_its_own_local_days(self):
+        zone = "Europe/Moscow"
+        day = local_date(self.epoch, zone)
+        inside = day_bounds(day, zone)
+        before = self.store.add_entry(1, inside.start_utc - 1, "Раньше", 100, 1)
+        first = self.store.add_entry(1, inside.start_utc, "Начало дня", 100, 2)
+        last = self.store.add_entry(1, inside.end_utc - 1, "Конец дня", 100, 3)
+        after = self.store.add_entry(1, inside.end_utc, "Позже", 100, 4)
+        self.token = self.store.connect(1, day.isoformat(), day.isoformat())
+        status = self.store.status(1)
+        self.assertEqual(status["start_utc"], inside.start_utc)
+        self.assertEqual(status["end_utc"], inside.end_utc)
+        self.assertEqual(status["remaining"], 2)
+        exported = set()
+        while (result := self.next())["status"] == "sample":
+            exported.add(result["sample"]["id"])
+            self.ack(result)
+        self.assertEqual(
+            exported,
+            {f"food:{first.entry_id}:calories", f"food:{last.entry_id}:calories"},
+        )
+        # A closed window stays closed: neighbouring days are never offered.
+        self.assertEqual(self.next()["status"], "done")
+        # Rotating the key keeps both bounds; a lone start date reopens the export.
+        self.token = self.store.connect(1)
+        self.assertEqual(self.store.status(1)["end_utc"], inside.end_utc)
+        self.assertEqual(self.next()["status"], "done")
+        self.token = self.store.connect(1, "2020-01-01")
+        self.assertIsNone(self.store.status(1)["end_utc"])
+        reopened = set()
+        while (result := self.next())["status"] == "sample":
+            reopened.add(result["sample"]["id"])
+            self.ack(result)
+        self.assertEqual(
+            reopened,
+            {f"food:{before.entry_id}:calories", f"food:{after.entry_id}:calories"},
+        )
+
+    def test_window_can_walk_the_history_in_chunks(self):
+        zone = "Europe/Moscow"
+        day = local_date(self.epoch, zone)
+        earlier = day - timedelta(days=1)
+        first = self.store.add_entry(
+            1, day_bounds(earlier, zone).start_utc, "Вчера", 100, 1
+        )
+        second = self.store.add_entry(
+            1, day_bounds(day, zone).start_utc, "Сегодня", 100, 2
+        )
+        self.token = self.store.connect(1, earlier.isoformat(), earlier.isoformat())
+        result = self.next()
+        self.assertEqual(result["sample"]["id"], f"food:{first.entry_id}:calories")
+        self.ack(result)
+        self.assertEqual(self.next()["status"], "done")
+        self.token = self.store.connect(1, day.isoformat(), day.isoformat())
+        result = self.next()
+        self.assertEqual(result["sample"]["id"], f"food:{second.entry_id}:calories")
+        self.ack(result)
+        # Moving the window never re-offers what an earlier chunk confirmed.
+        self.token = self.store.connect(1, earlier.isoformat(), day.isoformat())
+        self.assertEqual(self.store.status(1)["confirmed"], 2)
         self.assertEqual(self.next()["status"], "done")
 
 
