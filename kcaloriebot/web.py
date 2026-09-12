@@ -115,7 +115,9 @@ async def boundary(request: web.Request, handler):
         )
     except Exception:
         # Do not log headers or request contents: initData is a credential.
-        LOGGER.error("Mini App request failed")
+        # A traceback carries frames and source lines, not locals, so it stays
+        # on the right side of that rule and names the handler that failed.
+        LOGGER.error("Mini App request failed", exc_info=True)
         response = web.json_response(
             {"error": "Не удалось выполнить запрос. Попробуйте ещё раз."}, status=500
         )

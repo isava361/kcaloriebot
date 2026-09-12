@@ -236,6 +236,10 @@ class HealthStore(Database):
                         "revision": revision(current),
                     }
                 )
+        # Oldest first, by the time the sample carried when it was exported:
+        # that is the record to look for in Health, and sample ids sort as
+        # strings, which would put food:10 before food:9 and cut the wrong ten.
+        issues.sort(key=lambda issue: (issue["previous"]["epoch"], issue["id"]))
         window = self._window(conn, user_id, start_utc, end_utc, self.now_epoch())
         new = sorted(
             (sample for key, sample in window.items() if key not in ledger),
@@ -299,7 +303,9 @@ class HealthStore(Database):
                 receipt = secrets.token_hex(16)
                 sample = result["sample"]
                 conn.execute(
-                    "INSERT INTO health_samples VALUES (?, ?, ?, ?, 'pending')",
+                    "INSERT INTO health_samples "
+                    "(user_id, sample_id, payload_json, receipt, state) "
+                    "VALUES (?, ?, ?, ?, 'pending')",
                     (user_id, sample["id"], encoded(sample), receipt),
                 )
                 result.update(status="sample", receipt=receipt)

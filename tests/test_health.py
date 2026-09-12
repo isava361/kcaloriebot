@@ -280,6 +280,24 @@ class HealthTests(unittest.TestCase):
         # Every id resolves, in batches SQLite can bind, and only the owner's.
         self.assertEqual(sorted(issued), sorted(ids))
 
+    def test_issues_are_reported_oldest_first(self):
+        entries = [
+            self.store.add_entry(1, self.epoch + 86400 * index, "Еда", 200, 50)
+            for index in range(12)
+        ]
+        while (result := self.next())["status"] == "sample":
+            self.ack(result)
+        with self.store._connect() as conn:
+            conn.execute("UPDATE food_entries SET calories=90 WHERE user_id=1")
+        result = self.store.request(self.token, "status", {})
+        self.assertEqual(result["issue_count"], 12)
+        # Ten of twelve are shown, and they are the ten oldest: as strings the
+        # ids would start food:1, food:10, food:11, food:12, food:2.
+        self.assertEqual(
+            [issue["id"] for issue in result["issues"]],
+            [f"food:{entry.entry_id}:calories" for entry in entries[:10]],
+        )
+
     def test_invalid_connect_does_not_rotate_key(self):
         for start in ("bad", "1999-01-01", "2999-01-01"):
             with self.assertRaises(ValidationError):
