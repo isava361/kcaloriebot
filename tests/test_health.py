@@ -1,4 +1,5 @@
 import hashlib
+import re
 import sqlite3
 import tempfile
 import unittest
@@ -8,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from telegram.constants import ChatType
+from telegram.constants import ChatType, ParseMode
 
 from kcaloriebot.bot import health_callback, health_command, handle_text
 from kcaloriebot.database import Database, SCHEMA_VERSION
@@ -400,6 +401,18 @@ class HealthBotTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(
                 "https://example.com:8443/static/apple-health.html", call.args[0]
             )
+            # The key is a code entity, so one tap copies it; everything else
+            # must be escaped or Telegram rejects a message shown only once.
+            self.assertEqual(call.kwargs["parse_mode"], ParseMode.HTML)
+            issued = re.findall(r"<code>([^<]+)</code>", call.args[0])
+            self.assertEqual(len(issued), 2)
+            self.assertTrue(
+                any(re.fullmatch(r"[A-Za-z0-9_-]{43}", value) for value in issued)
+            )
+            outside = re.sub(r"</?code>", "", call.args[0])
+            self.assertNotIn("<", outside)
+            self.assertNotIn(">", outside)
+            self.assertNotIn("&", outside)
             self.assertTrue(health.status(1)["connected"])
             token = health.connect(1, "2020-01-01")
             store.add_entry(1, 1780000000, "Food", 100, 100)

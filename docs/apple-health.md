@@ -58,7 +58,25 @@
 и резервной копии базы.
 
 Проверьте `GET /static/apple-health.html` и `GET /static/apple-health-manual.html`
-(200), а также `POST /health/v1/next` без авторизации (401). Существующий Nginx `location /` уже проксирует новые адреса.
+(200), а также `POST /health/v1/next` без авторизации (401).
+Если на `/health/v1/*` приходит HTML вместо JSON, отвечает не приложение:
+веб-процесс лежит или Nginx проксирует не туда. Диагноз — в логе Nginx
+(`connect() failed (111: Connection refused) ... upstream:` с адресом из
+`proxy_pass`) и в `journalctl -u kcaloriebot-web`. Проверять приложение нужно
+в обход Nginx: `curl -i http://127.0.0.1:<порт из proxy_pass>/health/v1/status`
+должен отдать JSON с 401. Существующий Nginx `location /` уже проксирует новые адреса.
+
+Для проверки живым ключом используйте только `GET /health/v1/status`: он ничего
+не резервирует. `POST /health/v1/next` руками из curl или Postman **забирает
+показатель на себя** — команда на iPhone его уже не получит, и он останется
+незавершённым до `/health saved` или `/health retry`.
+
+Nginx, отвергающий запрос до выбора виртуального хоста (невалидный заголовок —
+например перевод строки, попавший в ключ при вставке), отвечает своей страницей
+от имени `default_server` этого сокета, то есть чужого сайта и с его
+`add_header`. Признак — `Content-Length: 166` и стандартная HTML-страница 400
+вместо JSON; причина пишется в `error_log` того самого default-сервера
+на уровне `info`.
 Не записывайте заголовок Authorization в логи. Ключ нельзя передавать в URL.
 Ответы API используют `Cache-Control: no-store`.
 
