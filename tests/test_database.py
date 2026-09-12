@@ -910,7 +910,9 @@ class SchemaTests(DatabaseTestCase):
         self.assertEqual(self.database.latest_weight(1), weight)
         self.assertEqual(self.database.get_session(1, 1), session)
         with sqlite3.connect(self.database.path) as connection:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 6)
+            self.assertEqual(
+                connection.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION
+            )
             self.assertEqual(
                 connection.execute("PRAGMA integrity_check").fetchone()[0], "ok"
             )

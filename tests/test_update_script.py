@@ -69,7 +69,7 @@ python)
         if fail tests || fail reset || fail rollback_install; then exit 1; fi
     elif [[ $* = *SCHEMA_VERSION* ]]; then
         if fail schema_import; then exit 1; fi
-        echo 6
+        echo 7
     elif [[ $* = *initialize* ]]; then
         echo new-database > "$KCALORIE_DATABASE"
         if fail migration; then exit 1; fi
@@ -91,7 +91,7 @@ sqlite3)
     elif [[ $query = *integrity_check* ]]; then
         if fail invalid_backup && [[ $db = *before-* ]]; then echo damaged; else echo ok; fi
     elif [[ $query = *user_version* ]]; then
-        if fail schema; then echo 5; else echo 6; fi
+        if fail schema; then echo 6; else echo 7; fi
     fi ;;
 curl)
     if new_code && { fail http || fail restore; }; then echo 503

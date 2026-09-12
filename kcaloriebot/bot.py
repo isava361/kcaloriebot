@@ -5,6 +5,7 @@ import logging
 from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from typing import Any, Callable, Optional, TypeVar
+from urllib.parse import urljoin
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, WebAppInfo
 from telegram.constants import ChatType
@@ -28,6 +29,7 @@ from .callbacks import (
 )
 from .config import Settings
 from .database import Database
+from .health import HealthStore
 from .domain import (
     EARLIEST_DIARY_DATE,
     FoodEntry,
@@ -2216,6 +2218,100 @@ async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> No
             )
 
 
+def _health_sample_text(sample: dict | None) -> str:
+    if sample is None:
+        return "удалено / значение не указано"
+    labels = {
+        "calories": "Калории",
+        "protein": "Белки",
+        "fat": "Жиры",
+        "carbs": "Углеводы",
+        "weight": "Вес",
+    }
+    return f"{labels[sample['type']]}: {sample['value']:g} {sample['unit']}, {sample['date']}"
+
+
+async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_private(update) or update.effective_message is None:
+        return
+    user_id, _ = _identity(update)
+    store = HealthStore(_db(context).path)
+    args = context.args or []
+    url = context.application.bot_data.get("miniapp_url")
+    guide = urljoin(url, "/static/apple-health.html") if url else None
+    try:
+        if args and args[0] == "connect" and len(args) <= 2:
+            if not url:
+                await update.effective_message.reply_text(
+                    "Сначала настройте HTTPS-сервер Mini App и MINIAPP_URL по docs/miniapp.md."
+                )
+                return
+            token = await _call(
+                store.connect, user_id, args[1] if len(args) == 2 else None
+            )
+            await update.effective_message.reply_text(
+                "Подключение Apple Health для одного iPhone.\n"
+                "При первом подключении переносятся записи с начала сегодняшнего дня. "
+                "Для истории: /health connect ГГГГ-ММ-ДД. Повторное подключение сохраняет "
+                "прогресс и прежнюю дату, если новая дата не указана. Старый ключ отключён.\n\n"
+                f"Адрес сервера:\n{urljoin(url, '/health/v1/')}\n\n"
+                f"Персональный ключ (скопируйте только следующую строку):\n{token}\n\n"
+                "Добавьте его в команду на iPhone; не публикуйте команду вместе с ключом.\n"
+                f"Пошаговая настройка:\n{guide}\n\n"
+                "Отключить доступ: /health disconnect",
+                disable_web_page_preview=True,
+            )
+            return
+        if args == ["disconnect"]:
+            await _call(store.disconnect, user_id)
+            text = "Доступ Apple Health отключён. История переноса сохранена; записи в «Здоровье» остаются."
+        elif len(args) == 2 and args[0] in {"saved", "retry"}:
+            await _call(store.recover, user_id, args[0], args[1])
+            text = "Состояние переноса обновлено. Можно запустить команду на iPhone."
+        elif len(args) == 3 and args[0] == "corrected":
+            await _call(store.corrected, user_id, args[1], args[2])
+            text = "Ручное исправление отмечено. Отправьте /health для проверки остальных записей."
+        elif not args:
+            status = await _call(store.status, user_id)
+            text = (
+                "Apple Health: "
+                + ("подключено" if status["connected"] else "не подключено")
+                + "\nПодключить или заменить ключ: /health connect\n"
+                "Перенести историю: /health connect ГГГГ-ММ-ДД\nОтключить: /health disconnect"
+            )
+            if "confirmed" in status:
+                text += f"\n\nПодтверждено показателей: {status['confirmed']}. Новых: {status['remaining']}."
+            if status.get("status") == "review":
+                receipt = status["receipt"]
+                text += (
+                    "\n\nНезавершённый перенос:\n"
+                    + _health_sample_text(status["sample"])
+                    + "\nОстановите команду на iPhone и проверьте этот показатель в «Здоровье». "
+                    "Если запись уже есть, отправьте:\n"
+                    + f"/health saved {receipt}"
+                    + "\nТолько если записи нет:\n"
+                    + f"/health retry {receipt}"
+                )
+            for issue in status.get("issues", [])[:3]:
+                text += (
+                    f"\n\nИзменение {issue['id']}:\nБыло: "
+                    + _health_sample_text(issue["previous"])
+                    + "\nСтало: "
+                    + _health_sample_text(issue["current"])
+                    + "\nИсправьте или удалите старую запись в «Здоровье», затем подтвердите:\n"
+                    + f"/health corrected {issue['id']} {issue['revision']}"
+                )
+            if status.get("issue_count", 0) > 3:
+                text += f"\nВсего изменений: {status['issue_count']}. После исправления отправьте /health снова."
+            if guide:
+                text += f"\n\nИнструкция: {guide}"
+        else:
+            text = "Неизвестная команда. Отправьте /health для инструкции."
+    except (ValidationError, StateConflict) as exc:
+        text = str(exc)
+    await update.effective_message.reply_text(text, disable_web_page_preview=True)
+
+
 async def miniapp_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _require_private(update):
         return
@@ -2249,6 +2345,9 @@ def build_application(
     application.bot_data["database"] = store
     application.bot_data["miniapp_url"] = settings.miniapp_url
     new_messages = filters.UpdateType.MESSAGE
+    application.add_handler(
+        CommandHandler("health", health_command, filters=new_messages)
+    )
     application.add_handler(
         CommandHandler("app", miniapp_command, filters=new_messages)
     )

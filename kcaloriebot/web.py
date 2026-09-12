@@ -18,6 +18,7 @@ from aiohttp import web
 
 from .config import Settings, load_settings
 from .database import Database
+from .health import HealthStore, HealthUnauthorized
 from .domain import (
     EARLIEST_DIARY_DATE,
     MAX_ENTRY_AGE_SECONDS,
@@ -76,6 +77,13 @@ async def boundary(request: web.Request, handler):
                 raw = ""
             request["user_id"] = authenticate(raw[4:], request.app[SETTINGS].bot_token)
         response = await handler(request)
+    except HealthUnauthorized:
+        response = web.json_response(
+            {
+                "error": "Ключ Apple Health недействителен. Подключитесь через /health connect."
+            },
+            status=401,
+        )
     except web.HTTPException as exc:
         response = web.json_response(
             {"error": "Откройте приложение заново из Telegram."}
@@ -111,7 +119,7 @@ async def boundary(request: web.Request, handler):
         response = web.json_response(
             {"error": "Не удалось выполнить запрос. Попробуйте ещё раз."}, status=500
         )
-    if request.path.startswith("/api/") or response.status >= 400:
+    if request.path.startswith(("/api/", "/health/v1/")) or response.status >= 400:
         response.headers["Cache-Control"] = "no-store"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "no-referrer"
@@ -314,6 +322,7 @@ async def static_file(request: web.Request) -> web.Response:
         "index.html": "text/html",
         "app.js": "text/javascript",
         "app.css": "text/css",
+        "apple-health.html": "text/html",
     }
     if name not in types:
         raise web.HTTPNotFound()
@@ -325,6 +334,22 @@ async def static_file(request: web.Request) -> web.Response:
     return web.Response(body=body, content_type=types[name], headers=headers)
 
 
+async def health_request(request: web.Request) -> web.Response:
+    authorization = request.headers.get("Authorization", "")
+    if not authorization.startswith("Bearer "):
+        raise HealthUnauthorized
+    data = await payload(request) if request.method == "POST" else {}
+    if request.query:
+        raise ValidationError("Передавайте ключ только в заголовке Authorization.")
+    result = await asyncio.to_thread(
+        HealthStore(request.app[DATABASE].path).request,
+        authorization[7:],
+        request.match_info["action"],
+        data,
+    )
+    return web.json_response(result)
+
+
 def build_web_app(
     settings: Settings, database: Database | None = None
 ) -> web.Application:
@@ -334,13 +359,15 @@ def build_web_app(
     app[DATABASE], app[SETTINGS] = store, settings
     # Restart on deployment: each process serves one consistent asset snapshot.
     app[ASSETS] = {}
-    for name in ("index.html", "app.js", "app.css"):
+    for name in ("index.html", "app.js", "app.css", "apple-health.html"):
         body = (STATIC / name).read_bytes()
         app[ASSETS][name] = (body, '"' + hashlib.sha256(body).hexdigest() + '"')
     app.add_routes(
         [
             web.get("/", static_file),
             web.get("/static/{name}", static_file),
+            web.get("/health/v1/{action:status}", health_request),
+            web.post("/health/v1/{action:next|ack}", health_request),
             web.get("/api/diary", diary),
             web.put("/api/profile", profile),
             web.get("/api/favorites", favorites),

@@ -13,6 +13,12 @@ goals, week/month statistics, and weight tracking. It shares the bot's
 SQLite database. The Mini App needs a public HTTPS address; see
 [Mini App setup](docs/miniapp.md).
 
+Apple Health export is available through a manually configured iPhone Shortcut.
+Send `/health connect` in a private chat to get a personal export key and setup
+instructions. It transfers nutrition and weight through the Mini App HTTPS server,
+tracks confirmed samples, and pauses interrupted or changed records for review.
+See [Apple Health setup and recovery](docs/apple-health.md).
+
 ## Requirements
 
 - Ubuntu Server 22.04 LTS or newer

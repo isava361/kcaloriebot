@@ -20,6 +20,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from kcaloriebot.config import Settings
 from kcaloriebot.database import Database
+from kcaloriebot.health import HealthStore
 from kcaloriebot.domain import SessionState
 from kcaloriebot.domain import local_datetime
 from kcaloriebot.web_store import entry_data
@@ -62,6 +63,82 @@ class AuthTests(unittest.TestCase):
 
 
 class WebTests(unittest.IsolatedAsyncioTestCase):
+    async def test_health_authentication_is_separate_and_revocable(self):
+        self.store.set_timezone(123, "UTC")
+        health = HealthStore(self.store.path)
+        token = health.connect(123)
+        headers = {"Authorization": "Bearer " + token}
+        for method, path in (
+            ("GET", "/health/v1/status"),
+            ("POST", "/health/v1/next"),
+            ("POST", "/health/v1/ack"),
+        ):
+            for invalid in ({}, self.headers, {"Authorization": "Bearer invalid"}):
+                response = await self.client.request(
+                    method, path, headers=invalid, json={}
+                )
+                self.assertEqual(response.status, 401)
+                self.assertEqual(response.headers["Cache-Control"], "no-store")
+        response = await self.client.get("/api/diary", headers=headers)
+        self.assertEqual(response.status, 401)
+        response = await self.client.get("/health/v1/status", headers=headers)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+        self.assertEqual((await response.json())["status"], "done")
+        health.disconnect(123)
+        response = await self.client.post("/health/v1/next", headers=headers, json={})
+        self.assertEqual(response.status, 401)
+        self.assertNotIn(token, await response.text())
+
+    async def test_health_protocol_partial_import_and_bad_payloads(self):
+        self.store.set_timezone(123, "UTC")
+        health = HealthStore(self.store.path)
+        token = health.connect(123, "2020-01-01")
+        headers = {"Authorization": "Bearer " + token}
+        entry = self.store.add_entry(
+            123, 1780000000, "Food", 100, 100, protein_per_100g=5
+        )
+        for kwargs in ({"data": "{"}, {"json": []}, {"json": {"user_id": 999}}):
+            response = await self.client.post(
+                "/health/v1/next", headers=headers, **kwargs
+            )
+            self.assertEqual(response.status, 400)
+        response = await self.client.post(
+            "/health/v1/next?user_id=999", headers=headers, json={}
+        )
+        self.assertEqual(response.status, 400)
+        first = await (
+            await self.client.post("/health/v1/next", headers=headers, json={})
+        ).json()
+        self.assertEqual(first["status"], "sample")
+        self.assertEqual(first["sample"]["id"], f"food:{entry.entry_id}:calories")
+        pending = await (
+            await self.client.post("/health/v1/next", headers=headers, json={})
+        ).json()
+        self.assertEqual(pending["status"], "review")
+        response = await self.client.post(
+            "/health/v1/ack", headers=headers, json={"receipt": "wrong"}
+        )
+        self.assertEqual(response.status, 409)
+        for _ in range(2):
+            response = await self.client.post(
+                "/health/v1/ack", headers=headers, json={"receipt": first["receipt"]}
+            )
+            self.assertEqual(response.status, 200)
+            self.assertEqual(await response.json(), {"status": "acknowledged"})
+        second = await (
+            await self.client.post("/health/v1/next", headers=headers, json={})
+        ).json()
+        self.assertEqual(second["sample"]["type"], "protein")
+        # The API offers no bearer-authorized mutation of food or setup keys.
+        response = await self.client.post(
+            "/health/v1/connect", headers=headers, json={}
+        )
+        self.assertEqual(response.status, 404)
+        response = await self.client.get("/static/apple-health.html")
+        self.assertEqual(response.status, 200)
+        self.assertIn("Log Health Sample", await response.text())
+
     async def test_static_revalidation_and_private_api(self):
         for path in ("/", "/static/app.js", "/static/app.css"):
             response = await self.client.get(path)

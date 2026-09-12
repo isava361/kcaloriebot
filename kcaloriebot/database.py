@@ -39,7 +39,7 @@ from .domain import (
 )
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # The favorite_foods and sessions nutrition columns keep their historical
 # *_per_100g names; for unit = 'serving' rows they hold per-serving values.
@@ -296,6 +296,28 @@ class Database:
                     COMMIT;
                 """)
                 version = 6
+            if version == 6:
+                connection.executescript("""
+                    BEGIN IMMEDIATE;
+                    CREATE TABLE IF NOT EXISTS health_connections (
+                        user_id INTEGER PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
+                        token_hash TEXT UNIQUE,
+                        start_utc INTEGER NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS health_samples (
+                        user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                        sample_id TEXT NOT NULL,
+                        payload_json TEXT NOT NULL,
+                        receipt TEXT NOT NULL UNIQUE,
+                        state TEXT NOT NULL CHECK (state IN ('pending', 'confirmed')),
+                        PRIMARY KEY (user_id, sample_id)
+                    );
+                    CREATE UNIQUE INDEX IF NOT EXISTS health_one_pending
+                        ON health_samples(user_id) WHERE state = 'pending';
+                    PRAGMA user_version = 7;
+                    COMMIT;
+                """)
+                version = 7
             if version != SCHEMA_VERSION:
                 raise RuntimeError(
                     f"Unsupported database schema version {version}; expected {SCHEMA_VERSION}."

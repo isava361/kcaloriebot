@@ -480,11 +480,12 @@ update leaves the Mini App down and Nginx answering 502. The script also
 installs `.[miniapp]` and fails the update if the web unit does not stay
 running, printing its last journal lines.
 
-This release upgrades SQLite schema 5 to 6, adding durable operation receipts
-and temporary deleted-entry snapshots. Back up the database and stop **both**
+The current SQLite schema is 7. Version 6 added durable operation receipts
+and temporary deleted-entry snapshots; version 7 adds Apple Health connections
+and per-sample export receipts. Back up the database and stop **both**
 processes before upgrading. Run the same code version for bot and web; rollback
 requires the pre-upgrade database backup. Restart the web service after every
-frontend deployment: it loads the three public assets into memory at startup.
+frontend deployment: it loads public assets into memory at startup.
 
 Point a domain such as `food.example.com` at the server and configure your HTTPS
 reverse proxy to forward to `127.0.0.1:8080`. Serve the app at the domain root.
@@ -855,10 +856,13 @@ valid user ID, and rejects credentials older than one hour (or more than 30
 seconds in the future). After expiry, close and reopen the app. User IDs from
 request bodies or query parameters do not select another user's diary.
 
-The server limits request bodies to 16 KiB and exposes only three static files.
+The server limits request bodies to 16 KiB and exposes only the explicitly listed
+static files, including the Apple Health setup guide.
 API responses disable caching. The bot token stays on the server; access logs
 are disabled. Do not configure a reverse proxy to log Authorization headers.
 The database keeps the same owner checks and nutrition validation as the bot.
+Apple Health uses separate, revocable bearer keys at `/health/v1/*`; they cannot
+authorize Mini App requests. See [Apple Health setup](apple-health.md).
 
 Food and weight mutations use a client-generated `Idempotency-Key`, with up to
 three attempts after a network/server failure. The mutation and response receipt
