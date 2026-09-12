@@ -52,6 +52,7 @@ STATS_KEYBOARD = ReplyKeyboardMarkup(
 SETTINGS_KEYBOARD = ReplyKeyboardMarkup(
     [
         [KeyboardButton("Daily goal"), KeyboardButton("Timezone")],
+        [KeyboardButton("Apple Health")],
         [KeyboardButton("Main menu")],
     ],
     resize_keyboard=True,

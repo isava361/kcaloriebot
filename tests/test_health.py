@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock
 
 from telegram.constants import ChatType
 
-from kcaloriebot.bot import health_command
+from kcaloriebot.bot import health_callback, health_command, handle_text
 from kcaloriebot.database import Database, SCHEMA_VERSION
 from kcaloriebot.domain import StateConflict, ValidationError, day_bounds, local_date
 from kcaloriebot.health import HealthStore, HealthUnauthorized
@@ -226,6 +226,71 @@ class HealthTests(unittest.TestCase):
 
 
 class HealthBotTests(unittest.IsolatedAsyncioTestCase):
+    async def test_settings_setup_buttons_and_old_connect_preserves_key(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = HealthStore(Path(directory) / "bot.db")
+            store.initialize()
+            store.set_timezone(1, "UTC")
+            context = SimpleNamespace(
+                application=SimpleNamespace(
+                    bot_data={
+                        "database": store,
+                        "miniapp_url": "https://example.com:8443/",
+                    }
+                )
+            )
+            message = SimpleNamespace(
+                text="Settings", reply_text=AsyncMock(), is_accessible=True
+            )
+            update = SimpleNamespace(
+                effective_user=SimpleNamespace(id=1),
+                effective_chat=SimpleNamespace(id=1, type=ChatType.PRIVATE),
+                effective_message=message,
+                callback_query=None,
+            )
+            await handle_text(update, context)
+            settings = message.reply_text.call_args.kwargs["reply_markup"]
+            self.assertIn(
+                "Apple Health",
+                [button.text for row in settings.keyboard for button in row],
+            )
+            message.text = "Apple Health"
+            await handle_text(update, context)
+            panel = message.reply_text.call_args.kwargs["reply_markup"]
+            buttons = [button for row in panel.inline_keyboard for button in row]
+            self.assertIn(
+                "health:connect", [button.callback_data for button in buttons]
+            )
+            self.assertIn(
+                "https://example.com:8443/static/apple-health.html",
+                [button.url for button in buttons],
+            )
+            self.assertFalse(store.status(1)["connected"])
+            query = SimpleNamespace(
+                data="health:connect", message=message, answer=AsyncMock()
+            )
+            update.callback_query = query
+            await health_callback(update, context)
+            self.assertTrue(store.status(1)["connected"])
+            self.assertIn("Персональный ключ", message.reply_text.call_args.args[0])
+            token = store.connect(1)
+            await health_callback(update, context)
+            self.assertNotIn("Персональный ключ", message.reply_text.call_args.args[0])
+            self.assertEqual(store.request(token, "status", {})["status"], "done")
+            panel = message.reply_text.call_args.kwargs["reply_markup"]
+            self.assertNotIn(
+                "health:connect",
+                [
+                    button.callback_data
+                    for row in panel.inline_keyboard
+                    for button in row
+                ],
+            )
+            # A callback in a group cannot issue or rotate a private export key.
+            update.effective_chat.type = ChatType.GROUP
+            await health_callback(update, context)
+            self.assertEqual(store.request(token, "status", {})["status"], "done")
+
     async def test_setup_private_recovery_and_revocation(self):
         with tempfile.TemporaryDirectory() as directory:
             store = Database(Path(directory) / "bot.db")

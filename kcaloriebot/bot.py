@@ -714,8 +714,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
     elif text == "Settings":
         await turn.message.reply_text(
-            "Settings — daily goal and timezone:", reply_markup=SETTINGS_KEYBOARD
+            "Settings — daily goal, timezone and Apple Health:",
+            reply_markup=SETTINGS_KEYBOARD,
         )
+    elif text == "Apple Health":
+        await _health_action(update, context, [])
     elif text == "Week Stats":
         await _show_daily_stats(update, context, Period.WEEK, 0)
     elif text == "Month Stats":
@@ -1639,7 +1642,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.message.reply_text(
                 "Progress — food statistics and weight:"
                 if action.kind == "menu_progress"
-                else "Settings:",
+                else "Settings — daily goal, timezone and Apple Health:",
                 reply_markup=STATS_KEYBOARD
                 if action.kind == "menu_progress"
                 else SETTINGS_KEYBOARD,
@@ -2231,12 +2234,61 @@ def _health_sample_text(sample: dict | None) -> str:
     return f"{labels[sample['type']]}: {sample['value']:g} {sample['unit']}, {sample['date']}"
 
 
+def _health_keyboard(url: str | None, connected: bool) -> InlineKeyboardMarkup:
+    rows = []
+    if url:
+        if not connected:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        "Подключить Apple Health", callback_data="health:connect"
+                    )
+                ]
+            )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "Как настроить шорткат на iPhone",
+                    url=urljoin(url, "/static/apple-health.html"),
+                )
+            ]
+        )
+    rows.append(
+        [InlineKeyboardButton("Проверить подключение", callback_data="health:status")]
+    )
+    return InlineKeyboardMarkup(rows)
+
+
 async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _health_action(update, context, context.args or [])
+
+
+async def health_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_private(update):
+        return
+    query = update.callback_query
+    if query is None:
+        return
+    await query.answer()
+    if query.message is None or not query.message.is_accessible:
+        return
+    args = []
+    if query.data == "health:connect":
+        user_id, _ = _identity(update)
+        status = await _call(HealthStore(_db(context).path).status, user_id)
+        # An old button or a double tap must not invalidate an installed key.
+        if not status["connected"]:
+            args = ["connect"]
+    await _health_action(update, context, args)
+
+
+async def _health_action(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, args: list[str]
+) -> None:
     if not await _require_private(update) or update.effective_message is None:
         return
     user_id, _ = _identity(update)
     store = HealthStore(_db(context).path)
-    args = context.args or []
     url = context.application.bot_data.get("miniapp_url")
     guide = urljoin(url, "/static/apple-health.html") if url else None
     try:
@@ -2259,6 +2311,7 @@ async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 "Добавьте его в команду на iPhone; не публикуйте команду вместе с ключом.\n"
                 f"Пошаговая настройка:\n{guide}\n\n"
                 "Отключить доступ: /health disconnect",
+                reply_markup=_health_keyboard(url, True),
                 disable_web_page_preview=True,
             )
             return
@@ -2276,6 +2329,16 @@ async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             text = (
                 "Apple Health: "
                 + ("подключено" if status["connected"] else "не подключено")
+                + "\n\nПереносите калории, БЖУ и вес из бота в «Здоровье». "
+                "Для этого один раз настройте шорткат в приложении «Команды» на iPhone, "
+                "а затем запускайте его для переноса новых записей.\n\n"
+                + (
+                    "Откройте пошаговую инструкцию кнопкой ниже.\n"
+                    if url and status["connected"]
+                    else "Начните с кнопки «Подключить Apple Health», затем откройте инструкцию ниже.\n"
+                    if url
+                    else "Подключение пока недоступно: администратору нужно настроить сервер экспорта.\n"
+                )
                 + "\nПодключить или заменить ключ: /health connect\n"
                 "Перенести историю: /health connect ГГГГ-ММ-ДД\nОтключить: /health disconnect"
             )
@@ -2309,7 +2372,12 @@ async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             text = "Неизвестная команда. Отправьте /health для инструкции."
     except (ValidationError, StateConflict) as exc:
         text = str(exc)
-    await update.effective_message.reply_text(text, disable_web_page_preview=True)
+    status = await _call(store.status, user_id)
+    await update.effective_message.reply_text(
+        text,
+        reply_markup=_health_keyboard(url, status["connected"]),
+        disable_web_page_preview=True,
+    )
 
 
 async def miniapp_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2359,6 +2427,9 @@ def build_application(
     application.add_handler(CommandHandler("add", add_command, filters=new_messages))
     application.add_handler(
         CommandHandler("weight", weight_command, filters=new_messages)
+    )
+    application.add_handler(
+        CallbackQueryHandler(health_callback, pattern=r"^health:(connect|status)$")
     )
     application.add_handler(CallbackQueryHandler(handle_callback))
     application.add_handler(
