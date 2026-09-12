@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 from dataclasses import dataclass, replace
 from datetime import date, timedelta
@@ -8,7 +9,7 @@ from typing import Any, Callable, Optional, TypeVar
 from urllib.parse import urljoin
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, WebAppInfo
-from telegram.constants import ChatType
+from telegram.constants import ChatType, ParseMode
 from telegram.error import TelegramError
 from telegram.ext import (
     Application,
@@ -2320,25 +2321,31 @@ async def _health_action(
             )
             zone = await _call(store.get_timezone, user_id)
             window = _health_window_text(zone, await _call(store.status, user_id))
+            # Monospace makes the key one tap to copy in Telegram clients. Every
+            # interpolated value is escaped: a stray "<" would make Telegram
+            # reject the message, and the key it carries is shown only once.
+            address = html.escape(urljoin(url, "/health/v1/"))
             await update.effective_message.reply_text(
                 "Apple Health подключён. Осталось один раз поставить команду "
                 "на iPhone.\n\n"
-                f"1. Скопируйте адрес сервера:\n{urljoin(url, '/health/v1/')}\n\n"
-                "2. Персональный ключ — скопируйте следующую строку целиком:\n"
-                f"{token}\n\n"
+                "1. Адрес сервера — нажмите на него, чтобы скопировать:\n"
+                f"<code>{address}</code>\n\n"
+                "2. Персональный ключ — нажмите на него, чтобы скопировать:\n"
+                f"<code>{html.escape(token)}</code>\n\n"
                 "3. Откройте инструкцию: команда ставится по ссылке, ключ "
-                f"вставляется в неё один раз.\n{guide}\n\n"
+                f"вставляется в неё один раз.\n{html.escape(guide)}\n\n"
                 "Ключ показывается один раз. Потеряли — нажмите «Подключить Apple "
                 "Health» снова: прогресс переноса и период сохранятся, а старый "
                 "ключ перестанет работать.\n"
                 "Не пересылайте ключ и не делитесь готовой командой: ключ лежит "
                 "внутри неё. Запускайте её только на одном iPhone.\n\n"
-                f"{window}\n"
+                f"{html.escape(window)}\n"
                 "Перенести всё начиная с даты: /health connect ГГГГ-ММ-ДД\n"
                 "Перенести только период: /health connect ОТ ДО\n"
                 "Отключить доступ: /health disconnect",
                 reply_markup=_health_keyboard(url, True),
                 disable_web_page_preview=True,
+                parse_mode=ParseMode.HTML,
             )
             return
         if args == ["disconnect"]:
