@@ -327,6 +327,7 @@ async def static_file(request: web.Request) -> web.Response:
         "app.js": "text/javascript",
         "app.css": "text/css",
         "apple-health.html": "text/html",
+        "apple-health-manual.html": "text/html",
     }
     if name not in types:
         raise web.HTTPNotFound()
@@ -365,7 +366,13 @@ def build_web_app(
     app[DATABASE], app[SETTINGS] = store, settings
     # Restart on deployment: each process serves one consistent asset snapshot.
     app[ASSETS] = {}
-    for name in ("index.html", "app.js", "app.css", "apple-health.html"):
+    for name in (
+        "index.html",
+        "app.js",
+        "app.css",
+        "apple-health.html",
+        "apple-health-manual.html",
+    ):
         body = (STATIC / name).read_bytes()
         app[ASSETS][name] = (body, '"' + hashlib.sha256(body).hexdigest() + '"')
     app.add_routes(
