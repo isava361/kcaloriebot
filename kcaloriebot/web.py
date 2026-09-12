@@ -132,12 +132,14 @@ async def boundary(request: web.Request, handler):
 
 
 async def payload(request: web.Request, empty_as_object: bool = False) -> dict:
-    if request.content_type != "application/json":
-        raise ValueError
     # Apple Shortcuts sends no body at all for a JSON request body with no
     # fields, which is what a parameterless export request looks like there.
+    # With no body it may send no content type either, so an empty body is read
+    # before the header is judged; anything else still has to declare itself.
     if empty_as_object and not (await request.read()).strip():
         return {}
+    if request.content_type != "application/json":
+        raise ValueError
     data = await request.json()
     if not isinstance(data, dict):
         raise ValueError

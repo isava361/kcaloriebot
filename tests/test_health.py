@@ -224,6 +224,62 @@ class HealthTests(unittest.TestCase):
                 self.store.request(self.token, action, data)
         self.assertEqual(self.next()["status"], "sample")
 
+    def test_status_reads_without_taking_the_write_lock(self):
+        self.food()
+        blocker = sqlite3.connect(self.store.path, timeout=0)
+        self.addCleanup(blocker.close)
+        # A shortcut polling the queue must not stall the diary behind it.
+        blocker.execute("BEGIN IMMEDIATE")
+        try:
+            self.assertEqual(
+                self.store.request(self.token, "status", {})["status"], "ready"
+            )
+        finally:
+            blocker.rollback()
+
+    def test_a_change_does_not_hold_up_the_rest_of_the_queue(self):
+        food = self.food()
+        self.ack(self.next())
+        later = self.store.add_entry(1, self.epoch + 60, "Гречка", 200, 50)
+        with self.store._connect() as conn:
+            conn.execute(
+                "UPDATE food_entries SET calories=90 WHERE entry_id=?", (food.entry_id,)
+            )
+        result = self.next()
+        self.assertEqual(result["status"], "sample")
+        self.assertEqual(result["sample"]["id"], f"food:{later.entry_id}:calories")
+        self.assertEqual(result["issue_count"], 1)
+        self.ack(result)
+        # Nothing new left to issue, so the conflict is what stops the run.
+        self.assertEqual(self.next()["status"], "changed")
+
+    def test_a_change_outside_the_window_is_still_detected(self):
+        food = self.food()
+        self.ack(self.next())
+        after = local_date(self.epoch, "Europe/Moscow") + timedelta(days=1)
+        self.token = self.store.connect(1, after.isoformat(), after.isoformat())
+        with self.store._connect() as conn:
+            conn.execute(
+                "UPDATE food_entries SET calories=90 WHERE entry_id=?", (food.entry_id,)
+            )
+        result = self.store.request(self.token, "status", {})
+        self.assertEqual(result["status"], "changed")
+        self.assertEqual(result["issues"][0]["current"]["value"], 90)
+
+    def test_ledger_lookups_batch_past_the_sqlite_parameter_limit(self):
+        ids = [
+            "food:%d:calories"
+            % self.store.add_entry(1, self.epoch + index, "Еда", 200, 50).entry_id
+            for index in range(600)
+        ]
+        other = self.store.add_entry(2, self.epoch, "Чужое", 200, 50)
+        with self.store._connect() as conn:
+            issued = self.store._issued(
+                conn, 1, [*ids, f"food:{other.entry_id}:calories", "не запись"]
+            )
+        # Every id resolves, in batches SQLite can bind, and only the owner's.
+        self.assertEqual(sorted(issued), sorted(ids))
+
     def test_invalid_connect_does_not_rotate_key(self):
         for start in ("bad", "1999-01-01", "2999-01-01"):
             with self.assertRaises(ValidationError):
@@ -334,6 +390,15 @@ class HealthBotTests(unittest.IsolatedAsyncioTestCase):
             )
             message.text = "Apple Health"
             await handle_text(update, context)
+
+            def callbacks():
+                panel = message.reply_text.call_args.kwargs["reply_markup"]
+                return [
+                    button.callback_data
+                    for row in panel.inline_keyboard
+                    for button in row
+                ]
+
             panel = message.reply_text.call_args.kwargs["reply_markup"]
             buttons = [button for row in panel.inline_keyboard for button in row]
             self.assertIn(
@@ -355,19 +420,25 @@ class HealthBotTests(unittest.IsolatedAsyncioTestCase):
             await health_callback(update, context)
             self.assertNotIn("Персональный ключ", message.reply_text.call_args.args[0])
             self.assertEqual(store.request(token, "status", {})["status"], "done")
-            panel = message.reply_text.call_args.kwargs["reply_markup"]
-            self.assertNotIn(
-                "health:connect",
-                [
-                    button.callback_data
-                    for row in panel.inline_keyboard
-                    for button in row
-                ],
-            )
-            # A callback in a group cannot issue or rotate a private export key.
-            update.effective_chat.type = ChatType.GROUP
+            self.assertNotIn("health:connect", callbacks())
+            # A key is shown once, so a lost one is replaced from the same
+            # panel — but not by one tap: asking first keeps a stray tap from
+            # breaking the shortcut already installed on the iPhone.
+            self.assertIn("health:rotate", callbacks())
+            query.data = "health:rotate"
             await health_callback(update, context)
             self.assertEqual(store.request(token, "status", {})["status"], "done")
+            self.assertEqual(callbacks(), ["health:rotate:yes"])
+            # A callback in a group cannot issue or rotate a private export key.
+            update.effective_chat.type = ChatType.GROUP
+            query.data = "health:rotate:yes"
+            await health_callback(update, context)
+            self.assertEqual(store.request(token, "status", {})["status"], "done")
+            update.effective_chat.type = ChatType.PRIVATE
+            await health_callback(update, context)
+            self.assertIn("Персональный ключ", message.reply_text.call_args.args[0])
+            with self.assertRaises(HealthUnauthorized):
+                store.request(token, "status", {})
 
     async def test_setup_private_recovery_and_revocation(self):
         with tempfile.TemporaryDirectory() as directory:
