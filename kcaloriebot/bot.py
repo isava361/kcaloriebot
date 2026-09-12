@@ -2252,14 +2252,15 @@ def _health_window_text(zone: str | None, status: dict) -> str:
 def _health_keyboard(url: str | None, connected: bool) -> InlineKeyboardMarkup:
     rows = []
     if url:
-        if not connected:
-            rows.append(
-                [
-                    InlineKeyboardButton(
-                        "Подключить Apple Health", callback_data="health:connect"
-                    )
-                ]
-            )
+        # A key is shown once, so the panel always offers the way to a new one.
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "Заменить ключ" if connected else "Подключить Apple Health",
+                    callback_data="health:rotate" if connected else "health:connect",
+                )
+            ]
+        )
         rows.append(
             [
                 InlineKeyboardButton(
@@ -2288,12 +2289,32 @@ async def health_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if query.message is None or not query.message.is_accessible:
         return
     args = []
-    if query.data == "health:connect":
+    if query.data in {"health:connect", "health:rotate"}:
         user_id, _ = _identity(update)
         status = await _call(HealthStore(_db(context).path).status, user_id)
-        # An old button or a double tap must not invalidate an installed key.
         if not status["connected"]:
             args = ["connect"]
+        elif query.data == "health:rotate":
+            # An old button or a double tap must not invalidate an installed
+            # key, so replacing a working one is confirmed on its own screen.
+            await query.message.reply_text(
+                "Новый ключ заменит текущий: команда на iPhone перестанет "
+                "переносить данные, пока вы не вставите в неё новый ключ. "
+                "Прогресс переноса и период сохранятся.",
+                reply_markup=InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton(
+                                "Да, выдать новый ключ",
+                                callback_data="health:rotate:yes",
+                            )
+                        ]
+                    ]
+                ),
+            )
+            return
+    elif query.data == "health:rotate:yes":
+        args = ["connect"]
     await _health_action(update, context, args)
 
 
@@ -2334,12 +2355,13 @@ async def _health_action(
                 f"<code>{html.escape(token)}</code>\n\n"
                 "3. Откройте инструкцию: команда ставится по ссылке, ключ "
                 f"вставляется в неё один раз.\n{html.escape(guide)}\n\n"
-                "Ключ показывается один раз. Потеряли — нажмите «Подключить Apple "
-                "Health» снова: прогресс переноса и период сохранятся, а старый "
-                "ключ перестанет работать.\n"
+                "Ключ показывается один раз. Потеряли — нажмите «Заменить ключ» "
+                "или отправьте /health connect: прогресс переноса и период "
+                "сохранятся, а старый ключ перестанет работать.\n"
                 "Не пересылайте ключ и не делитесь готовой командой: ключ лежит "
                 "внутри неё. Запускайте её только на одном iPhone.\n\n"
                 f"{html.escape(window)}\n"
+                "Заменить ключ: /health connect\n"
                 "Перенести всё начиная с даты: /health connect ГГГГ-ММ-ДД\n"
                 "Перенести только период: /health connect ОТ ДО\n"
                 "Отключить доступ: /health disconnect",
@@ -2474,7 +2496,9 @@ def build_application(
         CommandHandler("weight", weight_command, filters=new_messages)
     )
     application.add_handler(
-        CallbackQueryHandler(health_callback, pattern=r"^health:(connect|status)$")
+        CallbackQueryHandler(
+            health_callback, pattern=r"^health:(connect|status|rotate|rotate:yes)$"
+        )
     )
     application.add_handler(CallbackQueryHandler(handle_callback))
     application.add_handler(

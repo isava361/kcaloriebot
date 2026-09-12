@@ -112,7 +112,10 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         empty = {"data": "", "headers": {**headers, "Content-Type": "application/json"}}
         response = await self.client.post("/health/v1/ack", **empty)
         self.assertEqual(response.status, 400)
-        first = await (await self.client.post("/health/v1/next", **empty)).json()
+        # With no body Shortcuts may send no content type either.
+        first = await (
+            await self.client.post("/health/v1/next", data="", headers=headers)
+        ).json()
         self.assertEqual(first["status"], "sample")
         self.assertEqual(first["sample"]["id"], f"food:{entry.entry_id}:calories")
         pending = await (

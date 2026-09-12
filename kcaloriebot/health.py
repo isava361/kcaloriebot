@@ -34,6 +34,27 @@ def revision(value) -> str:
     return hashlib.sha256(encoded(value).encode()).hexdigest()[:16]
 
 
+_FOOD_ROWS = (
+    "SELECT entry_id, eaten_at_utc, calories, protein, fat, carbs "
+    "FROM food_entries WHERE user_id=?"
+)
+_WEIGHT_ROWS = (
+    "SELECT weight_id, measured_at_utc, weight_kg FROM weights WHERE user_id=?"
+)
+# SQLite binds at most 999 parameters on the oldest builds this project runs on.
+_BATCH = 500
+
+
+def _by_id(conn, sql: str, column: str, user_id: int, identifiers: list[int]):
+    """Rows for the given ids, asked for in batches SQLite will bind."""
+    for offset in range(0, len(identifiers), _BATCH):
+        batch = identifiers[offset : offset + _BATCH]
+        yield from conn.execute(
+            f"{sql} AND {column} IN ({','.join('?' * len(batch))})",
+            (user_id, *batch),
+        )
+
+
 class HealthStore(Database):
     @staticmethod
     def _day(value: str, today: date) -> date:
@@ -109,7 +130,7 @@ class HealthStore(Database):
         return row
 
     @staticmethod
-    def _samples(conn, user_id: int) -> dict:
+    def _collect(food_rows, weight_rows) -> dict:
         samples = {}
 
         def add(sample_id, kind, value, epoch, unit):
@@ -123,11 +144,7 @@ class HealthStore(Database):
                     "epoch": epoch,
                 }
 
-        for row in conn.execute(
-            "SELECT entry_id, eaten_at_utc, calories, protein, fat, carbs "
-            "FROM food_entries WHERE user_id=?",
-            (user_id,),
-        ):
+        for row in food_rows:
             for kind in ("calories", "protein", "fat", "carbs"):
                 add(
                     f"food:{row['entry_id']}:{kind}",
@@ -136,7 +153,7 @@ class HealthStore(Database):
                     row["eaten_at_utc"],
                     "kcal" if kind == "calories" else "g",
                 )
-        for row in conn.execute("SELECT * FROM weights WHERE user_id=?", (user_id,)):
+        for row in weight_rows:
             add(
                 f"weight:{row['weight_id']}",
                 "weight",
@@ -146,10 +163,57 @@ class HealthStore(Database):
             )
         return samples
 
+    @classmethod
+    def _window(
+        cls, conn, user_id: int, start_utc: int, end_utc: int | None, now: int
+    ) -> dict:
+        """Samples the export window may still issue.
+
+        Bounding the range in SQL keeps one request proportional to the window
+        instead of to the whole diary; both time indexes cover this range.
+        """
+        # end_utc is the local midnight after the last exported day, and a
+        # record is never issued before its own time has arrived.
+        last = now + 1 if end_utc is None else min(end_utc, now + 1)
+        if last <= start_utc:
+            return {}
+        bounds = (user_id, start_utc, last)
+        return cls._collect(
+            conn.execute(
+                f"{_FOOD_ROWS} AND eaten_at_utc >= ? AND eaten_at_utc < ?", bounds
+            ),
+            conn.execute(
+                f"{_WEIGHT_ROWS} AND measured_at_utc >= ? AND measured_at_utc < ?",
+                bounds,
+            ),
+        )
+
+    @classmethod
+    def _issued(cls, conn, user_id: int, sample_ids) -> dict:
+        """Current values behind samples the ledger already knows about.
+
+        The ledger outlives any window, so these are looked up by row id: a
+        change to a record outside the current window is still detected, and
+        the check costs the export history rather than the whole diary.
+        """
+        entries, weights = set(), set()
+        for sample_id in sample_ids:
+            table, _, rest = sample_id.partition(":")
+            identifier = rest.partition(":")[0]
+            if not identifier.isdigit():
+                continue
+            if table == "food":
+                entries.add(int(identifier))
+            elif table == "weight":
+                weights.add(int(identifier))
+        return cls._collect(
+            _by_id(conn, _FOOD_ROWS, "entry_id", user_id, sorted(entries)),
+            _by_id(conn, _WEIGHT_ROWS, "weight_id", user_id, sorted(weights)),
+        )
+
     def _state(
         self, conn, user_id: int, start_utc: int, end_utc: int | None = None
     ) -> dict:
-        samples = self._samples(conn, user_id)
         ledger = {
             row["sample_id"]: row
             for row in conn.execute(
@@ -159,9 +223,10 @@ class HealthStore(Database):
         pending = next(
             (row for row in ledger.values() if row["state"] == "pending"), None
         )
+        issued = self._issued(conn, user_id, ledger)
         issues = []
         for sample_id, row in ledger.items():
-            current = samples.get(sample_id)
+            current = issued.get(sample_id)
             if row["state"] == "confirmed" and row["payload_json"] != encoded(current):
                 issues.append(
                     {
@@ -171,15 +236,13 @@ class HealthStore(Database):
                         "revision": revision(current),
                     }
                 )
+        # Oldest first, by the time the sample carried when it was exported:
+        # that is the record to look for in Health, and sample ids sort as
+        # strings, which would put food:10 before food:9 and cut the wrong ten.
+        issues.sort(key=lambda issue: (issue["previous"]["epoch"], issue["id"]))
+        window = self._window(conn, user_id, start_utc, end_utc, self.now_epoch())
         new = sorted(
-            (
-                sample
-                for key, sample in samples.items()
-                if key not in ledger
-                and start_utc <= sample["epoch"] <= self.now_epoch()
-                # end_utc is the local midnight after the last exported day.
-                and (end_utc is None or sample["epoch"] < end_utc)
-            ),
+            (sample for key, sample in window.items() if key not in ledger),
             key=lambda sample: (sample["epoch"], sample["id"]),
         )
         result = {
@@ -195,10 +258,10 @@ class HealthStore(Database):
                 sample=json.loads(pending["payload_json"]),
                 receipt=pending["receipt"],
             )
-        elif issues:
-            result["status"] = "changed"
         elif new:
             result.update(status="ready", sample=new[0])
+        elif issues:
+            result["status"] = "changed"
         return result
 
     def status(self, user_id: int) -> dict:
@@ -220,8 +283,10 @@ class HealthStore(Database):
 
     def request(self, token: str, action: str, data: dict) -> dict:
         with self._connect() as conn:
-            # Authentication and the mutation share a transaction, including revocation.
-            conn.execute("BEGIN IMMEDIATE")
+            # Authentication and the mutation share a transaction, including
+            # revocation. A read-only status takes no write lock: the diary must
+            # stay writable while the export is being polled.
+            conn.execute("BEGIN" if action == "status" else "BEGIN IMMEDIATE")
             connection = self._authenticate(conn, token)
             user_id = connection["user_id"]
             if action == "ack":
@@ -238,7 +303,9 @@ class HealthStore(Database):
                 receipt = secrets.token_hex(16)
                 sample = result["sample"]
                 conn.execute(
-                    "INSERT INTO health_samples VALUES (?, ?, ?, ?, 'pending')",
+                    "INSERT INTO health_samples "
+                    "(user_id, sample_id, payload_json, receipt, state) "
+                    "VALUES (?, ?, ?, ?, 'pending')",
                     (user_id, sample["id"], encoded(sample), receipt),
                 )
                 result.update(status="sample", receipt=receipt)
@@ -277,7 +344,7 @@ class HealthStore(Database):
     def corrected(self, user_id: int, sample_id: str, expected: str) -> None:
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            current = self._samples(conn, user_id).get(sample_id)
+            current = self._issued(conn, user_id, [sample_id]).get(sample_id)
             if revision(current) != expected:
                 raise StateConflict("Запись снова изменилась. Отправьте /health.")
             cursor = conn.execute(
