@@ -131,9 +131,13 @@ async def boundary(request: web.Request, handler):
     return response
 
 
-async def payload(request: web.Request) -> dict:
+async def payload(request: web.Request, empty_as_object: bool = False) -> dict:
     if request.content_type != "application/json":
         raise ValueError
+    # Apple Shortcuts sends no body at all for a JSON request body with no
+    # fields, which is what a parameterless export request looks like there.
+    if empty_as_object and not (await request.read()).strip():
+        return {}
     data = await request.json()
     if not isinstance(data, dict):
         raise ValueError
@@ -338,7 +342,9 @@ async def health_request(request: web.Request) -> web.Response:
     authorization = request.headers.get("Authorization", "")
     if not authorization.startswith("Bearer "):
         raise HealthUnauthorized
-    data = await payload(request) if request.method == "POST" else {}
+    data = (
+        await payload(request, empty_as_object=True) if request.method == "POST" else {}
+    )
     if request.query:
         raise ValidationError("Передавайте ключ только в заголовке Authorization.")
     result = await asyncio.to_thread(
