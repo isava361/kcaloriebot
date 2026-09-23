@@ -92,6 +92,37 @@ const {chromium, webkit} = require(process.env.PLAYWRIGHT_MODULE_PATH || path.re
     assert.equal(await page.locator('#favorite-form [name=eaten_at]').inputValue(),day+'T12:00');
     await page.locator('#favorites-dialog .close').click();
     await page.locator('#favorites-dialog').waitFor({state:'hidden'});
+    // Product search: the external database is stubbed; favorites are real.
+    const searches = [];
+    await page.route('**/api/food-search?*', route => {
+      searches.push(new URL(route.request().url()).searchParams.get('q'));
+      return route.fulfill({contentType:'application/json', body: JSON.stringify({page:1, has_next:false, items:[
+        {source:'openfoodfacts', code:'1', name:'Гречка (Мистраль)', title:'Гречка', brand:'Мистраль', calories:351, protein:12, fat:3.4, carbs:null}]})});
+    });
+    await page.locator('#search-button').click();
+    assert.ok(await page.evaluate(() => !Telegram.WebApp.MainButton.isVisible));
+    await page.locator('#product-search').fill('гречка');
+    await page.locator('#product-search').press('Enter');
+    await page.locator('#products .product').waitFor();
+    assert.deepEqual(searches, ['гречка']);
+    assert.match(await page.locator('#products .product-values').textContent(), /351 ккал · Б 12 · Ж 3,4 · У — на 100 г/);
+    await page.getByRole('button', {name:'В избранное', exact:true}).click();
+    await page.locator('#products .product-saved').waitFor();
+    await page.locator('#products .product-main').click();
+    await page.locator('#search-dialog').waitFor({state:'hidden'});
+    assert.equal(await page.locator('#food-form [name=name]').inputValue(), 'Гречка (Мистраль)');
+    assert.equal(await page.locator('#food-form [name=calories]').inputValue(), '351');
+    assert.equal(await page.locator('#food-form [name=carbs]').inputValue(), '');
+    assert.equal(await page.locator('#food-form [name=grams]').inputValue(), '100');
+    assert.equal(await page.locator('#food-form [name=eaten_at]').inputValue(), day+'T12:00');
+    await page.locator('#food-dialog .close').click();
+    await page.locator('#food-dialog').waitFor({state:'hidden'});
+    await page.locator('#favorites-button').click();
+    await page.locator('#favorite-search').fill('мистраль');
+    await page.locator('#favorites button').waitFor();
+    assert.match(await page.locator('#favorites button').textContent(), /Гречка \(Мистраль\) · 351 ккал на 100 г/);
+    await page.locator('#favorites-dialog .close').click();
+    await page.locator('#favorites-dialog').waitFor({state:'hidden'});
     // Open from a scrolled diary. The fixed background must retain its geometry.
     await page.locator('#add-button').scrollIntoViewIfNeeded();
     const background = await page.locator('#summary').boundingBox();

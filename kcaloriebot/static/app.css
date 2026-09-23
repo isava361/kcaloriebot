@@ -554,6 +554,61 @@ input,select,textarea{
   border-color:var(--accent);
   outline:1px solid var(--accent)
 }
+.search-open{
+  margin-top:var(--s2)
+}
+.search-row{
+  display:flex;
+  align-items:flex-end;
+  gap:var(--s2);
+  margin:var(--s4) 0 var(--s2)
+}
+.search-row label{
+  flex:1;
+  min-width:0;
+  margin:0
+}
+.product{
+  display:flex;
+  align-items:center;
+  gap:var(--s2);
+  padding:var(--s2) 0;
+  border-bottom:1px solid var(--border)
+}
+.product-main{
+  flex:1;
+  min-width:0;
+  display:flex;
+  flex-direction:column;
+  align-items:flex-start;
+  gap:2px;
+  text-align:left;
+  font-weight:400;
+  border:0;
+  padding:var(--s2) 0;
+  background:transparent
+}
+.product-name{
+  font-weight:600;
+  overflow-wrap:anywhere
+}
+.product-brand,.product-values,.product-saved,.attribution{
+  font-size:var(--t-caption);
+  color:var(--muted)
+}
+.product-values{
+  font-variant-numeric:tabular-nums
+}
+.product-saved{
+  white-space:nowrap
+}
+.product>.text-button{
+  white-space:nowrap;
+  font-size:var(--t-caption)
+}
+.attribution{
+  margin-top:var(--s4)
+}
 #recent-list button{
   margin-top:var(--s2);
   text-align:left;

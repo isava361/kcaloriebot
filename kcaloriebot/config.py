@@ -18,6 +18,7 @@ class Settings:
     database_path: Path
     log_level: int
     miniapp_url: Optional[str] = None
+    food_search: bool = True
 
     def __repr__(self) -> str:
         return (
@@ -59,9 +60,13 @@ def load_settings(environ: Optional[Mapping[str, str]] = None) -> Settings:
             valid = False
         if not valid:
             raise ConfigError("MINIAPP_URL must be a public HTTPS URL.")
+    food_search = values.get("FOOD_SEARCH", "").strip().lower() or "openfoodfacts"
+    if food_search not in ("openfoodfacts", "off"):
+        raise ConfigError("FOOD_SEARCH must be 'openfoodfacts' or 'off'.")
     return Settings(
         bot_token=token,
         database_path=database_path,
         log_level=log_level,
         miniapp_url=miniapp_url,
+        food_search=food_search == "openfoodfacts",
     )

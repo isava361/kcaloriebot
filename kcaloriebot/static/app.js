@@ -39,7 +39,8 @@ async function api(path, method = "GET", data) {
         headers: {Authorization: `tma ${tg?.initData || ""}`, "Content-Type": "application/json", ...(key ? {"Idempotency-Key": key} : {})},
         body,
       });
-      if (response.status >= 500) throw new Error("Сервер временно недоступен.");
+      // Our own 503 carries a JSON error and is final; a proxy's is retried.
+      if (response.status >= 500 && response.status !== 503) throw new Error("Сервер временно недоступен.");
       const result = await response.json();
       if (key && response.status !== 401 && response.status !== 429) { delete pending[signature]; persistPending(); }
       if (!response.ok) {
@@ -236,6 +237,7 @@ async function loadDiary(day = "", append = false) {
     $("day").max = state.today;
     $("day").min = state.earliest_day;
     $("zone").textContent = state.timezone;
+    $("search-button").hidden = !state.food_search;
     renderDayLabel();
     const consumed = state.stats.calories;
     const over = Boolean(state.goal && consumed > state.goal);
@@ -551,6 +553,58 @@ onClick("recent-button", async () => {
   if (!result.items.length) $("recent-list").append(node("p", "Здесь появится недавно записанная еда.", "empty"));
   openDialog("recent-dialog");
 });
+let productQuery = "", productPage = 1, productGeneration = 0;
+function productTemplate(item) {
+  return {name: item.name, unit: "100g", nutrition: {grams: 100, servings: null},
+    values: {calories: item.calories, protein: item.protein, fat: item.fat, carbs: item.carbs}};
+}
+function renderProduct(item) {
+  const card = node("article", "", "product");
+  const macro = (value) => value == null ? "—" : fmt(value);
+  const main = action("", () => { $("search-dialog").close(); openFood(productTemplate(item), true); }, "product-main");
+  main.setAttribute("aria-label", `Добавить в дневник: ${item.name}`);
+  main.append(node("span", item.title, "product-name"));
+  if (item.brand) main.append(node("span", item.brand, "product-brand"));
+  main.append(node("span", `${fmt(item.calories)} ккал · Б ${macro(item.protein)} · Ж ${macro(item.fat)} · У ${macro(item.carbs)} на 100 г`, "product-values"));
+  const save = action("В избранное", async () => {
+    const favorite = await api("favorites", "POST", {name: item.name, unit: "100g", calories: item.calories, protein: item.protein, fat: item.fat, carbs: item.carbs});
+    save.replaceWith(node("span", "★ В избранном", "product-saved"));
+    notice(`«${favorite.name}» в избранном.`);
+  });
+  card.append(main, save);
+  return card;
+}
+async function searchProducts(append = false) {
+  const query = append ? productQuery : $("product-search").value.trim();
+  if (query.length < 2) { $("product-status").textContent = "Введите хотя бы два символа."; return; }
+  const generation = ++productGeneration;
+  const page = append ? productPage + 1 : 1;
+  if (!append) {
+    productQuery = query;
+    $("products").replaceChildren();
+    $("products-more").hidden = true;
+    $("product-search").blur();
+  }
+  $("product-status").textContent = "Ищем в Open Food Facts…";
+  let result;
+  try { result = await api(`food-search?${new URLSearchParams({q: query, page: String(page)})}`); }
+  catch (error) { if (generation === productGeneration) $("product-status").textContent = error.message; return; }
+  if (generation !== productGeneration) return;
+  productPage = result.page;
+  for (const item of result.items) $("products").append(renderProduct(item));
+  const found = $("products").childElementCount;
+  $("product-status").textContent = found ? "Нажмите на продукт, чтобы указать количество." :
+    result.has_next ? "Здесь нет продуктов с указанной калорийностью — покажите ещё." : "Ничего не найдено. Попробуйте другое название или бренд.";
+  $("products-more").hidden = !result.has_next;
+}
+$("product-search").addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" || event.isComposing) return;
+  event.preventDefault();
+  searchProducts();
+});
+onClick("search-button", () => openDialog("search-dialog"));
+onClick("product-search-go", () => searchProducts());
+onClick("products-more", () => searchProducts(true));
 onClick("favorites-more", () => loadFavorites(true));
 onClick("more", () => loadDiary(state.day, true));
 onClick("today-button", () => loadDiary());

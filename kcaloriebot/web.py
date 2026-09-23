@@ -18,6 +18,7 @@ from aiohttp import web
 
 from .config import Settings, load_settings
 from .database import Database
+from .food_search import FoodSearch, OpenFoodFacts, SearchBusy, SearchUnavailable
 from .health import HealthStore, HealthUnauthorized
 from .domain import (
     EARLIEST_DIARY_DATE,
@@ -28,6 +29,8 @@ from .domain import (
     day_bounds,
     local_date,
     local_datetime,
+    normalize_food_name,
+    normalize_search_query,
     parse_daily_goal,
 )
 from .web_store import WebStore, entry_data, favorite_data, number
@@ -35,6 +38,7 @@ from .web_store import WebStore, entry_data, favorite_data, number
 DATABASE = web.AppKey("database", Database)
 SETTINGS = web.AppKey("settings", Settings)
 ASSETS = web.AppKey("assets", dict)
+FOOD_SEARCH = web.AppKey("food_search", object)
 STATIC = Path(__file__).with_name("static")
 LOGGER = logging.getLogger(__name__)
 
@@ -93,6 +97,18 @@ async def boundary(request: web.Request, handler):
         )
     except NotFound:
         response = web.json_response({"error": "Запись не найдена."}, status=404)
+    except SearchBusy:
+        response = web.json_response(
+            {"error": "Слишком много поисковых запросов. Попробуйте через минуту."},
+            status=429,
+        )
+    except SearchUnavailable as exc:
+        LOGGER.warning("Food search failed: %s", exc)
+        # 503 with a JSON body is final for the client; it does not retry.
+        response = web.json_response(
+            {"error": "База продуктов сейчас не отвечает. Попробуйте позже."},
+            status=503,
+        )
     except StateConflict as exc:
         response = web.json_response({"error": str(exc)}, status=409)
     except ValidationError as exc:
@@ -184,6 +200,7 @@ async def diary(request: web.Request) -> web.Response:
     result = await asyncio.to_thread(
         snapshot, request.app[DATABASE], request["user_id"], dict(request.query)
     )
+    result["food_search"] = request.app[FOOD_SEARCH] is not None
     return web.json_response(result)
 
 
@@ -233,6 +250,40 @@ async def favorites(request: web.Request) -> web.Response:
     return web.json_response(
         {**asdict(result), "items": [favorite_data(item) for item in result.items]}
     )
+
+
+async def create_favorite(request: web.Request) -> web.Response:
+    data = await payload(request)
+    if set(data) - {"name", "unit", "calories", "protein", "fat", "carbs"}:
+        raise ValueError
+    if data.get("unit", "100g") not in ("100g", "serving") or not isinstance(
+        data.get("name"), str
+    ):
+        raise ValueError
+    result, created = await asyncio.to_thread(
+        request.app[DATABASE].save_favorite,
+        request["user_id"],
+        normalize_food_name(data["name"]),
+        data.get("unit", "100g"),
+        number(data, "calories"),
+        number(data, "protein", True),
+        number(data, "fat", True),
+        number(data, "carbs", True),
+    )
+    return web.json_response(favorite_data(result), status=201 if created else 200)
+
+
+async def search_foods(request: web.Request) -> web.Response:
+    search = request.app[FOOD_SEARCH]
+    if search is None:
+        raise web.HTTPNotFound()
+    query = normalize_search_query(request.query.get("q", ""))
+    if len(query) < 2:
+        raise ValidationError("Введите хотя бы два символа.")
+    page = int(request.query.get("page", "1"))
+    if not 1 <= page <= 10:
+        raise ValueError
+    return web.json_response(await search.search(request["user_id"], query, page))
 
 
 async def recent(request: web.Request) -> web.Response:
@@ -362,12 +413,23 @@ async def health_request(request: web.Request) -> web.Response:
 
 
 def build_web_app(
-    settings: Settings, database: Database | None = None
+    settings: Settings,
+    database: Database | None = None,
+    food_search: FoodSearch | None = None,
 ) -> web.Application:
     app = web.Application(middlewares=[boundary], client_max_size=16384)
     store = database or Database(settings.database_path)
     store.initialize()
     app[DATABASE], app[SETTINGS] = store, settings
+    if settings.food_search and food_search is None:
+        fetcher = OpenFoodFacts()
+        food_search = FoodSearch(fetcher)
+
+        async def close_fetcher(_app: web.Application) -> None:
+            await fetcher.close()
+
+        app.on_cleanup.append(close_fetcher)
+    app[FOOD_SEARCH] = food_search if settings.food_search else None
     # Restart on deployment: each process serves one consistent asset snapshot.
     app[ASSETS] = {}
     for name in (
@@ -388,6 +450,8 @@ def build_web_app(
             web.get("/api/diary", diary),
             web.put("/api/profile", profile),
             web.get("/api/favorites", favorites),
+            web.post("/api/favorites", create_favorite),
+            web.get("/api/food-search", search_foods),
             web.get("/api/recent", recent),
             web.get("/api/statistics", statistics),
             web.get("/api/weights", weights),

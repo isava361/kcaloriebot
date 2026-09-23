@@ -1159,7 +1159,6 @@ class Database:
         A favorite whose name matches an existing one (ignoring case) is
         updated in place instead of duplicated.
         """
-        now = self.now_epoch() if now_utc is None else now_utc
         entry = self.get_entry(user_id, entry_id)
         if entry is None:
             raise NotFound("Food entry not found")
@@ -1170,16 +1169,45 @@ class Database:
         if unit == UNIT_SERVING and entry.nutrition.grams is not None:
             assert entry.nutrition.servings is not None
             serving_grams = entry.nutrition.grams / entry.nutrition.servings
+        return self.save_favorite(
+            user_id,
+            entry.name,
+            unit,
+            calories,
+            protein,
+            fat,
+            carbs,
+            serving_grams,
+            now_utc,
+        )
+
+    def save_favorite(
+        self,
+        user_id: int,
+        name: str,
+        unit: str,
+        calories: float,
+        protein: Optional[float],
+        fat: Optional[float],
+        carbs: Optional[float],
+        serving_grams: Optional[float] = None,
+        now_utc: Optional[int] = None,
+    ) -> tuple[FavoriteFood, bool]:
+        """Insert a favorite, or update the one with the same name; returns
+        (favorite, created). Values are per 100 g or per serving by unit."""
+        now = self.now_epoch() if now_utc is None else now_utc
+        name = normalize_food_name(name)
         self._validate_favorite_values(
             unit, calories, protein, fat, carbs, serving_grams
         )
-        existing = self.find_favorite_by_name(user_id, entry.name)
+        self.ensure_user(user_id, now)
+        existing = self.find_favorite_by_name(user_id, name)
         with self._connect() as connection:
             if existing is None:
                 favorite_id = self._insert_favorite(
                     connection,
                     user_id,
-                    entry.name,
+                    name,
                     calories,
                     protein,
                     fat,

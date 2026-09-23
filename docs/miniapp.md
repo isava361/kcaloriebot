@@ -21,6 +21,18 @@ partial/unknown macro indicators, and these workflows:
   `кур бед` finds `Бедро куриное`. Selecting a suggestion fills nutrition and
   the unit without changing the date; an existing quantity is kept when the
   unit stays the same. Serving weight is preserved in saved entries and drafts.
+- «Поиск продуктов» searches [Open Food Facts](https://world.openfoodfacts.org)
+  by name or brand (Russian and English names). Results show calories and
+  macros per 100 g; tapping one opens the ordinary food form prefilled with
+  them, and «В избранное» saves it as a favorite (a favorite with the same name
+  is updated). Products without energy data or with impossible values are
+  hidden. The search runs on Enter or «Найти», not on every keystroke.
+  Requests go from the web server, not the browser: Open Food Facts allows
+  10 searches per minute per IP, so the server caches results for a day and
+  makes at most 8 upstream searches per minute in total and 4 per user; above
+  that the user sees «Попробуйте через минуту». Only the query text is sent,
+  never user IDs. Set `FOOD_SEARCH=off` in the web service environment to hide
+  the button and disable the endpoint.
 - Edit names, amounts, nutrition and dates. Concurrent changes in the bot or
   another window produce a conflict instead of overwriting newer data.
 - Delete a food entry and undo it using the toast for 15 minutes. The undo
