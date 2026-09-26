@@ -24,6 +24,7 @@ from kcaloriebot.bot import (
     start,
     unknown_command,
     update_timezone,
+    users_command,
     weight_command,
 )
 from kcaloriebot.database import Database
@@ -51,7 +52,9 @@ class FakeMessage:
         self.message_id = next(self._ids) if message_id is None else message_id
         self.replies: list[tuple[str, Any]] = []
 
-    async def reply_text(self, text: str, reply_markup: Any = None) -> None:
+    async def reply_text(
+        self, text: str, reply_markup: Any = None, **kwargs: Any
+    ) -> None:
         self.replies.append((text, reply_markup))
 
 
@@ -115,6 +118,29 @@ class BotHandlerTests(unittest.IsolatedAsyncioTestCase):
         group = make_update("/app", chat_type=ChatType.GROUP)
         await miniapp_command(group, self.context)
         self.assertIsNone(group.effective_message.replies[-1][1])
+
+    async def test_users_command_lists_users_only_for_admin(self) -> None:
+        async def get_chat(user_id: int) -> SimpleNamespace:
+            if user_id == 42:
+                raise NetworkError("unreachable")
+            return SimpleNamespace(first_name="Ann", last_name=None, username="ann")
+
+        self.context.bot = SimpleNamespace(get_chat=get_chat)
+        self.database.ensure_user(7, now_utc=100)
+        self.database.ensure_user(42, now_utc=200)
+        self.database.add_entry(7, 150, "oatmeal", 370, 60)
+
+        stranger = make_update("/users", user_id=7)
+        await users_command(stranger, self.context)
+        self.assertIn("Unknown command", stranger.effective_message.replies[-1][0])
+
+        admin = make_update("/users", user_id=193117018)
+        await users_command(admin, self.context)
+        text = admin.effective_message.replies[-1][0]
+        self.assertIn("Пользователей: 2", text)
+        self.assertIn('<a href="https://t.me/ann">Ann</a> (@ann)', text)
+        self.assertIn("записей: 1", text)
+        self.assertIn('<a href="tg://user?id=42">42</a>', text)
 
     async def test_first_menu_text_starts_timezone_onboarding_without_consuming_text(
         self,

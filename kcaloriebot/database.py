@@ -425,6 +425,22 @@ class Database:
                 (user_id, now, now),
             )
 
+    def list_users(self) -> list[tuple[int, int, int]]:
+        """Every user as (user_id, created_at_utc, entry_count), oldest first."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT users.user_id, users.created_at_utc,
+                       (SELECT COUNT(*) FROM food_entries
+                        WHERE food_entries.user_id = users.user_id) AS entry_count
+                FROM users
+                ORDER BY users.created_at_utc, users.user_id
+                """
+            ).fetchall()
+        return [
+            (row["user_id"], row["created_at_utc"], row["entry_count"]) for row in rows
+        ]
+
     def get_timezone(self, user_id: int) -> Optional[str]:
         with self._connect() as connection:
             row = connection.execute(

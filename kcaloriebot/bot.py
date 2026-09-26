@@ -4,7 +4,7 @@ import asyncio
 import html
 import logging
 from dataclasses import dataclass, replace
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Optional, TypeVar
 from urllib.parse import urljoin
 
@@ -139,6 +139,8 @@ __all__ = [
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
 SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
+# The only Telegram account allowed to run /users.
+ADMIN_USER_ID = 193117018
 
 
 @dataclass
@@ -2447,6 +2449,48 @@ async def _health_action(
     )
 
 
+async def _user_link(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> str:
+    """HTML link to a user's profile, named from Telegram when it is reachable."""
+    try:
+        chat = await context.bot.get_chat(user_id)
+    except TelegramError:
+        chat = None
+    parts = (getattr(chat, "first_name", None), getattr(chat, "last_name", None))
+    name = " ".join(part for part in parts if part) or str(user_id)
+    username = getattr(chat, "username", None)
+    href = f"https://t.me/{username}" if username else f"tg://user?id={user_id}"
+    link = f'<a href="{html.escape(href)}">{html.escape(name)}</a>'
+    return f"{link} (@{html.escape(username)})" if username else link
+
+
+async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin-only list of everyone who has used the bot; hidden from others."""
+    if update.effective_user is None or update.effective_user.id != ADMIN_USER_ID:
+        await unknown_command(update, context)
+        return
+    if not await _require_private(update) or update.effective_message is None:
+        return
+    users = await _call(_db(context).list_users)
+    lines = [f"Пользователей: {len(users)}"]
+    for number, (user_id, created_at, entry_count) in enumerate(users, 1):
+        joined = datetime.fromtimestamp(created_at, timezone.utc).date().isoformat()
+        link = await _user_link(context, user_id)
+        lines.append(
+            f"{number}. {link} · <code>{user_id}</code> · с {joined} · записей: {entry_count}"
+        )
+    # Telegram caps a message at 4096 characters, so long lists go in parts.
+    chunks: list[str] = []
+    for line in lines:
+        if chunks and len(chunks[-1]) + len(line) + 1 <= 4096:
+            chunks[-1] += "\n" + line
+        else:
+            chunks.append(line)
+    for chunk in chunks:
+        await update.effective_message.reply_text(
+            chunk, parse_mode=ParseMode.HTML, disable_web_page_preview=True
+        )
+
+
 async def miniapp_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _require_private(update):
         return
@@ -2485,6 +2529,9 @@ def build_application(
     )
     application.add_handler(
         CommandHandler("app", miniapp_command, filters=new_messages)
+    )
+    application.add_handler(
+        CommandHandler("users", users_command, filters=new_messages)
     )
     application.add_handler(CommandHandler("start", start, filters=new_messages))
     application.add_handler(CommandHandler("cancel", cancel, filters=new_messages))
