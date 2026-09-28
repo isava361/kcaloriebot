@@ -14,3 +14,4 @@ data/
 *.db-wal
 
 config/token.txt
+.claude/settings.local.json
