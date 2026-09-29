@@ -497,6 +497,88 @@ def per_100_from_totals(
 
 
 @dataclass(frozen=True)
+class Ingredient:
+    """One raw ingredient of a recipe, weighed before cooking; values per 100g."""
+
+    name: str
+    grams: float
+    calories_per_100g: float
+    protein_per_100g: Optional[float] = None
+    fat_per_100g: Optional[float] = None
+    carbs_per_100g: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class RecipeNutrition:
+    """Totals of a whole dish and its weight once cooked.
+
+    A macro total sums the ingredients that state it and is None only when no
+    ingredient does. ``incomplete`` names the ingredients that carry energy
+    but miss a macro, so such totals can be shown as approximate; water, salt
+    and spices at 0 kcal are not expected to state macros.
+    """
+
+    raw_grams: float
+    grams: float
+    calories: float
+    protein: Optional[float]
+    fat: Optional[float]
+    carbs: Optional[float]
+    incomplete: tuple[str, ...] = ()
+
+    def per_100g(
+        self,
+    ) -> tuple[float, Optional[float], Optional[float], Optional[float]]:
+        factor = 100.0 / self.grams
+
+        def scaled(value: Optional[float]) -> Optional[float]:
+            return None if value is None else value * factor
+
+        return (
+            self.calories * factor,
+            scaled(self.protein),
+            scaled(self.fat),
+            scaled(self.carbs),
+        )
+
+
+def recipe_nutrition(
+    ingredients: tuple[Ingredient, ...], cooked_grams: Optional[float] = None
+) -> RecipeNutrition:
+    """Sum raw ingredients; the dish weighs cooked_grams, or its raw weight.
+
+    Cooking boils water off or soaks it up, so energy per 100g of the finished
+    dish follows its cooked weight while the dish's total energy stays put.
+    """
+    if not ingredients:
+        raise ValidationError("A recipe needs at least one ingredient.")
+    raw_grams = sum(item.grams for item in ingredients)
+
+    def total(key: str) -> Optional[float]:
+        known = [
+            item.grams * value / 100.0
+            for item in ingredients
+            if (value := getattr(item, key + "_per_100g")) is not None
+        ]
+        return sum(known) if known else None
+
+    return RecipeNutrition(
+        raw_grams=raw_grams,
+        grams=raw_grams if cooked_grams is None else cooked_grams,
+        calories=total("calories") or 0.0,
+        protein=total("protein"),
+        fat=total("fat"),
+        carbs=total("carbs"),
+        incomplete=tuple(
+            item.name
+            for item in ingredients
+            if item.calories_per_100g > 0
+            and None in (item.protein_per_100g, item.fat_per_100g, item.carbs_per_100g)
+        ),
+    )
+
+
+@dataclass(frozen=True)
 class QuickAdd:
     name: str
     calories_per_100g: float

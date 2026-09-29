@@ -36,7 +36,10 @@
       <p id="partial" class="muted small" hidden>Значения со знаком ≈ неполные: БЖУ указаны не для всех записей.</p>
     </section>
     <button id="add-button" class="primary wide add"><span class="plus">+</span>Добавить еду</button>
-    <button id="search-button" class="wide search-open" hidden>Поиск продуктов</button>
+    <div class="quick-row">
+      <button id="recipes-button" class="quick"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 11h16v3a6 6 0 0 1-6 6h-4a6 6 0 0 1-6-6z"/><path d="M2 11h20M9 7c0-1.5 1-1.5 1-3M14 7c0-1.5 1-1.5 1-3"/></svg>Сложное блюдо</button>
+      <button id="search-button" class="quick" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.5 4.5"/></svg>Поиск продуктов</button>
+    </div>
     <div class="chips"><button id="favorites-button">Избранное</button><button id="recent-button">Недавнее</button><button id="stats-button">Статистика</button><button id="weights-button">Вес</button></div>
     <section><div class="row section-title"><h2>Приёмы пищи</h2><span id="count" class="muted small"></span></div><div id="entries"></div><button id="more" class="wide" hidden>Показать ещё</button></section>
     <footer><button id="today-button" class="text-button">К сегодняшнему дню</button><span id="zone" class="small muted"></span></footer>
@@ -62,6 +65,48 @@
 <dialog id="favorites-dialog"><div class="row"><h2>Избранное</h2><button type="button" class="close" aria-label="Закрыть">×</button></div><label>Поиск<input id="favorite-search" type="search" placeholder="Название продукта" maxlength="200" autocomplete="off"></label><p id="favorite-status" class="muted small" role="status"></p><div id="favorites"></div><button id="favorites-more" class="wide" hidden>Показать ещё</button><form id="favorite-form" hidden><label>Дата и время<input name="eaten_at" type="datetime-local" required></label><label id="favorite-amount-label">Количество<input name="amount" type="number" inputmode="decimal" min="0.001" step="any" required></label><p class="form-error" role="alert"></p><button class="primary wide">Добавить в дневник</button></form></dialog>
 <dialog id="recent-dialog"><div class="row"><h2>Недавняя еда</h2><button type="button" class="close" aria-label="Закрыть">×</button></div><p class="muted small">Выберите еду, проверьте количество и дату.</p><div id="recent-list"></div></dialog>
 <dialog id="search-dialog"><div class="row"><h2>Поиск продуктов</h2><button type="button" class="close" aria-label="Закрыть">×</button></div><div class="search-row"><label>Название или бренд<input id="product-search" type="search" enterkeyhint="search" placeholder="Например, гречка Мистраль" maxlength="200" autocomplete="off"></label><button id="product-search-go" type="button" class="primary">Найти</button></div><p id="product-status" class="muted small" role="status"></p><div id="products"></div><button id="products-more" class="wide" hidden>Показать ещё</button><p class="muted small attribution">Данные Open Food Facts (лицензия ODbL). Их вносят пользователи — сверяйте значения с упаковкой.</p></dialog>
+<dialog id="recipes-dialog"><div class="row"><h2>Сложные блюда</h2><button type="button" class="close" aria-label="Закрыть">×</button></div>
+  <p class="muted small">Соберите блюдо из ингредиентов — посчитаем КБЖУ на 100 г готового блюда и запишем порцию по весу. Блюдо попадёт и в избранное, так что порцию можно записать и в чате с ботом.</p>
+  <button id="recipe-new" type="button" class="primary wide add"><span class="plus">+</span>Новое блюдо</button>
+  <label id="recipe-filter-label" hidden>Поиск<input id="recipe-filter" type="search" placeholder="Название блюда" maxlength="200" autocomplete="off"></label>
+  <p id="recipes-status" class="muted small" role="status"></p>
+  <div id="recipes"></div>
+</dialog>
+<dialog id="recipe-dialog"><form id="recipe-form" class="recipe-form">
+  <div class="row recipe-top"><h2 id="recipe-title">Новое блюдо</h2><button type="button" class="close" aria-label="Закрыть">×</button></div>
+  <label class="recipe-name">Название блюда<input name="name" placeholder="Например, борщ" required maxlength="200" autocomplete="off"></label>
+  <section class="recipe-ingredients" aria-labelledby="ingredients-title">
+    <div class="row section-head"><h3 id="ingredients-title">Ингредиенты</h3><span id="recipe-raw" class="muted small"></span></div>
+    <p class="muted small">Вес — сырой, до готовки. Калории и БЖУ — на 100 г. Начните вводить название — подскажем из избранного и прошлых блюд.</p>
+    <div id="ingredients"></div>
+    <button type="button" id="ingredient-add" class="wide dashed"><span class="plus">+</span>Ингредиент</button>
+  </section>
+  <section class="recipe-result" aria-label="Готовое блюдо">
+    <div class="dish-card">
+      <span class="eyebrow">НА 100 Г ГОТОВОГО БЛЮДА</span>
+      <div class="energy dish-energy"><strong id="dish-kcal">0</strong><span>ккал</span></div>
+      <div class="dish-macros"><span><span class="dot protein"></span>Б <b id="dish-protein">—</b></span><span><span class="dot fat"></span>Ж <b id="dish-fat">—</b></span><span><span class="dot carbs"></span>У <b id="dish-carbs">—</b></span></div>
+      <p id="dish-note" class="muted small" hidden></p>
+      <p id="dish-total" class="small"></p>
+    </div>
+    <label>Вес готового блюда, г<input name="cooked_grams" type="number" inputmode="decimal" min="0.001" max="100000" step="any" aria-describedby="cooked-help"></label>
+    <p id="cooked-help" class="muted small">Взвесьте кастрюлю после готовки и вычтите её вес: вода выкипает или впитывается. Без веса считаем по сырому.</p>
+    <div class="portion-card">
+      <h3>Записать порцию</h3>
+      <div class="portion-row"><label>Съедено, г<input name="portion" type="number" inputmode="decimal" min="0.001" max="100000" step="any" placeholder="Можно позже"></label><output id="portion-kcal" for="portion" aria-live="polite"></output></div>
+      <label>Дата и время<input name="eaten_at" type="datetime-local"></label>
+    </div>
+  </section>
+  <p class="form-error" role="alert"></p>
+  <button class="primary wide" id="recipe-save">Сохранить блюдо</button>
+  <button type="button" id="recipe-delete" class="text-button danger wide" hidden>Удалить блюдо</button>
+</form></dialog>
+<template id="ingredient-template"><fieldset class="ingredient">
+  <div class="ing-head"><input class="ing-name" data-field="name" placeholder="Ингредиент" maxlength="200" autocomplete="off" enterkeyhint="next"><label class="ing-grams"><input data-field="grams" type="number" inputmode="decimal" min="0.001" max="100000" step="any" placeholder="0"><span aria-hidden="true">г</span></label><button type="button" class="ing-remove">×</button></div>
+  <div class="ing-suggest" hidden><p class="ing-status muted small" role="status"></p><div class="ing-options"></div></div>
+  <div class="ing-values"><label><span>ккал</span><input data-field="calories" type="number" inputmode="decimal" min="0" max="10000" step="any"></label><label><span>белки</span><input data-field="protein" type="number" inputmode="decimal" min="0" max="100" step="any"></label><label><span>жиры</span><input data-field="fat" type="number" inputmode="decimal" min="0" max="100" step="any"></label><label><span>углев.</span><input data-field="carbs" type="number" inputmode="decimal" min="0" max="100" step="any"></label></div>
+  <p class="ing-total"></p>
+</fieldset></template>
 <dialog id="stats-dialog"><div class="row"><h2>Статистика питания</h2><button type="button" class="close" aria-label="Закрыть">×</button></div><label>Период<select id="stats-period"><option value="week">7 дней до выбранной даты</option><option value="month">Выбранный месяц</option></select></label><p id="stats-range" class="muted small"></p><div id="stats-content" aria-live="polite"></div></dialog>
 <dialog id="weights-dialog"><div class="row"><h2>Журнал веса</h2><button type="button" class="close" aria-label="Закрыть">×</button></div><p id="weights-summary" class="muted small"></p><form id="weight-form"><label>Дата и время<input name="measured_at" type="datetime-local" required></label><label>Вес, кг<input name="weight_kg" type="number" inputmode="decimal" min="1" max="500" step="any" required></label><p class="form-error" role="alert"></p><div class="actions"><button id="weight-save" class="primary">Записать вес</button><button id="weight-cancel" type="button" hidden>Отмена</button></div></form><h2>Последние 30 дней</h2><p class="small muted">Среднее измерений за день. Дни без измерений пропущены.</p><div id="weight-chart"></div><h2>Измерения</h2><p id="weight-status" class="muted small" role="status"></p><div id="weight-list"></div><button id="weights-more" class="wide" hidden>Показать ещё</button></dialog>
 <div id="toasts" aria-live="polite"></div>

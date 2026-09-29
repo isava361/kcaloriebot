@@ -689,3 +689,156 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(response.status, 200)
         self.assertEqual(self.store.get_session(123, 123), session)
+
+    async def test_recipe_publishes_favorite_and_logs_a_portion(self):
+        self.store.set_timezone(123, "Europe/Moscow")
+        session = self.store.start_session(123, 123, SessionState.WAIT_FOOD_NAME)
+        # A plain favorite of the same name is adopted instead of duplicated.
+        self.store.add_favorite(123, "борщ", 50, None, None, None)
+        now = local_datetime(int(time.time()), "Europe/Moscow")
+        recipe = {
+            "name": "Борщ",
+            "cooked_grams": 2000,
+            "ingredients": [
+                {
+                    "name": "Свёкла",
+                    "grams": 400,
+                    "calories": 43,
+                    "protein": 1.5,
+                    "fat": 0.1,
+                    "carbs": 8.8,
+                },
+                {
+                    "name": "Говядина",
+                    "grams": 600,
+                    "calories": 190,
+                    "protein": 19,
+                    "fat": 12.4,
+                    "carbs": 0,
+                },
+                {
+                    "name": "Вода",
+                    "grams": 1500,
+                    "calories": 0,
+                    "protein": None,
+                    "fat": None,
+                    "carbs": None,
+                },
+            ],
+            "portion": {"grams": 350, "eaten_at": now.strftime("%Y-%m-%dT%H:%M")},
+        }
+        response = await self.request("POST", "/api/recipes", json=recipe)
+        self.assertEqual(response.status, 201, await response.text())
+        result = await response.json()
+        saved = result["recipe"]
+        self.assertEqual(saved["totals"]["raw_grams"], 2500)
+        self.assertAlmostEqual(saved["totals"]["calories"], 172 + 1140)
+        self.assertAlmostEqual(saved["per_100g"]["calories"], 1312 / 20)
+        self.assertEqual(saved["incomplete"], [])
+        self.assertAlmostEqual(
+            result["entry"]["nutrition"]["calories"], 1312 / 20 * 3.5
+        )
+        self.assertEqual(result["entry"]["name"], "Борщ")
+        favorites = self.store.search_favorites(123, "борщ")
+        self.assertEqual(len(favorites), 1)
+        self.assertEqual(favorites[0].name, "Борщ")
+        self.assertAlmostEqual(favorites[0].calories_per_100g, 65.6)
+        # The name is unique among recipes, ignoring case.
+        response = await self.request(
+            "POST", "/api/recipes", json={**recipe, "name": "БОРЩ", "portion": None}
+        )
+        self.assertEqual(response.status, 400)
+        # Editing re-publishes; an outdated version conflicts.
+        path = f"/api/recipes/{saved['recipe_id']}"
+        edit = {
+            **recipe,
+            "name": "Борщ зимний",
+            "cooked_grams": None,
+            "portion": None,
+            "version": saved["version"],
+        }
+        response = await self.request("PUT", path, json=edit)
+        self.assertEqual(response.status, 200, await response.text())
+        updated = (await response.json())["recipe"]
+        self.assertIsNone((await response.json())["entry"])
+        self.assertAlmostEqual(updated["per_100g"]["calories"], 1312 / 25)
+        response = await self.request("PUT", path, json=edit)
+        self.assertEqual(response.status, 409)
+        favorite = self.store.search_favorites(123, "борщ")[0]
+        self.assertEqual(favorite.name, "Борщ зимний")
+        # Deleting the favorite in the bot unlinks it; the next save restores it.
+        self.store.delete_favorite(123, favorite.favorite_id)
+        response = await self.request(
+            "PUT", path, json={**edit, "version": updated["version"]}
+        )
+        self.assertEqual(response.status, 200, await response.text())
+        updated = (await response.json())["recipe"]
+        self.assertEqual(len(self.store.search_favorites(123, "борщ")), 1)
+        # Previous ingredients and favorites are offered for new recipes.
+        response = await self.request("GET", "/api/ingredients?q=СВЁ")
+        items = (await response.json())["items"]
+        self.assertEqual([item["name"] for item in items], ["Свёкла"])
+        self.assertEqual(items[0]["source"], "recipe")
+        response = await self.request("GET", "/api/ingredients?q=борщ")
+        self.assertEqual((await response.json())["items"][0]["source"], "favorite")
+        response = await self.request("GET", "/api/recipes")
+        self.assertEqual(
+            [item["name"] for item in (await response.json())["items"]], ["Борщ зимний"]
+        )
+        # Another user sees none of it.
+        self.headers = {"Authorization": "tma " + signed(999)}
+        self.store.set_timezone(999, "UTC")
+        response = await self.request("GET", "/api/recipes")
+        self.assertEqual((await response.json())["items"], [])
+        response = await self.request(
+            "DELETE", path, json={"version": updated["version"]}
+        )
+        self.assertEqual(response.status, 404)
+        self.headers = {"Authorization": "tma " + signed()}
+        response = await self.request(
+            "DELETE", path, json={"version": updated["version"]}
+        )
+        self.assertEqual(response.status, 200)
+        self.assertEqual(self.store.search_favorites(123, "борщ"), ())
+        self.assertEqual(self.store.get_session(123, 123), session)
+        self.assertEqual(len(self.store.page_entries(123, 0, 2**40, 0, 5).items), 1)
+
+    async def test_invalid_recipes_write_nothing(self):
+        self.store.set_timezone(123, "UTC")
+        good = {
+            "name": "Рис",
+            "grams": 100,
+            "calories": 350,
+            "protein": 7,
+            "fat": 1,
+            "carbs": 78,
+        }
+        for body in (
+            {"name": "Каша", "ingredients": []},
+            {"name": "", "ingredients": [good]},
+            {"name": "Каша", "ingredients": [{**good, "grams": 0}]},
+            {"name": "Каша", "ingredients": [{**good, "protein": 60}]},
+            {"name": "Каша", "ingredients": [{**good, "extra": 1}]},
+            {"name": "Каша", "ingredients": [good] * 41},
+            {"name": "Каша", "ingredients": [good], "cooked_grams": 50},
+            {"name": "Каша", "ingredients": [good], "cooked_grams": -1},
+            {"name": "Каша", "ingredients": [good], "portion": {"grams": 10}},
+            {
+                "name": "Каша",
+                "ingredients": [good],
+                "portion": {"grams": 10, "eaten_at": "2999-01-01T10:00"},
+            },
+        ):
+            with self.subTest(body=body):
+                response = await self.request("POST", "/api/recipes", json=body)
+                self.assertEqual(response.status, 400)
+        response = await self.request("GET", "/api/recipes")
+        self.assertEqual((await response.json())["items"], [])
+        self.assertEqual(self.store.page_favorites(123).items, ())
+        # A dish boiled down below its macros cannot be right; a watery one is.
+        response = await self.request(
+            "POST",
+            "/api/recipes",
+            json={"name": "Каша", "ingredients": [good], "cooked_grams": 300},
+        )
+        self.assertEqual(response.status, 201)

@@ -10,6 +10,7 @@ let foodTemplate = null, favoriteGeneration = 0, searchTimer;
 let statsGeneration = 0, weightOffset = 0, editingWeight = null;
 let mealHead = null, weekGeneration = 0, confirmingClose = false, draftTimer;
 let pending = {};
+let editingRecipe = null, recipeList = [];
 function readStorage(key) { try { const value = JSON.parse(localStorage.getItem(key) || "{}"); return value && typeof value === "object" && !Array.isArray(value) ? value : {}; } catch { return {}; } }
 function saveStorage(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* storage unavailable */ } }
 function setStorageUser(id) {
@@ -704,8 +705,265 @@ $("stats-period").addEventListener("change", loadStats);
 onClick("weights-button", async () => {resetWeight();openDialog("weights-dialog");await loadWeights();});
 onClick("weights-more", () => loadWeights(true));
 onClick("weight-cancel", resetWeight);
+/* Recipes: raw ingredients add up to a dish; per-100 g follows its cooked weight. */
+const INGREDIENT_FIELDS = ["name", "grams", "calories", "protein", "fat", "carbs"];
+const MACROS = ["protein", "fat", "carbs"];
+const MAX_INGREDIENTS = 40;
+const toNumber = (value) => value === "" || value == null ? null : Number(value);
+function plural(count, one, few, many) {
+  const tens = count % 100, units = count % 10;
+  return tens > 10 && tens < 20 ? many : units === 1 ? one : units > 1 && units < 5 ? few : many;
+}
+function grams(value) { return value >= 1000 ? `${fmt(value / 1000)} кг` : `${whole(value)} г`; }
+function macroLine(values, suffix = "") {
+  return MACROS.map((key, index) => `${"БЖУ"[index]} ${values[key] == null ? "—" : fmt(values[key])}`).join(" · ") + suffix;
+}
+function recipeValues() {
+  const form = $("recipe-form");
+  return {
+    name: form.elements.name.value, cooked_grams: form.elements.cooked_grams.value,
+    portion: form.elements.portion.value, eaten_at: form.elements.eaten_at.value,
+    ingredients: [...$("ingredients").children].map(row => Object.fromEntries(
+      INGREDIENT_FIELDS.map(field => [field, row.querySelector(`[data-field=${field}]`).value]))),
+  };
+}
+const blankIngredient = (item) => INGREDIENT_FIELDS.every(field => String(item[field] ?? "").trim() === "");
+/* The same sums the server makes; rows still being typed simply do not count yet. */
+function recipeNutrition(values) {
+  const items = values.ingredients.filter(item => toNumber(item.grams) > 0).map(item => ({
+    name: item.name.trim(), grams: Number(item.grams), calories: toNumber(item.calories),
+    protein: toNumber(item.protein), fat: toNumber(item.fat), carbs: toNumber(item.carbs)}));
+  const raw = items.reduce((sum, item) => sum + item.grams, 0);
+  const total = (key) => {
+    const known = items.filter(item => item[key] != null && Number.isFinite(item[key]));
+    return known.length ? known.reduce((sum, item) => sum + item.grams * item[key] / 100, 0) : null;
+  };
+  const cooked = toNumber(values.cooked_grams);
+  const weight = cooked > 0 ? cooked : raw;
+  const totals = {calories: total("calories") ?? 0, protein: total("protein"), fat: total("fat"), carbs: total("carbs")};
+  const per100 = Object.fromEntries(Object.entries(totals).map(([key, value]) => [key, value == null || !weight ? null : value * 100 / weight]));
+  const incomplete = items.filter(item => item.calories > 0 && MACROS.some(key => item[key] == null)).map(item => item.name || "без названия");
+  return {raw, weight, cooked: cooked > 0, totals, per100, incomplete, count: items.length};
+}
+function renderRecipe() {
+  const form = $("recipe-form");
+  const values = recipeValues();
+  const dish = recipeNutrition(values);
+  const rows = [...$("ingredients").children];
+  const empty = values.ingredients.every(blankIngredient);
+  rows.forEach((row, index) => {
+    const item = values.ingredients[index];
+    // Only rows that were started must be complete; an untouched spare row is skipped.
+    const needed = !blankIngredient(item) || (empty && index === 0);
+    for (const field of ["name", "grams", "calories"]) row.querySelector(`[data-field=${field}]`).required = needed;
+    const kcal = toNumber(item.grams) > 0 && toNumber(item.calories) != null ? Number(item.grams) * Number(item.calories) / 100 : null;
+    row.querySelector(".ing-total").textContent = kcal == null ? "" : `${fmt(kcal)} ккал в ${grams(Number(item.grams))}`;
+    row.querySelector(".ing-remove").setAttribute("aria-label", `Убрать ингредиент ${item.name.trim() || index + 1}`);
+    row.querySelector(".ing-name").setAttribute("aria-label", `Ингредиент ${index + 1}`);
+  });
+  $("ingredient-add").disabled = rows.length >= MAX_INGREDIENTS;
+  $("recipe-raw").textContent = dish.count ? `${dish.count} ${plural(dish.count, "продукт", "продукта", "продуктов")} · ${grams(dish.raw)} · ${whole(dish.totals.calories)} ккал` : "";
+  form.elements.cooked_grams.placeholder = dish.raw ? `Сырой вес — ${whole(dish.raw)}` : "Например, 1800";
+  const approx = dish.incomplete.length ? "≈ " : "";
+  $("dish-kcal").textContent = dish.per100.calories == null ? "0" : whole(dish.per100.calories);
+  for (const key of MACROS) $(`dish-${key}`).textContent = dish.per100[key] == null ? "—" : `${approx}${fmt(dish.per100[key])} г`;
+  $("dish-total").textContent = dish.count ? `Всё блюдо: ${whole(dish.totals.calories)} ккал · ${grams(dish.weight)}${dish.cooked ? "" : " по сырому весу"}` : "Добавьте ингредиенты с весом и калорийностью.";
+  $("dish-note").hidden = !dish.incomplete.length;
+  $("dish-note").textContent = `БЖУ неполные — не указаны у: ${dish.incomplete.join(", ")}.`;
+  const portion = toNumber(values.portion);
+  const logging = portion > 0;
+  form.elements.eaten_at.required = logging;
+  $("portion-kcal").textContent = logging && dish.per100.calories != null ? `${whole(dish.per100.calories * portion / 100)} ккал` : "";
+  $("recipe-save").textContent = logging ? `Сохранить и записать ${grams(portion)}` : editingRecipe ? "Сохранить изменения" : "Сохранить блюдо";
+  syncTelegram();
+}
+function closeSuggestions(except = null) {
+  for (const panel of $("ingredients").querySelectorAll(".ing-suggest")) {
+    if (panel === except) continue;
+    panel.hidden = true;
+    panel.querySelector(".ing-options").replaceChildren();
+    panel.dataset.generation = String(Number(panel.dataset.generation || 0) + 1);
+  }
+}
+function fillIngredient(row, item) {
+  row.querySelector("[data-field=name]").value = item.name;
+  for (const key of ["calories", ...MACROS]) row.querySelector(`[data-field=${key}]`).value = item[key] == null ? "" : Math.round(item[key] * 10) / 10;
+  closeSuggestions();
+  renderRecipe();
+  saveDraft($("recipe-form"));
+  const weight = row.querySelector("[data-field=grams]");
+  if (!weight.value) weight.focus({preventScroll: true});
+}
+function suggestion(row, item, source) {
+  const button = action("", () => fillIngredient(row, item), "suggestion");
+  button.append(node("span", item.title || item.name, "suggestion-name"));
+  const meta = [`${fmt(item.calories)} ккал`, macroLine(item)];
+  if (item.brand) meta.push(item.brand);
+  button.append(node("span", `${meta.join(" · ")}`, "suggestion-meta"), node("span", source, "suggestion-source"));
+  return button;
+}
+function ingredientPanel(row) {
+  const panel = row.querySelector(".ing-suggest");
+  closeSuggestions(panel);
+  panel.hidden = false;
+  const generation = String(Number(panel.dataset.generation || 0) + 1);
+  panel.dataset.generation = generation;
+  return {panel, status: panel.querySelector(".ing-status"), options: panel.querySelector(".ing-options"),
+    current: () => panel.dataset.generation === generation && $("recipe-dialog").open && !$("recipe-form").dataset.submitting};
+}
+async function suggestIngredients(row, query) {
+  const {status, options, current} = ingredientPanel(row);
+  status.textContent = "Ищем в избранном и прошлых блюдах…";
+  options.replaceChildren();
+  try {
+    const result = await api(`ingredients?${new URLSearchParams({q: query})}`);
+    if (!current()) return;
+    status.textContent = result.items.length ? "Нажмите, чтобы подставить КБЖУ" : "У вас такого пока нет — можно ввести КБЖУ вручную.";
+    for (const item of result.items) options.append(suggestion(row, item, item.source === "favorite" ? "избранное" : "из блюд"));
+  } catch (error) {
+    if (current()) status.textContent = error.message;
+  }
+  // The product database is rate limited, so it is asked only on request.
+  if (current() && state.food_search) {
+    options.append(action(`Найти «${query}» в Open Food Facts`, () => searchIngredient(row, query), "text-button off-search"));
+  }
+}
+async function searchIngredient(row, query) {
+  const {status, options, current} = ingredientPanel(row);
+  status.textContent = "Ищем в Open Food Facts…";
+  options.replaceChildren();
+  try {
+    const result = await api(`food-search?${new URLSearchParams({q: query, page: "1"})}`);
+    if (!current()) return;
+    status.textContent = result.items.length ? "Open Food Facts · сверяйте с упаковкой" : "Ничего не найдено. Попробуйте другое название.";
+    for (const item of result.items.slice(0, 8)) options.append(suggestion(row, item, "Open Food Facts"));
+  } catch (error) {
+    if (current()) status.textContent = error.message;
+  }
+}
+let ingredientTimer;
+function addIngredient(item = {}, focus = false) {
+  const row = $("ingredient-template").content.firstElementChild.cloneNode(true);
+  for (const field of INGREDIENT_FIELDS) row.querySelector(`[data-field=${field}]`).value = item[field] ?? "";
+  const name = row.querySelector("[data-field=name]");
+  name.addEventListener("input", event => {
+    clearTimeout(ingredientTimer);
+    const query = name.value.trim();
+    if (query.length < 2 || event.isComposing) { closeSuggestions(); return; }
+    ingredientTimer = setTimeout(() => suggestIngredients(row, query), 250);
+  });
+  name.addEventListener("keydown", event => { if (event.key === "Escape" && !row.querySelector(".ing-suggest").hidden) { event.preventDefault(); event.stopPropagation(); closeSuggestions(); } });
+  row.querySelector(".ing-remove").addEventListener("click", () => {
+    const next = row.nextElementSibling || row.previousElementSibling;
+    row.remove();
+    if (!$("ingredients").childElementCount) addIngredient();
+    renderRecipe();
+    saveDraft($("recipe-form"));
+    (next || $("ingredients").firstElementChild)?.querySelector("[data-field=name]")?.focus({preventScroll: true});
+  });
+  $("ingredients").append(row);
+  if (focus) name.focus();
+  return row;
+}
+$("recipe-form").addEventListener("focusin", event => {
+  // Moving on to another field closes the list; tapping inside it or its name field does not.
+  const own = event.target.closest(".ing-suggest") || event.target.classList.contains("ing-name");
+  closeSuggestions(own ? event.target.closest(".ingredient").querySelector(".ing-suggest") : null);
+});
+$("recipe-form").addEventListener("input", renderRecipe);
+$("recipe-dialog").addEventListener("close", () => { clearTimeout(ingredientTimer); closeSuggestions(); });
+function openRecipe(recipe = null, values = null) {
+  editingRecipe = recipe;
+  const form = $("recipe-form");
+  form.reset();
+  const source = values || {
+    name: recipe?.name ?? "", cooked_grams: recipe?.cooked_grams ?? "", portion: "", eaten_at: defaultTime(),
+    ingredients: recipe?.ingredients ?? [{}, {}, {}],
+  };
+  for (const key of ["name", "cooked_grams", "portion", "eaten_at"]) form.elements[key].value = source[key] ?? "";
+  form.elements.eaten_at.min = state.earliest_entry_time;
+  form.elements.eaten_at.max = currentLocalTime();
+  $("ingredients").replaceChildren();
+  (source.ingredients?.length ? source.ingredients : [{}]).forEach(item => addIngredient(item));
+  form.classList.toggle("existing", Boolean(recipe));
+  form.elements.portion.placeholder = recipe ? "Например, 300" : "Можно позже";
+  $("recipe-title").textContent = recipe ? recipe.name : "Новое блюдо";
+  $("recipe-delete").hidden = !recipe;
+  renderRecipe();
+  openDialog("recipe-dialog");
+}
+onClick("ingredient-add", () => { addIngredient({}, true); renderRecipe(); saveDraft($("recipe-form")); });
+submit("recipe-form", async () => {
+  const values = recipeValues();
+  const data = {
+    name: values.name, cooked_grams: toNumber(values.cooked_grams),
+    ingredients: values.ingredients.filter(item => !blankIngredient(item)).map(item => ({
+      name: item.name, grams: Number(item.grams), calories: Number(item.calories),
+      protein: toNumber(item.protein), fat: toNumber(item.fat), carbs: toNumber(item.carbs)})),
+  };
+  if (toNumber(values.portion) > 0) data.portion = {grams: Number(values.portion), eaten_at: values.eaten_at};
+  if (editingRecipe) data.version = editingRecipe.version;
+  const result = await api(editingRecipe ? `recipes/${editingRecipe.recipe_id}` : "recipes", editingRecipe ? "PUT" : "POST", data);
+  editingRecipe = result.recipe;
+  if (result.entry) {
+    await added("recipe-dialog", data.portion.eaten_at.slice(0, 10));
+    notice(`Записано: ${result.entry.name}, ${grams(result.entry.nutrition.grams)} · ${whole(result.entry.nutrition.calories)} ккал.`);
+    return;
+  }
+  clearDraft("recipe-form");
+  $("recipe-dialog").close();
+  tg?.HapticFeedback?.notificationOccurred("success");
+  await openRecipes();
+  notice(`«${result.recipe.name}» сохранено: ${whole(result.recipe.per_100g.calories)} ккал на 100 г. Блюдо есть и в избранном.`);
+});
+onClick("recipe-delete", async () => {
+  const recipe = editingRecipe;
+  if (!recipe || !await confirmAction(`Удалить блюдо «${recipe.name}»? Оно пропадёт и из избранного, записи в дневнике останутся.`)) return;
+  await api(`recipes/${recipe.recipe_id}`, "DELETE", {version: recipe.version});
+  clearDraft("recipe-form");
+  $("recipe-dialog").close();
+  await openRecipes();
+  notice(`Блюдо «${recipe.name}» удалено.`);
+});
+function renderRecipeCard(recipe) {
+  const count = recipe.ingredients.length;
+  const button = action("", () => { $("recipes-dialog").close(); openRecipe(recipe); }, "recipe-card");
+  button.setAttribute("aria-label", `Открыть блюдо: ${recipe.name}`);
+  const head = node("span", "", "recipe-card-head");
+  const kcal = node("span", "", "recipe-kcal");
+  kcal.append(node("b", whole(recipe.per_100g.calories)), node("small", " ккал/100 г"));
+  head.append(node("span", recipe.name, "recipe-card-name"), kcal);
+  const approx = recipe.incomplete.length ? "≈ " : "";
+  button.append(head,
+    node("span", `${count} ${plural(count, "ингредиент", "ингредиента", "ингредиентов")} · ${grams(recipe.totals.grams)} ${recipe.cooked_grams ? "готового" : "по сырому весу"}`, "recipe-card-meta"),
+    node("span", approx + macroLine(recipe.per_100g), "recipe-card-macros"));
+  return button;
+}
+function renderRecipes() {
+  const query = $("recipe-filter").value.trim().toLocaleLowerCase("ru");
+  const items = recipeList.filter(recipe => recipe.name.toLocaleLowerCase("ru").includes(query));
+  $("recipes").replaceChildren(...items.map(renderRecipeCard));
+  $("recipe-filter-label").hidden = recipeList.length < 6;
+  $("recipes-status").textContent = !recipeList.length ? "" : items.length ? "" : "Ничего не найдено.";
+  if (!recipeList.length) $("recipes").append(node("p", "Здесь появятся ваши блюда: борщ, плов, запеканка… Вес ингредиентов — сырой, а готовое блюдо можно взвесить целиком.", "empty"));
+}
+async function openRecipes() {
+  $("recipe-filter").value = "";
+  $("recipes-status").textContent = "Загрузка…";
+  if (!$("recipes-dialog").open) openDialog("recipes-dialog");
+  try {
+    recipeList = (await api("recipes")).items;
+    renderRecipes();
+  } catch (error) {
+    $("recipes-status").replaceChildren(node("span", error.message), action("Повторить", openRecipes));
+  }
+}
+$("recipe-filter").addEventListener("input", renderRecipes);
+onClick("recipes-button", openRecipes);
+onClick("recipe-new", () => { $("recipes-dialog").close(); openRecipe(); });
 function supports(version) { return Boolean(tg?.initData && tg.isVersionAtLeast?.(version)); }
 function formValues(form) {
+  if (form.id === "recipe-form") return JSON.stringify(recipeValues());
   return JSON.stringify(Object.fromEntries([...form.elements].filter(el => el.name).map(el => [el.name, el.value])));
 }
 function activeForm() { return [...document.querySelectorAll("dialog[open] form")].find(form => !form.hidden); }
@@ -716,10 +974,10 @@ function clearDraft(id) {
   saveStorage(`kcalorie-drafts-${storageUser}`, drafts);
   renderDrafts();
 }
-const draftNames = {"food-form": "Еда", "favorite-form": "Избранное", "weight-form": "Вес"};
+const draftNames = {"food-form": "Еда", "favorite-form": "Избранное", "weight-form": "Вес", "recipe-form": "Блюдо"};
 function saveDraft(form, force = false) {
   if (!storageUser || !draftNames[form.id] || (!force && !dirty(form))) return;
-  drafts[form.id] = {values: JSON.parse(formValues(form)), editingEntry, foodTemplate, selectedFavorite, editingWeight, timezone: state.timezone};
+  drafts[form.id] = {values: JSON.parse(formValues(form)), editingEntry, foodTemplate, selectedFavorite, editingWeight, editingRecipe, timezone: state.timezone};
   saveStorage(`kcalorie-drafts-${storageUser}`, drafts);
   renderDrafts();
 }
@@ -729,9 +987,17 @@ function renderDrafts() {
     if (!draftNames[id] || !draft?.values) continue;
     if ($(id).closest("dialog")?.open) continue;
     const row = node("div", "", "draft-row");
-    row.append(node("p", `${draftNames[id]} · ${(draft.values.eaten_at || draft.values.measured_at)?.replace("T", " ") || "черновик"}`));
+    const label = id === "recipe-form" ? draft.values.name.trim() : (draft.values.eaten_at || draft.values.measured_at)?.replace("T", " ");
+    row.append(node("p", `${draftNames[id]} · ${label || "черновик"}`));
     row.append(action("Продолжить", () => {
       if (draft.timezone !== state.timezone) { notice("У черновика другой часовой пояс. Верните прежний пояс в боте или удалите черновик."); return; }
+      if (id === "recipe-form") {
+        // The draft keeps the version it started from: a recipe changed since then conflicts, not overwritten.
+        openRecipe(draft.editingRecipe, draft.values);
+        baselines.set($(id), "");
+        syncTelegram();
+        return;
+      }
       if (id === "food-form") openFood(draft.editingEntry || draft.foodTemplate, !draft.editingEntry && Boolean(draft.foodTemplate));
       else {
         if (id === "weight-form") {

@@ -39,7 +39,7 @@ from .domain import (
 )
 
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 # The favorite_foods and sessions nutrition columns keep their historical
 # *_per_100g names; for unit = 'serving' rows they hold per-serving values.
@@ -225,6 +225,61 @@ COMMIT;
 )
 
 
+# Recipes are edited in the Mini App. Each one publishes its per-100g values of
+# the cooked dish to a linked favorite, so the chat bot can log portions too;
+# deleting that favorite in the bot only unlinks it until the recipe is saved.
+# Ingredient values are per 100g, weighed raw.
+_MIGRATE_V8_TO_V9 = """
+BEGIN IMMEDIATE;
+CREATE TABLE IF NOT EXISTS recipes (
+    recipe_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    name TEXT NOT NULL CHECK (length(trim(name)) BETWEEN 1 AND 200),
+    name_key TEXT NOT NULL,
+    cooked_grams REAL NULL
+        CHECK (cooked_grams IS NULL OR (cooked_grams > 0 AND cooked_grams < 1e308)),
+    favorite_id INTEGER NULL
+        REFERENCES favorite_foods(favorite_id) ON DELETE SET NULL,
+    created_at_utc INTEGER NOT NULL,
+    updated_at_utc INTEGER NOT NULL,
+    UNIQUE (user_id, name_key)
+);
+CREATE TABLE IF NOT EXISTS recipe_ingredients (
+    recipe_id INTEGER NOT NULL REFERENCES recipes(recipe_id) ON DELETE CASCADE,
+    position INTEGER NOT NULL CHECK (position >= 0),
+    name TEXT NOT NULL CHECK (length(trim(name)) BETWEEN 1 AND 200),
+    name_key TEXT NOT NULL,
+    grams REAL NOT NULL CHECK (grams > 0 AND grams < 1e308),
+    calories_per_100g REAL NOT NULL
+        CHECK (calories_per_100g >= 0 AND calories_per_100g < 1e308),
+    protein_per_100g REAL NULL
+        CHECK (protein_per_100g IS NULL OR (protein_per_100g >= 0 AND protein_per_100g <= 100)),
+    fat_per_100g REAL NULL
+        CHECK (fat_per_100g IS NULL OR (fat_per_100g >= 0 AND fat_per_100g <= 100)),
+    carbs_per_100g REAL NULL
+        CHECK (carbs_per_100g IS NULL OR (carbs_per_100g >= 0 AND carbs_per_100g <= 100)),
+    PRIMARY KEY (recipe_id, position)
+);
+CREATE INDEX IF NOT EXISTS recipes_user_updated_idx
+    ON recipes(user_id, updated_at_utc DESC, recipe_id DESC);
+CREATE INDEX IF NOT EXISTS recipes_favorite_idx ON recipes(favorite_id);
+PRAGMA user_version = 9;
+COMMIT;
+"""
+
+
+def name_filter(query: str, column: str) -> tuple[str, list[str]]:
+    """SQL matching every word fragment of query in a casefolded name column,
+    in any order; SQL wildcards in the query stay literal."""
+    terms = tuple(dict.fromkeys(query.casefold().split())) or ("",)
+    patterns = [
+        "%" + term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        for term in terms
+    ]
+    conditions = " AND ".join(f"{column} LIKE ? ESCAPE '\\'" for _ in terms)
+    return conditions, patterns
+
+
 class _ClosingConnection(sqlite3.Connection):
     def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> bool:
         try:
@@ -333,6 +388,9 @@ class Database:
                 connection.execute("PRAGMA user_version = 8")
                 connection.commit()
                 version = 8
+            if version == 8:
+                connection.executescript(_MIGRATE_V8_TO_V9)
+                version = 9
             if version != SCHEMA_VERSION:
                 raise RuntimeError(
                     f"Unsupported database schema version {version}; expected {SCHEMA_VERSION}."
@@ -1085,15 +1143,7 @@ class Database:
         self, user_id: int, query: str, limit: int = 20, offset: int = 0
     ) -> tuple[FavoriteFood, ...]:
         self._validate_page(offset, limit)
-        # Match every word fragment, in any order; SQL wildcards stay literal.
-        terms = tuple(dict.fromkeys(query.casefold().split())) or ("",)
-        patterns = [
-            "%"
-            + term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            + "%"
-            for term in terms
-        ]
-        conditions = " AND ".join("name_key LIKE ? ESCAPE '\\'" for _ in terms)
+        conditions, patterns = name_filter(query, "name_key")
         with self._connect() as connection:
             rows = connection.execute(
                 f"""

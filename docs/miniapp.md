@@ -33,11 +33,26 @@ partial/unknown macro indicators, and these workflows:
   that the user sees «Попробуйте через минуту». Only the query text is sent,
   never user IDs. Set `FOOD_SEARCH=off` in the web service environment to hide
   the button and disable the endpoint.
+- «Сложное блюдо» builds a recipe from up to 40 raw ingredients, each with its
+  weight and calories/macros per 100 g. Typing an ingredient name suggests
+  favorites (a serving favorite only when its serving weight is known,
+  converted to per 100 g) and ingredients of earlier recipes; Open Food Facts
+  is searched only on request, because of its rate limit. The dish's energy
+  per 100 g follows its weight once cooked (water boils off or soaks in), or
+  the raw weight when none is given; totals stay the sum of the ingredients.
+  A macro sums the ingredients that state it and is marked ≈ when an
+  ingredient with calories lacks it. Filling «Съедено, г» saves the recipe and
+  logs that portion in one step. Recipe names are unique per user, ignoring
+  case. Each recipe publishes its per-100 g values to a favorite of the same
+  name (adopting an existing plain favorite of that name), so the chat bot can
+  log portions by weight too; saving the recipe again overwrites edits made to
+  that favorite in the bot, and deleting the recipe deletes its favorite.
+  Logged entries are ordinary entries and stay when the recipe changes.
 - Edit names, amounts, nutrition and dates. Concurrent changes in the bot or
   another window produce a conflict instead of overwriting newer data.
 - Delete a food entry and undo it using the toast for 15 minutes. The undo
   button lasts until dismissed, expired, or the page is reloaded.
-- Food, favorite and weight forms save a local draft before submission, including
+- Food, favorite, recipe and weight forms save a local draft before submission, including
   unchanged default values, so a lost response can be retried after a reload.
 - View 7 days ending on the selected date, or its calendar month (through today
   for the current month), with daily calorie bars. Missing days remain missing;
@@ -879,7 +894,7 @@ valid user ID, and rejects credentials older than one hour (or more than 30
 seconds in the future). After expiry, close and reopen the app. User IDs from
 request bodies or query parameters do not select another user's diary.
 
-The server limits request bodies to 16 KiB and exposes only the explicitly listed
+The server limits request bodies to 64 KiB and exposes only the explicitly listed
 static files, including the Apple Health setup guide.
 API responses disable caching. The bot token stays on the server; access logs
 are disabled. Do not configure a reverse proxy to log Authorization headers.
@@ -887,14 +902,14 @@ The database keeps the same owner checks and nutrition validation as the bot.
 Apple Health uses separate, revocable bearer keys at `/health/v1/*`; they cannot
 authorize Mini App requests. See [Apple Health setup](apple-health.md).
 
-Food and weight mutations use a client-generated `Idempotency-Key`, with up to
+Food, recipe and weight mutations use a client-generated `Idempotency-Key`, with up to
 three attempts after a network/server failure. The mutation and response receipt
 commit in one SQLite transaction. The same user/key/payload replays its original
 response even after a server restart; another payload with that key returns 409.
 Receipts are retained without expiry, so this table grows with usage. Editing and
 deletion additionally require the record's `version` to detect concurrent edits.
 
-Unfinished food and weight forms and pending request keys are kept in local
+Unfinished food, recipe and weight forms and pending request keys are kept in local
 browser storage, scoped to the server-verified user ID. Restore a draft using
 **Продолжить**: its original date and time are displayed and preserved. Storage
 is local to that browser/device; clearing storage removes drafts and pending

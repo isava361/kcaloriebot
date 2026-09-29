@@ -9,10 +9,13 @@ import re
 from dataclasses import asdict
 from datetime import date, datetime, timedelta
 
-from .database import Database
+from .database import Database, name_filter
 from .domain import (
+    MAX_CALORIES_PER_100G,
+    MAX_SERVING_GRAMS,
     FavoriteFood,
     FoodEntry,
+    Ingredient,
     NotFound,
     NutritionTotals,
     StateConflict,
@@ -29,9 +32,12 @@ from .domain import (
     parse_entry_time,
     parse_quick_add,
     per_unit_from_totals,
+    recipe_nutrition,
     scale_per_100,
     scale_per_serving,
 )
+
+MAX_RECIPE_INGREDIENTS = 40
 
 
 def json_text(value) -> str:
@@ -66,6 +72,56 @@ def favorite_data(favorite: FavoriteFood) -> dict:
     result = asdict(favorite)
     result["version"] = hashlib.sha256(json_text(result).encode()).hexdigest()
     return result
+
+
+def recipe_data(recipe, ingredients) -> dict:
+    """A recipe with the nutrition of the whole dish and of 100 g of it."""
+    items = [
+        {
+            "name": row["name"],
+            "grams": row["grams"],
+            "calories": row["calories_per_100g"],
+            "protein": row["protein_per_100g"],
+            "fat": row["fat_per_100g"],
+            "carbs": row["carbs_per_100g"],
+        }
+        for row in ingredients
+    ]
+    result = {
+        "recipe_id": recipe["recipe_id"],
+        "name": recipe["name"],
+        "cooked_grams": recipe["cooked_grams"],
+        "updated_at_utc": recipe["updated_at_utc"],
+        "ingredients": items,
+    }
+    result["version"] = hashlib.sha256(json_text(result).encode()).hexdigest()
+    nutrition = recipe_nutrition(
+        tuple(ingredient(item) for item in items), recipe["cooked_grams"]
+    )
+    result["totals"] = {
+        "raw_grams": nutrition.raw_grams,
+        "grams": nutrition.grams,
+        "calories": nutrition.calories,
+        "protein": nutrition.protein,
+        "fat": nutrition.fat,
+        "carbs": nutrition.carbs,
+    }
+    result["per_100g"] = dict(
+        zip(("calories", "protein", "fat", "carbs"), nutrition.per_100g())
+    )
+    result["incomplete"] = list(nutrition.incomplete)
+    return result
+
+
+def ingredient(item: dict) -> Ingredient:
+    return Ingredient(
+        item["name"],
+        item["grams"],
+        item["calories"],
+        item["protein"],
+        item["fat"],
+        item["carbs"],
+    )
 
 
 def entry_time(raw, zone: str, now: int, existing: FoodEntry | None = None) -> int:
@@ -227,6 +283,8 @@ class WebStore(Database):
     def _apply(self, connection, user_id, action, data, zone, now):
         if action.startswith("weight."):
             return self._weight(connection, user_id, action, data, zone, now)
+        if action.startswith("recipe."):
+            return self._recipe(connection, user_id, action, data, zone, now)
         if action == "entry.create":
             return self._create(connection, user_id, data, zone, now)
         entry_id = data.get("entry_id")
@@ -413,3 +471,300 @@ class WebStore(Database):
             totals = self._totals(data, unit, number(data, "serving_grams", True))
         entry_id = self._insert_entry(connection, user_id, timestamp, name, totals)
         return entry_data(self._owned_entry(connection, user_id, entry_id))
+
+    def recipes(self, user_id: int) -> dict:
+        with self._connect() as connection:
+            recipes = connection.execute(
+                "SELECT * FROM recipes WHERE user_id=? ORDER BY updated_at_utc DESC, recipe_id DESC",
+                (user_id,),
+            ).fetchall()
+            rows = connection.execute(
+                "SELECT i.* FROM recipe_ingredients i JOIN recipes r USING (recipe_id) WHERE r.user_id=? ORDER BY i.recipe_id, i.position",
+                (user_id,),
+            ).fetchall()
+        ingredients = {}
+        for row in rows:
+            ingredients.setdefault(row["recipe_id"], []).append(row)
+        return {
+            "items": [
+                recipe_data(row, ingredients.get(row["recipe_id"], []))
+                for row in recipes
+            ]
+        }
+
+    def ingredient_suggestions(self, user_id: int, query: str) -> dict:
+        """Per-100 g values to fill an ingredient from: favorites first, then
+        ingredients of the user's recipes, newest recipe first."""
+        items, seen = [], set()
+
+        def add(name, calories, protein, fat, carbs, source):
+            macros = (protein, fat, carbs)
+            if (
+                name.casefold() in seen
+                or not 0 <= calories <= MAX_CALORIES_PER_100G
+                or any(value is not None and value > 100 for value in macros)
+                or sum(value or 0.0 for value in macros) > 100.000001
+            ):
+                return
+            seen.add(name.casefold())
+            items.append(
+                {
+                    "name": name,
+                    "calories": calories,
+                    "protein": protein,
+                    "fat": fat,
+                    "carbs": carbs,
+                    "source": source,
+                }
+            )
+
+        for favorite in self.search_favorites(user_id, query, 20):
+            values = [
+                getattr(favorite, key + "_per_100g")
+                for key in ("calories", "protein", "fat", "carbs")
+            ]
+            if favorite.unit == "serving":
+                # A serving of unknown weight cannot be weighed into a recipe.
+                if not favorite.serving_grams:
+                    continue
+                factor = 100.0 / favorite.serving_grams
+                values = [None if value is None else value * factor for value in values]
+            add(favorite.name, *values, "favorite")
+        conditions, patterns = name_filter(query, "i.name_key")
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"SELECT i.* FROM recipe_ingredients i JOIN recipes r USING (recipe_id) WHERE r.user_id=? AND {conditions} ORDER BY r.updated_at_utc DESC, r.recipe_id DESC, i.position LIMIT 60",
+                (user_id, *patterns),
+            ).fetchall()
+        for row in rows:
+            add(
+                row["name"],
+                row["calories_per_100g"],
+                row["protein_per_100g"],
+                row["fat_per_100g"],
+                row["carbs_per_100g"],
+                "recipe",
+            )
+        return {"items": items[:8]}
+
+    def _owned_recipe(self, connection, user_id, recipe_id):
+        row = connection.execute(
+            "SELECT * FROM recipes WHERE user_id=? AND recipe_id=?",
+            (user_id, recipe_id),
+        ).fetchone()
+        if row is None:
+            raise NotFound("Блюдо не найдено.")
+        ingredients = connection.execute(
+            "SELECT * FROM recipe_ingredients WHERE recipe_id=? ORDER BY position",
+            (recipe_id,),
+        ).fetchall()
+        return recipe_data(row, ingredients)
+
+    def _recipe(self, connection, user_id, action, data, zone, now):
+        recipe_id = None
+        if action != "recipe.create":
+            recipe_id = data.get("recipe_id")
+            if type(recipe_id) is not int or recipe_id <= 0:
+                raise ValidationError("Некорректное блюдо.")
+            current = self._owned_recipe(connection, user_id, recipe_id)
+            if data.get("version") != current["version"]:
+                raise StateConflict("Блюдо изменилось. Откройте его заново.")
+            if action == "recipe.delete":
+                favorite_id = connection.execute(
+                    "SELECT favorite_id FROM recipes WHERE recipe_id=?", (recipe_id,)
+                ).fetchone()["favorite_id"]
+                connection.execute(
+                    "DELETE FROM recipes WHERE user_id=? AND recipe_id=?",
+                    (user_id, recipe_id),
+                )
+                if favorite_id is not None:
+                    connection.execute(
+                        "DELETE FROM favorite_foods WHERE user_id=? AND favorite_id=?",
+                        (user_id, favorite_id),
+                    )
+                return {"ok": True, "recipe_id": recipe_id}
+            if action != "recipe.update":
+                raise ValidationError("Неизвестная операция.")
+        if set(data) - {
+            "recipe_id",
+            "version",
+            "name",
+            "cooked_grams",
+            "ingredients",
+            "portion",
+        }:
+            raise ValueError
+        name = self._name(data)
+        items = self._ingredients(data.get("ingredients"))
+        cooked = number(data, "cooked_grams", True)
+        if cooked is not None and not 0 < cooked <= MAX_SERVING_GRAMS:
+            raise ValidationError("Вес готового блюда — больше 0 и не больше 100 кг.")
+        per_100 = self._dish_per_100(
+            recipe_nutrition(tuple(ingredient(item) for item in items), cooked)
+        )
+        portion = self._portion(data.get("portion"), zone, now)
+        if connection.execute(
+            "SELECT 1 FROM recipes WHERE user_id=? AND name_key=? AND recipe_id IS NOT ?",
+            (user_id, name.casefold(), recipe_id),
+        ).fetchone():
+            raise ValidationError(
+                "Блюдо с таким названием уже есть — откройте его из списка или назовите иначе."
+            )
+        if recipe_id is None:
+            recipe_id = connection.execute(
+                "INSERT INTO recipes(user_id,name,name_key,cooked_grams,created_at_utc,updated_at_utc) VALUES (?,?,?,?,?,?)",
+                (user_id, name, name.casefold(), cooked, now, now),
+            ).lastrowid
+        else:
+            connection.execute(
+                "UPDATE recipes SET name=?,name_key=?,cooked_grams=?,updated_at_utc=? WHERE user_id=? AND recipe_id=?",
+                (name, name.casefold(), cooked, now, user_id, recipe_id),
+            )
+            connection.execute(
+                "DELETE FROM recipe_ingredients WHERE recipe_id=?", (recipe_id,)
+            )
+        connection.executemany(
+            "INSERT INTO recipe_ingredients VALUES (?,?,?,?,?,?,?,?,?)",
+            [
+                (
+                    recipe_id,
+                    position,
+                    item["name"],
+                    item["name"].casefold(),
+                    item["grams"],
+                    item["calories"],
+                    item["protein"],
+                    item["fat"],
+                    item["carbs"],
+                )
+                for position, item in enumerate(items)
+            ],
+        )
+        self._publish_recipe(connection, user_id, recipe_id, name, per_100, now)
+        entry = None
+        if portion is not None:
+            grams, timestamp = portion
+            entry_id = self._insert_entry(
+                connection,
+                user_id,
+                timestamp,
+                name,
+                scale_per_100(per_100[0], grams, *per_100[1:]),
+            )
+            entry = entry_data(self._owned_entry(connection, user_id, entry_id))
+        return {
+            "recipe": self._owned_recipe(connection, user_id, recipe_id),
+            "entry": entry,
+        }
+
+    @staticmethod
+    def _ingredients(raw) -> list[dict]:
+        if not isinstance(raw, list) or not raw:
+            raise ValidationError("Добавьте хотя бы один ингредиент.")
+        if len(raw) > MAX_RECIPE_INGREDIENTS:
+            raise ValidationError(
+                f"В блюде может быть не больше {MAX_RECIPE_INGREDIENTS} ингредиентов."
+            )
+        items = []
+        for position, item in enumerate(raw, 1):
+            if not isinstance(item, dict) or set(item) - {
+                "name",
+                "grams",
+                "calories",
+                "protein",
+                "fat",
+                "carbs",
+            }:
+                raise ValueError
+            if not isinstance(item.get("name"), str) or not item["name"].strip():
+                raise ValidationError(f"Ингредиент {position}: укажите название.")
+            if len(" ".join(item["name"].split())) > 200:
+                raise ValidationError(
+                    f"Ингредиент {position}: название длиннее 200 символов."
+                )
+            name = normalize_food_name(item["name"])
+            grams = number(item, "grams")
+            if not 0 < grams <= MAX_SERVING_GRAMS:
+                raise ValidationError(f"«{name}»: вес — больше 0 и не больше 100 кг.")
+            calories = number(item, "calories")
+            if not 0 <= calories <= MAX_CALORIES_PER_100G:
+                raise ValidationError(f"«{name}»: ккал на 100 г — от 0 до 10 000.")
+            macros = [number(item, key, True) for key in ("protein", "fat", "carbs")]
+            if (
+                any(value is not None and not 0 <= value <= 100 for value in macros)
+                or sum(value or 0.0 for value in macros) > 100.000001
+            ):
+                raise ValidationError(
+                    f"«{name}»: белки, жиры и углеводы — от 0 до 100 г на 100 г, в сумме не больше 100."
+                )
+            protein, fat, carbs = macros
+            items.append(
+                dict(
+                    name=name,
+                    grams=grams,
+                    calories=calories,
+                    protein=protein,
+                    fat=fat,
+                    carbs=carbs,
+                )
+            )
+        return items
+
+    @staticmethod
+    def _dish_per_100(nutrition):
+        """Per-100 g values of the cooked dish, checked like any food's."""
+        calories, *macros = nutrition.per_100g()
+        if calories > MAX_CALORIES_PER_100G:
+            raise ValidationError(
+                "Больше 10 000 ккал на 100 г готового блюда — проверьте вес готового блюда."
+            )
+        # Rounding can push a pure 100 g of macros past 100 by a hair.
+        if sum(value or 0.0 for value in macros) > 100.000001:
+            raise ValidationError(
+                "Белков, жиров и углеводов больше, чем весит готовое блюдо — проверьте его вес."
+            )
+        return (
+            calories,
+            *(None if value is None else min(value, 100.0) for value in macros),
+        )
+
+    @staticmethod
+    def _portion(raw, zone, now):
+        if raw is None:
+            return None
+        if not isinstance(raw, dict) or set(raw) != {"grams", "eaten_at"}:
+            raise ValueError
+        grams = number(raw, "grams")
+        if not 0 < grams <= MAX_SERVING_GRAMS:
+            raise ValidationError("Порция — больше 0 и не больше 100 кг.")
+        return grams, entry_time(raw["eaten_at"], zone, now)
+
+    def _publish_recipe(self, connection, user_id, recipe_id, name, per_100, now):
+        """Keep the recipe's favorite in step, so the bot can log it by weight.
+
+        An unlinked recipe adopts a plain favorite of the same name, as saving
+        a favorite under an existing name does, but never another recipe's.
+        """
+        linked = connection.execute(
+            "SELECT f.favorite_id FROM recipes r JOIN favorite_foods f ON f.favorite_id=r.favorite_id AND f.user_id=r.user_id WHERE r.recipe_id=?",
+            (recipe_id,),
+        ).fetchone()
+        if linked is None:
+            linked = connection.execute(
+                "SELECT favorite_id FROM favorite_foods WHERE user_id=? AND name_key=? AND favorite_id NOT IN (SELECT favorite_id FROM recipes WHERE user_id=? AND favorite_id IS NOT NULL) ORDER BY favorite_id DESC LIMIT 1",
+                (user_id, name.casefold(), user_id),
+            ).fetchone()
+        if linked is None:
+            favorite_id = self._insert_favorite(
+                connection, user_id, name, *per_100, now
+            )
+        else:
+            favorite_id = linked["favorite_id"]
+            connection.execute(
+                "UPDATE favorite_foods SET name=?,name_key=?,unit='100g',serving_grams=NULL,calories_per_100g=?,protein_per_100g=?,fat_per_100g=?,carbs_per_100g=?,updated_at_utc=? WHERE user_id=? AND favorite_id=?",
+                (name, name.casefold(), *per_100, now, user_id, favorite_id),
+            )
+        connection.execute(
+            "UPDATE recipes SET favorite_id=? WHERE recipe_id=?",
+            (favorite_id, recipe_id),
+        )

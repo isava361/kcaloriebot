@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 from kcaloriebot.domain import (
     UNIT_100G,
     UNIT_SERVING,
+    Ingredient,
     NutritionTotals,
     QuickAdd,
     ValidationError,
@@ -21,6 +22,7 @@ from kcaloriebot.domain import (
     parse_weight,
     per_100_from_totals,
     per_unit_from_totals,
+    recipe_nutrition,
     scale_per_100,
     scale_per_serving,
     validate_macro_sum,
@@ -375,6 +377,39 @@ class EntryTimeParsingTests(unittest.TestCase):
             with self.subTest(text=text):
                 with self.assertRaises(ValidationError):
                     parse_entry_time(text, "UTC", self.NOW)
+
+
+class RecipeNutritionTests(unittest.TestCase):
+    BUCKWHEAT = Ingredient("Гречка", 200, 343, 13, 3.4, 62)
+    WATER = Ingredient("Вода", 400, 0)
+    BUTTER = Ingredient("Масло", 20, 748, 0.5, 82.5, None)
+
+    def test_raw_weight_is_the_dish_weight_without_a_cooked_one(self) -> None:
+        dish = recipe_nutrition((self.BUCKWHEAT, self.WATER))
+        self.assertEqual((dish.raw_grams, dish.grams), (600, 600))
+        self.assertAlmostEqual(dish.calories, 686)
+        self.assertAlmostEqual(dish.protein, 26)
+        self.assertEqual(dish.incomplete, ())
+        calories, protein, fat, carbs = dish.per_100g()
+        self.assertAlmostEqual(calories, 686 / 6)
+        self.assertAlmostEqual(carbs, 124 / 6)
+
+    def test_cooked_weight_concentrates_per_100g_but_keeps_totals(self) -> None:
+        dish = recipe_nutrition((self.BUCKWHEAT, self.WATER), 500)
+        self.assertEqual((dish.raw_grams, dish.grams), (600, 500))
+        self.assertAlmostEqual(dish.calories, 686)
+        self.assertAlmostEqual(dish.per_100g()[0], 137.2)
+
+    def test_unknown_macros_sum_known_values_and_are_reported(self) -> None:
+        dish = recipe_nutrition((self.BUCKWHEAT, self.WATER, self.BUTTER))
+        self.assertAlmostEqual(dish.carbs, 124)
+        self.assertAlmostEqual(dish.fat, 6.8 + 16.5)
+        self.assertEqual(dish.incomplete, ("Масло",))
+        self.assertIsNone(recipe_nutrition((self.WATER,)).protein)
+
+    def test_a_recipe_needs_ingredients(self) -> None:
+        with self.assertRaises(ValidationError):
+            recipe_nutrition(())
 
 
 if __name__ == "__main__":

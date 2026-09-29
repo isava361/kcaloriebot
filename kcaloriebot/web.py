@@ -299,6 +299,8 @@ async def mutate(request: web.Request, action: str, status: int = 200) -> web.Re
         data["entry_id"] = int(request.match_info["entry_id"])
     if "weight_id" in request.match_info:
         data["weight_id"] = int(request.match_info["weight_id"])
+    if "recipe_id" in request.match_info:
+        data["recipe_id"] = int(request.match_info["recipe_id"])
     result = await asyncio.to_thread(
         WebStore(request.app[DATABASE].path).mutate,
         request["user_id"],
@@ -307,6 +309,35 @@ async def mutate(request: web.Request, action: str, status: int = 200) -> web.Re
         data,
     )
     return web.json_response(result, status=status)
+
+
+async def recipes(request: web.Request) -> web.Response:
+    result = await asyncio.to_thread(
+        WebStore(request.app[DATABASE].path).recipes, request["user_id"]
+    )
+    return web.json_response(result)
+
+
+async def add_recipe(request: web.Request) -> web.Response:
+    return await mutate(request, "recipe.create", 201)
+
+
+async def edit_recipe(request: web.Request) -> web.Response:
+    return await mutate(request, "recipe.update")
+
+
+async def delete_recipe(request: web.Request) -> web.Response:
+    return await mutate(request, "recipe.delete")
+
+
+async def ingredients(request: web.Request) -> web.Response:
+    query = normalize_search_query(request.query.get("q", ""))
+    result = await asyncio.to_thread(
+        WebStore(request.app[DATABASE].path).ingredient_suggestions,
+        request["user_id"],
+        query,
+    )
+    return web.json_response(result)
 
 
 async def add_entry(request: web.Request) -> web.Response:
@@ -417,7 +448,8 @@ def build_web_app(
     database: Database | None = None,
     food_search: FoodSearch | None = None,
 ) -> web.Application:
-    app = web.Application(middlewares=[boundary], client_max_size=16384)
+    # A recipe of 40 ingredients with long names is the largest request body.
+    app = web.Application(middlewares=[boundary], client_max_size=65536)
     store = database or Database(settings.database_path)
     store.initialize()
     app[DATABASE], app[SETTINGS] = store, settings
@@ -453,6 +485,11 @@ def build_web_app(
             web.post("/api/favorites", create_favorite),
             web.get("/api/food-search", search_foods),
             web.get("/api/recent", recent),
+            web.get("/api/recipes", recipes),
+            web.post("/api/recipes", add_recipe),
+            web.put("/api/recipes/{recipe_id}", edit_recipe),
+            web.delete("/api/recipes/{recipe_id}", delete_recipe),
+            web.get("/api/ingredients", ingredients),
             web.get("/api/statistics", statistics),
             web.get("/api/weights", weights),
             web.post("/api/weights", add_weight),
