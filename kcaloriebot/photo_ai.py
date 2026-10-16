@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import base64
-import json
 import logging
 import math
 from dataclasses import dataclass
+from datetime import date, datetime, timezone
 from typing import Any, Optional
 
 import anthropic
@@ -29,8 +29,14 @@ SUPPORTED_MEDIA_TYPES = frozenset(
     {"image/jpeg", "image/png", "image/gif", "image/webp"}
 )
 
+# Searches allowed per photo, and pause_turn resumptions of a long search turn.
+MAX_WEB_SEARCHES = 3
+MAX_CONTINUATIONS = 3
+RECORD_TOOL_NAME = "record_foods"
+
 SYSTEM_PROMPT = """\
 You log food for a calorie-tracking diary from a single photo sent by its owner.
+Report the result by calling the record_foods tool exactly once.
 
 Identify every distinct food or drink the person is about to eat or has eaten
 and estimate, for each one:
@@ -49,12 +55,17 @@ Rules:
   cutlet), but keep a mixed dish (soup, salad, pizza) as one item.
 - If the photo shows a body-weight scale display, put the reading in weight_kg;
   otherwise set weight_kg to 0.
-- If there is nothing to log, return an empty foods list.
+- If there is nothing to log, record an empty foods list.
+- Use web_search only when the photo shows a specific branded or packaged
+  product, or a dish from a named restaurant or chain, whose nutrition you do
+  not know and no label is visible. Never search for ordinary home food. Your
+  training data may be out of date for products, so prefer a search over a
+  guess for those.
 - comment: one or two short Russian sentences on what you logged and anything
   you were unsure about.
 """
 
-OUTPUT_SCHEMA: dict[str, Any] = {
+RECORD_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "foods": {
@@ -86,6 +97,21 @@ OUTPUT_SCHEMA: dict[str, Any] = {
     "required": ["foods", "weight_kg", "comment"],
     "additionalProperties": False,
 }
+
+
+TOOLS: list[dict[str, Any]] = [
+    {
+        "type": "web_search_20250305",
+        "name": "web_search",
+        "max_uses": MAX_WEB_SEARCHES,
+    },
+    {
+        "name": RECORD_TOOL_NAME,
+        "description": "Record the foods (and scale reading) found in the photo.",
+        "strict": True,
+        "input_schema": RECORD_SCHEMA,
+    },
+]
 
 
 class PhotoUnavailable(Exception):
@@ -186,38 +212,58 @@ class PhotoAnalyzer:
                 else "No caption.",
             },
         ]
-        try:
-            response = await self._client.messages.create(
-                model=self._model,
-                max_tokens=16000,
-                system=SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": content}],
-                output_config={
-                    "effort": self._effort,
-                    "format": {"type": "json_schema", "schema": OUTPUT_SCHEMA},
-                },
+        system = f"{SYSTEM_PROMPT}\nThe current date is {self._today().isoformat()}."
+        messages: list[dict[str, Any]] = [{"role": "user", "content": content}]
+        for _ in range(MAX_CONTINUATIONS + 1):
+            try:
+                response = await self._client.messages.create(
+                    model=self._model,
+                    max_tokens=16000,
+                    system=system,
+                    messages=messages,
+                    tools=TOOLS,
+                    output_config={"effort": self._effort},
+                )
+            except anthropic.APIError as exc:
+                logger.warning("Photo analysis request failed: %s", type(exc).__name__)
+                raise PhotoUnavailable("Claude request failed") from exc
+            record = next(
+                (
+                    block.input
+                    for block in response.content
+                    if block.type == "tool_use" and block.name == RECORD_TOOL_NAME
+                ),
+                None,
             )
-        except anthropic.APIError as exc:
-            logger.warning("Photo analysis request failed: %s", type(exc).__name__)
-            raise PhotoUnavailable("Claude request failed") from exc
-        if response.stop_reason != "end_turn":
-            logger.warning(
-                "Photo analysis stopped early stop_reason=%s request_id=%s",
-                response.stop_reason,
-                response._request_id,
-            )
-            raise PhotoUnavailable(f"Analysis stopped: {response.stop_reason}")
-        text = next((b.text for b in response.content if b.type == "text"), "")
-        try:
-            return parse_analysis(json.loads(text))
-        except json.JSONDecodeError as exc:
-            raise PhotoUnavailable("Analysis was not valid JSON") from exc
+            if record is not None:
+                return parse_analysis(record)
+            if response.stop_reason != "pause_turn":
+                break
+            # A long search turn was paused; send it back unchanged to resume.
+            messages.append({"role": "assistant", "content": response.content})
+        logger.warning(
+            "Photo analysis returned no record stop_reason=%s request_id=%s",
+            response.stop_reason,
+            response._request_id,
+        )
+        raise PhotoUnavailable(f"Analysis stopped: {response.stop_reason}")
+
+    @staticmethod
+    def _today() -> date:
+        return datetime.now(timezone.utc).date()
 
 
 def build_analyzer(
-    api_key: Optional[str], model: str, effort: str
+    api_key: Optional[str],
+    model: str,
+    effort: str,
+    workspace_id: Optional[str] = None,
 ) -> Optional[PhotoAnalyzer]:
     if not api_key:
         return None
-    client = anthropic.AsyncAnthropic(api_key=api_key, timeout=120.0)
+    # Keys that are not scoped to a workspace must name one on every request.
+    headers = {"anthropic-workspace-id": workspace_id} if workspace_id else None
+    client = anthropic.AsyncAnthropic(
+        api_key=api_key, timeout=120.0, default_headers=headers
+    )
     return PhotoAnalyzer(client, model, effort)

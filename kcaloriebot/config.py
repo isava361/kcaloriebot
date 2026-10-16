@@ -23,6 +23,7 @@ class Settings:
     miniapp_url: Optional[str] = None
     food_search: bool = True
     anthropic_api_key: Optional[str] = None
+    anthropic_workspace_id: Optional[str] = None
     photo_model: str = "claude-haiku-5-5"
     photo_effort: str = "high"
 
@@ -80,6 +81,7 @@ def load_settings(environ: Optional[Mapping[str, str]] = None) -> Settings:
         miniapp_url=miniapp_url,
         food_search=food_search == "openfoodfacts",
         anthropic_api_key=values.get("ANTHROPIC_API_KEY", "").strip() or None,
+        anthropic_workspace_id=values.get("ANTHROPIC_WORKSPACE_ID", "").strip() or None,
         photo_model=photo_model,
         photo_effort=photo_effort,
     )

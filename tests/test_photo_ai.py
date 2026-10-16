@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import base64
-import json
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -17,6 +16,7 @@ from kcaloriebot.photo_ai import (
     PhotoAnalysis,
     PhotoAnalyzer,
     PhotoUnavailable,
+    build_analyzer,
     parse_analysis,
 )
 from tests.test_bot_handlers import FakeMessage, make_update
@@ -109,50 +109,96 @@ class ParseAnalysisTests(unittest.TestCase):
 
 
 class FakeMessages:
-    def __init__(self, response: Any) -> None:
-        self.response = response
-        self.kwargs: dict[str, Any] = {}
+    def __init__(self, *responses: Any) -> None:
+        self.responses = list(responses)
+        self.calls: list[dict[str, Any]] = []
 
     async def create(self, **kwargs: Any) -> Any:
-        self.kwargs = kwargs
-        return self.response
+        # Snapshot the history: the analyzer appends to the same list later.
+        self.calls.append({**kwargs, "messages": list(kwargs["messages"])})
+        return self.responses.pop(0)
 
 
-def fake_client(stop_reason: str, text: str) -> tuple[Any, FakeMessages]:
-    response = SimpleNamespace(
-        stop_reason=stop_reason,
-        _request_id="req_test",
-        content=[SimpleNamespace(type="text", text=text)],
+def response(stop_reason: str, *content: Any) -> Any:
+    return SimpleNamespace(
+        stop_reason=stop_reason, _request_id="req_test", content=list(content)
     )
-    messages = FakeMessages(response)
+
+
+def record_block(payload: dict[str, Any]) -> Any:
+    return SimpleNamespace(type="tool_use", name="record_foods", input=payload)
+
+
+SEARCH_BLOCK = SimpleNamespace(type="server_tool_use", name="web_search", input={})
+EMPTY_RECORD = {"foods": [], "weight_kg": 0, "comment": "Пусто."}
+
+
+def fake_client(*responses: Any) -> tuple[Any, FakeMessages]:
+    messages = FakeMessages(*responses)
     return SimpleNamespace(messages=messages), messages
 
 
 class PhotoAnalyzerTests(unittest.IsolatedAsyncioTestCase):
-    async def test_request_sends_image_caption_and_schema(self) -> None:
-        payload = {"foods": [], "weight_kg": 0, "comment": "Пусто."}
-        client, messages = fake_client("end_turn", json.dumps(payload))
-
+    async def test_request_sends_image_caption_tools_and_date(self) -> None:
+        client, messages = fake_client(response("tool_use", record_block(EMPTY_RECORD)))
         analyzer = PhotoAnalyzer(client, "claude-test", "low")
+        analyzer._today = lambda: date(2026, 10, 17)
+
         analysis = await analyzer.analyze(b"img", "image/png", "200 г")
 
         self.assertEqual("Пусто.", analysis.comment)
-        kwargs = messages.kwargs
+        kwargs = messages.calls[0]
         self.assertEqual("claude-test", kwargs["model"])
-        self.assertEqual("low", kwargs["output_config"]["effort"])
-        self.assertEqual("json_schema", kwargs["output_config"]["format"]["type"])
+        self.assertEqual({"effort": "low"}, kwargs["output_config"])
+        self.assertIn("The current date is 2026-10-17.", kwargs["system"])
+        search, record = kwargs["tools"]
+        self.assertEqual(
+            ("web_search_20250305", 3), (search["type"], search["max_uses"])
+        )
+        self.assertEqual(("record_foods", True), (record["name"], record["strict"]))
         image, caption = kwargs["messages"][0]["content"]
         self.assertEqual("image/png", image["source"]["media_type"])
         self.assertEqual(b"img", base64.b64decode(image["source"]["data"]))
         self.assertEqual("Caption: 200 г", caption["text"])
 
-    async def test_refusal_is_unavailable(self) -> None:
-        client, _ = fake_client("refusal", "")
+    async def test_paused_search_turn_is_resumed(self) -> None:
+        paused = response("pause_turn", SEARCH_BLOCK)
+        client, messages = fake_client(
+            paused, response("tool_use", record_block(EMPTY_RECORD))
+        )
+
+        analysis = await PhotoAnalyzer(client, "claude-test", "low").analyze(
+            b"img", "image/jpeg"
+        )
+
+        self.assertEqual("Пусто.", analysis.comment)
+        self.assertEqual(2, len(messages.calls))
+        self.assertEqual(
+            {"role": "assistant", "content": paused.content},
+            messages.calls[1]["messages"][-1],
+        )
+
+    async def test_answer_without_record_is_unavailable(self) -> None:
+        for stop_reason in ("refusal", "end_turn", "max_tokens"):
+            with self.subTest(stop_reason=stop_reason):
+                client, _ = fake_client(
+                    response(stop_reason, SimpleNamespace(type="text", text="?"))
+                )
+                with self.assertRaises(PhotoUnavailable):
+                    await PhotoAnalyzer(client, "claude-test", "low").analyze(
+                        b"img", "image/jpeg"
+                    )
+
+    async def test_endless_pausing_gives_up(self) -> None:
+        client, messages = fake_client(
+            *(response("pause_turn", SEARCH_BLOCK) for _ in range(10))
+        )
 
         with self.assertRaises(PhotoUnavailable):
             await PhotoAnalyzer(client, "claude-test", "low").analyze(
                 b"img", "image/jpeg"
             )
+        self.assertEqual(4, len(messages.calls))
 
 
 class HandlePhotoTests(unittest.IsolatedAsyncioTestCase):
@@ -237,6 +283,27 @@ class PhotoSettingsTests(unittest.TestCase):
         settings = load_settings({"BOT_TOKEN": "t", "ANTHROPIC_API_KEY": " sk-x "})
         self.assertEqual("sk-x", settings.anthropic_api_key)
         self.assertNotIn("sk-x", repr(settings))
+        self.assertIsNone(settings.anthropic_workspace_id)
+
+    def test_workspace_id_is_sent_as_a_header(self) -> None:
+        settings = load_settings(
+            {
+                "BOT_TOKEN": "t",
+                "ANTHROPIC_API_KEY": "k",
+                "ANTHROPIC_WORKSPACE_ID": " ws ",
+            }
+        )
+        analyzer = build_analyzer(
+            settings.anthropic_api_key,
+            settings.photo_model,
+            settings.photo_effort,
+            settings.anthropic_workspace_id,
+        )
+        self.assertEqual(
+            "ws", analyzer._client.default_headers["anthropic-workspace-id"]
+        )
+        plain = build_analyzer("k", "m", "high")
+        self.assertNotIn("anthropic-workspace-id", plain._client.default_headers)
 
     def test_photo_model_and_effort_default_and_override(self) -> None:
         settings = load_settings({"BOT_TOKEN": "t"})

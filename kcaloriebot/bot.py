@@ -2624,7 +2624,10 @@ def build_application(
     application.bot_data["database"] = store
     application.bot_data["miniapp_url"] = settings.miniapp_url
     application.bot_data["photo_analyzer"] = build_analyzer(
-        settings.anthropic_api_key, settings.photo_model, settings.photo_effort
+        settings.anthropic_api_key,
+        settings.photo_model,
+        settings.photo_effort,
+        settings.anthropic_workspace_id,
     )
     new_messages = filters.UpdateType.MESSAGE
     application.add_handler(
