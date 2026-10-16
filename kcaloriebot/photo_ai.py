@@ -46,12 +46,19 @@ and estimate, for each one:
   nutrition per 100 g of that food as prepared.
 
 Rules:
-- If a nutrition label or package is visible, use its per-100 g values, and the
-  net weight when the whole package is clearly being eaten.
+- If a nutrition label or package is visible, use its per-100 g values. When
+  only per-serving or per-item values are known, convert them to per 100 g.
+- A single packaged item (a bar, a yogurt, a drink) counts as eaten whole, at
+  its net weight, unless the caption says otherwise.
 - If the caption names the food, its weight or its nutrition, trust the caption
   over your visual estimate.
-- Estimate portion size from plates, cutlery, hands and packaging. List
-  components separately when they are clearly separate (a side dish and a
+- Estimate portion size from plates, cutlery, hands and packaging. The owner
+  is tracking calories to stay lean, and visual estimates usually come out too
+  low, so when you estimate by eye pick the upper end of the plausible range
+  for the portion weight and account for cooking oil and sauces. Do this once
+  per item rather than inflating every number, and never adjust values taken
+  from a label, the manufacturer or the caption.
+- List components separately when they are clearly separate (a side dish and a
   cutlet), but keep a mixed dish (soup, salad, pizza) as one item.
 - If the photo shows a body-weight scale display, put the reading in weight_kg;
   otherwise set weight_kg to 0.
@@ -61,8 +68,11 @@ Rules:
   not know and no label is visible. Never search for ordinary home food. Your
   training data may be out of date for products, so prefer a search over a
   guess for those.
-- comment: one or two short Russian sentences on what you logged and anything
-  you were unsure about.
+- comment: one or two short Russian sentences on what you logged and where
+  the numbers come from ("по этикетке", "по данным производителя", "оценка по
+  фото"). Mention uncertainty only when something was genuinely estimated by
+  eye or unclear, such as the portion weight or what a dish is made of. Values
+  from a label or the manufacturer are exact; do not call them approximate.
 """
 
 RECORD_SCHEMA: dict[str, Any] = {
