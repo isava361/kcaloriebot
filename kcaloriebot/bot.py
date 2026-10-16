@@ -31,6 +31,13 @@ from .callbacks import (
 from .config import Settings
 from .database import Database
 from .health import HealthStore
+from .photo_ai import (
+    MAX_IMAGE_BYTES,
+    SUPPORTED_MEDIA_TYPES,
+    PhotoAnalyzer,
+    PhotoUnavailable,
+    build_analyzer,
+)
 from .domain import (
     EARLIEST_DIARY_DATE,
     FoodEntry,
@@ -132,6 +139,7 @@ __all__ = [
     "handle_callback",
     "unknown_command",
     "handle_non_text",
+    "handle_photo",
     "handle_error",
     "build_application",
 ]
@@ -139,7 +147,7 @@ __all__ = [
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
 SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
-# The only Telegram account allowed to run /users.
+# The only Telegram account allowed to run /users and log food from photos.
 ADMIN_USER_ID = 193117018
 
 
@@ -2186,6 +2194,98 @@ async def handle_non_text(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await _reprompt(turn, "Please send a text value.")
 
 
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin-only: let Claude recognize food in a photo and log it."""
+    analyzer: Optional[PhotoAnalyzer] = context.application.bot_data.get(
+        "photo_analyzer"
+    )
+    if (
+        analyzer is None
+        or update.effective_user is None
+        or update.effective_user.id != ADMIN_USER_ID
+    ):
+        await handle_non_text(update, context)
+        return
+    turn = await _begin(update, context, register_user=True)
+    if turn is None:
+        return
+    if turn.session is not None:
+        await _reprompt(turn, "Finish or cancel the current input before a photo.")
+        return
+    database = turn.database
+    if await _call(database.get_timezone, turn.user_id) is None:
+        await _start_with_prompt(
+            database,
+            turn.user_id,
+            turn.chat_id,
+            SessionState.WAIT_TIMEZONE,
+            turn.message,
+            TIMEZONE_ONBOARDING_PROMPT,
+            TIMEZONE_REQUIRED_MARKUP,
+        )
+        return
+    message = turn.message
+    if message.photo:
+        attachment, media_type = message.photo[-1], "image/jpeg"
+    else:
+        attachment = message.document
+        media_type = attachment.mime_type
+    if media_type not in SUPPORTED_MEDIA_TYPES:
+        await message.reply_text(
+            "Поддерживаются JPEG, PNG, GIF и WebP.", reply_markup=MAIN_KEYBOARD
+        )
+        return
+    if (attachment.file_size or 0) > MAX_IMAGE_BYTES:
+        await message.reply_text(
+            "Фото больше 5 МБ — отправьте его сжатым.", reply_markup=MAIN_KEYBOARD
+        )
+        return
+    await message.reply_text("Распознаю фото…")
+    try:
+        telegram_file = await attachment.get_file()
+        image = bytes(await telegram_file.download_as_bytearray())
+        analysis = await analyzer.analyze(image, media_type, message.caption)
+    except (TelegramError, PhotoUnavailable):
+        logger.warning("Photo analysis failed user_id=%s", turn.user_id, exc_info=True)
+        await message.reply_text(
+            "Не удалось распознать фото. Попробуйте ещё раз или введите вручную.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
+    if not analysis.foods and analysis.weight_kg is None:
+        await message.reply_text(
+            analysis.comment or "На фото не нашлось, что записать.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
+    if analysis.comment:
+        await message.reply_text(analysis.comment)
+    message_date = getattr(message, "date", None)
+    event_epoch = (
+        int(message_date.timestamp())
+        if message_date is not None
+        else database.now_epoch()
+    )
+    for food in analysis.foods:
+        entry = await _call(
+            database.add_entry,
+            turn.user_id,
+            event_epoch,
+            food.name,
+            food.calories_per_100g,
+            food.grams,
+            food.protein_per_100g,
+            food.fat_per_100g,
+            food.carbs_per_100g,
+        )
+        await _send_receipt(database, turn.user_id, message, entry)
+    if analysis.weight_kg is not None:
+        record = await _call(
+            database.add_weight, turn.user_id, event_epoch, analysis.weight_kg
+        )
+        await _send_weight_receipt(database, turn.user_id, message, record)
+
+
 async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = None
     chat_id = None
@@ -2523,6 +2623,7 @@ def build_application(
     )
     application.bot_data["database"] = store
     application.bot_data["miniapp_url"] = settings.miniapp_url
+    application.bot_data["photo_analyzer"] = build_analyzer(settings.anthropic_api_key)
     new_messages = filters.UpdateType.MESSAGE
     application.add_handler(
         CommandHandler("health", health_command, filters=new_messages)
@@ -2553,6 +2654,11 @@ def build_application(
     )
     application.add_handler(
         MessageHandler(new_messages & filters.COMMAND, unknown_command)
+    )
+    application.add_handler(
+        MessageHandler(
+            new_messages & (filters.PHOTO | filters.Document.IMAGE), handle_photo
+        )
     )
     application.add_handler(
         MessageHandler(new_messages & ~filters.TEXT, handle_non_text)

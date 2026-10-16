@@ -9,6 +9,7 @@ description = "A private Telegram calorie and macronutrient tracker"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "anthropic>=1.15,<2",
     "python-telegram-bot==22.8",
     "tzdata>=2025.2; sys_platform == 'win32'",
 ]

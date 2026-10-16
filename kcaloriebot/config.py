@@ -19,6 +19,7 @@ class Settings:
     log_level: int
     miniapp_url: Optional[str] = None
     food_search: bool = True
+    anthropic_api_key: Optional[str] = None
 
     def __repr__(self) -> str:
         return (
@@ -69,4 +70,5 @@ def load_settings(environ: Optional[Mapping[str, str]] = None) -> Settings:
         log_level=log_level,
         miniapp_url=miniapp_url,
         food_search=food_search == "openfoodfacts",
+        anthropic_api_key=values.get("ANTHROPIC_API_KEY", "").strip() or None,
     )
