@@ -10,10 +10,9 @@ from types import SimpleNamespace
 from typing import Any
 
 from kcaloriebot.bot import ADMIN_USER_ID, MAIN_KEYBOARD, handle_photo
-from kcaloriebot.config import load_settings
+from kcaloriebot.config import ConfigError, load_settings
 from kcaloriebot.database import Database
 from kcaloriebot.photo_ai import (
-    MODEL,
     FoodGuess,
     PhotoAnalysis,
     PhotoAnalyzer,
@@ -134,11 +133,13 @@ class PhotoAnalyzerTests(unittest.IsolatedAsyncioTestCase):
         payload = {"foods": [], "weight_kg": 0, "comment": "Пусто."}
         client, messages = fake_client("end_turn", json.dumps(payload))
 
-        analysis = await PhotoAnalyzer(client).analyze(b"img", "image/png", "200 г")
+        analyzer = PhotoAnalyzer(client, "claude-test", "low")
+        analysis = await analyzer.analyze(b"img", "image/png", "200 г")
 
         self.assertEqual("Пусто.", analysis.comment)
         kwargs = messages.kwargs
-        self.assertEqual(MODEL, kwargs["model"])
+        self.assertEqual("claude-test", kwargs["model"])
+        self.assertEqual("low", kwargs["output_config"]["effort"])
         self.assertEqual("json_schema", kwargs["output_config"]["format"]["type"])
         image, caption = kwargs["messages"][0]["content"]
         self.assertEqual("image/png", image["source"]["media_type"])
@@ -149,7 +150,9 @@ class PhotoAnalyzerTests(unittest.IsolatedAsyncioTestCase):
         client, _ = fake_client("refusal", "")
 
         with self.assertRaises(PhotoUnavailable):
-            await PhotoAnalyzer(client).analyze(b"img", "image/jpeg")
+            await PhotoAnalyzer(client, "claude-test", "low").analyze(
+                b"img", "image/jpeg"
+            )
 
 
 class HandlePhotoTests(unittest.IsolatedAsyncioTestCase):
@@ -234,3 +237,22 @@ class PhotoSettingsTests(unittest.TestCase):
         settings = load_settings({"BOT_TOKEN": "t", "ANTHROPIC_API_KEY": " sk-x "})
         self.assertEqual("sk-x", settings.anthropic_api_key)
         self.assertNotIn("sk-x", repr(settings))
+
+    def test_photo_model_and_effort_default_and_override(self) -> None:
+        settings = load_settings({"BOT_TOKEN": "t"})
+        self.assertEqual(
+            ("claude-haiku-5-5", "high"), (settings.photo_model, settings.photo_effort)
+        )
+        settings = load_settings(
+            {
+                "BOT_TOKEN": "t",
+                "PHOTO_MODEL": " claude-sonnet-5-5 ",
+                "PHOTO_EFFORT": "Medium",
+            }
+        )
+        self.assertEqual(
+            ("claude-sonnet-5-5", "medium"),
+            (settings.photo_model, settings.photo_effort),
+        )
+        with self.assertRaises(ConfigError):
+            load_settings({"BOT_TOKEN": "t", "PHOTO_EFFORT": "turbo"})

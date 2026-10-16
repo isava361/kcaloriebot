@@ -23,7 +23,6 @@ from .domain import (
 
 logger = logging.getLogger(__name__)
 
-MODEL = "claude-haiku-5-5"
 # Claude rejects images larger than 5 MB.
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
 SUPPORTED_MEDIA_TYPES = frozenset(
@@ -161,8 +160,12 @@ def parse_analysis(data: Any) -> PhotoAnalysis:
 
 
 class PhotoAnalyzer:
-    def __init__(self, client: anthropic.AsyncAnthropic) -> None:
+    def __init__(
+        self, client: anthropic.AsyncAnthropic, model: str, effort: str
+    ) -> None:
         self._client = client
+        self._model = model
+        self._effort = effort
 
     async def analyze(
         self, image: bytes, media_type: str, caption: Optional[str] = None
@@ -185,12 +188,12 @@ class PhotoAnalyzer:
         ]
         try:
             response = await self._client.messages.create(
-                model=MODEL,
+                model=self._model,
                 max_tokens=16000,
                 system=SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": content}],
                 output_config={
-                    "effort": "high",
+                    "effort": self._effort,
                     "format": {"type": "json_schema", "schema": OUTPUT_SCHEMA},
                 },
             )
@@ -211,7 +214,10 @@ class PhotoAnalyzer:
             raise PhotoUnavailable("Analysis was not valid JSON") from exc
 
 
-def build_analyzer(api_key: Optional[str]) -> Optional[PhotoAnalyzer]:
+def build_analyzer(
+    api_key: Optional[str], model: str, effort: str
+) -> Optional[PhotoAnalyzer]:
     if not api_key:
         return None
-    return PhotoAnalyzer(anthropic.AsyncAnthropic(api_key=api_key, timeout=120.0))
+    client = anthropic.AsyncAnthropic(api_key=api_key, timeout=120.0)
+    return PhotoAnalyzer(client, model, effort)

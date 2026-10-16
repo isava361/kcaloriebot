@@ -359,9 +359,11 @@ is two taps: pick the food, then send the amount or choose `Same as last time`.
 
 When `ANTHROPIC_API_KEY` is set in `/etc/kcaloriebot.env`, photos sent by the
 bot owner (`ADMIN_USER_ID` in `kcaloriebot/bot.py`) are analyzed by Claude
-(`claude-haiku-5-5`). Every recognized food is logged with an estimated weight
-and per-100g nutrition, each with its own receipt and `Undo`/`Edit` buttons; a
-body-weight scale photo records a weight measurement. A caption such as
+(`claude-haiku-5-5` at effort `high` by default; override with `PHOTO_MODEL`
+and `PHOTO_EFFORT` — `low`, `medium`, `high`, `xhigh` or `max`). Every
+recognized food is logged with an estimated weight and per-100g nutrition,
+each with its own receipt and `Undo`/`Edit` buttons; a body-weight scale
+photo records a weight measurement. A caption such as
 `200 г` or `творог 5%` refines the estimate. Photos from anyone else, or with
 no key configured, are not sent anywhere.
 
