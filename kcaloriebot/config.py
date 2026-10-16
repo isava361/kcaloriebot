@@ -8,6 +8,9 @@ from typing import Mapping, Optional
 from urllib.parse import urlsplit
 
 
+PHOTO_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+
+
 class ConfigError(ValueError):
     """Raised when required runtime configuration is missing or invalid."""
 
@@ -19,6 +22,10 @@ class Settings:
     log_level: int
     miniapp_url: Optional[str] = None
     food_search: bool = True
+    anthropic_api_key: Optional[str] = None
+    anthropic_workspace_id: Optional[str] = None
+    photo_model: str = "claude-haiku-5-5"
+    photo_effort: str = "high"
 
     def __repr__(self) -> str:
         return (
@@ -63,10 +70,18 @@ def load_settings(environ: Optional[Mapping[str, str]] = None) -> Settings:
     food_search = values.get("FOOD_SEARCH", "").strip().lower() or "openfoodfacts"
     if food_search not in ("openfoodfacts", "off"):
         raise ConfigError("FOOD_SEARCH must be 'openfoodfacts' or 'off'.")
+    photo_model = values.get("PHOTO_MODEL", "").strip() or "claude-haiku-5-5"
+    photo_effort = values.get("PHOTO_EFFORT", "").strip().lower() or "high"
+    if photo_effort not in PHOTO_EFFORTS:
+        raise ConfigError(f"PHOTO_EFFORT must be one of: {', '.join(PHOTO_EFFORTS)}.")
     return Settings(
         bot_token=token,
         database_path=database_path,
         log_level=log_level,
         miniapp_url=miniapp_url,
         food_search=food_search == "openfoodfacts",
+        anthropic_api_key=values.get("ANTHROPIC_API_KEY", "").strip() or None,
+        anthropic_workspace_id=values.get("ANTHROPIC_WORKSPACE_ID", "").strip() or None,
+        photo_model=photo_model,
+        photo_effort=photo_effort,
     )
