@@ -7,7 +7,7 @@ import logging
 import math
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 import anthropic
 
@@ -195,6 +195,32 @@ def parse_analysis(data: Any) -> PhotoAnalysis:
     )
 
 
+def _per_100g(value: Optional[float]) -> str:
+    return "unknown" if value is None else f"{value:g}"
+
+
+def correction_text(previous: PhotoAnalysis, corrections: Sequence[str]) -> str:
+    """Ask for the previous answer again with the owner's corrections applied."""
+    lines = ["Your previous answer for this photo:"]
+    lines.extend(
+        f"- {food.name}: {food.grams:g} g; per 100 g: "
+        f"{food.calories_per_100g:g} kcal, protein {_per_100g(food.protein_per_100g)}, "
+        f"fat {_per_100g(food.fat_per_100g)}, carbs {_per_100g(food.carbs_per_100g)}"
+        for food in previous.foods
+    )
+    if not previous.foods:
+        lines.append("- no foods")
+    if previous.weight_kg is not None:
+        lines.append(f"- scale reading: {previous.weight_kg:g} kg")
+    lines.append("The owner corrected it:")
+    lines.extend(f"- {correction}" for correction in corrections)
+    lines.append(
+        "Record the corrected result. Trust the corrections over the caption and "
+        "your visual estimate, and keep everything they do not mention as before."
+    )
+    return "\n".join(lines)
+
+
 class PhotoAnalyzer:
     def __init__(
         self, client: anthropic.AsyncAnthropic, model: str, effort: str
@@ -204,7 +230,13 @@ class PhotoAnalyzer:
         self._effort = effort
 
     async def analyze(
-        self, image: bytes, media_type: str, caption: Optional[str] = None
+        self,
+        image: bytes,
+        media_type: str,
+        caption: Optional[str] = None,
+        *,
+        previous: Optional[PhotoAnalysis] = None,
+        corrections: Sequence[str] = (),
     ) -> PhotoAnalysis:
         content: list[dict[str, Any]] = [
             {
@@ -222,6 +254,10 @@ class PhotoAnalyzer:
                 else "No caption.",
             },
         ]
+        if previous is not None and corrections:
+            content.append(
+                {"type": "text", "text": correction_text(previous, corrections)}
+            )
         system = f"{SYSTEM_PROMPT}\nThe current date is {self._today().isoformat()}."
         messages: list[dict[str, Any]] = [{"role": "user", "content": content}]
         for _ in range(MAX_CONTINUATIONS + 1):

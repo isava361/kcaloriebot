@@ -361,14 +361,33 @@ When `ANTHROPIC_API_KEY` is set in `/etc/kcaloriebot.env` (plus
 `ANTHROPIC_WORKSPACE_ID` if the key is not scoped to a workspace), photos sent
 by the bot owner (`ADMIN_USER_ID` in `kcaloriebot/bot.py`) are analyzed by Claude
 (`claude-haiku-5-5` at effort `high` by default; override with `PHOTO_MODEL`
-and `PHOTO_EFFORT` — `low`, `medium`, `high`, `xhigh` or `max`). Every
-recognized food is logged with an estimated weight and per-100g nutrition,
-each with its own receipt and `Undo`/`Edit` buttons; a body-weight scale
-photo records a weight measurement. A caption such as
-`200 г` or `творог 5%` refines the estimate. For branded products or chain
-dishes without a visible label, Claude may run up to three web searches per
-photo ($10 per 1,000 searches on top of token costs). Photos from anyone else, or with
-no key configured, are not sent anywhere.
+and `PHOTO_EFFORT` — `low`, `medium`, `high`, `xhigh` or `max`). A caption
+such as `200 г` or `творог 5%` refines the estimate. For branded products or
+chain dishes without a visible label, Claude may run up to three web searches
+per photo ($10 per 1,000 searches on top of token costs). Photos from anyone
+else, or with no key configured, are not sent anywhere.
+
+The analysis runs in the background: the bot answers «Распознаю фото…» and
+keeps handling other messages and buttons meanwhile, and several photos can be
+in flight at once. When it finishes, the bot replies to the photo with one
+proposal — Claude's comment, the recognized foods with weight, calories and
+macros, the total, and a scale reading if there is one — and two buttons.
+Nothing is written to the diary until `Записать` is tapped; `Отмена` discards
+the proposal.
+
+To fix the proposal before saving, reply to it (or to the photo) with a text
+correction such as «гречки было 150 г, курица без масла». Claude re-analyzes
+the photo with all corrections so far and posts a new proposal; the old one
+loses its buttons. Only replies to a proposal count as corrections, so
+quick-add, menu buttons and input prompts work as usual.
+
+`Записать` logs every food (and the weight) at the time the photo was sent and
+replaces the proposal with one summary: what was saved, today's progress, and
+for each entry a button that opens it for editing plus an `Убрать` (undo)
+button. Pending proposals are kept in memory only, for up to 24 hours (at most
+20 at a time); after a restart or once expired, their buttons and replies
+answer that the photo should be sent again. A restart also interrupts running
+analyses, and the bot says so in the chat.
 
 ### Favorites and servings
 

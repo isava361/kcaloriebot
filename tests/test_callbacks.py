@@ -63,6 +63,8 @@ class CallbackParsingTests(unittest.TestCase):
                 "entry_field", record_id=7, nutrient="carbs"
             ),
             "fav:serving:11": CallbackAction("favorite_to_serving", record_id=11),
+            "photo:save:812": CallbackAction("photo_save", record_id=812),
+            "photo:cancel:812": CallbackAction("photo_cancel", record_id=812),
         }
         for data, expected in cases.items():
             with self.subTest(data=data):
@@ -159,6 +161,10 @@ class CallbackParsingTests(unittest.TestCase):
             "stats:month:26-06:0",
             "stats:month:2026-06:5",
             "stats:week:2026-06:0",
+            "photo:save:0",
+            "photo:save",
+            "photo:edit:1",
+            "photo:save:1|0|",
         ):
             with self.subTest(data=data):
                 self.assertIsNone(parse_callback(data))

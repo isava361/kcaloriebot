@@ -76,6 +76,9 @@ def parse_callback(data: str) -> Optional[CallbackAction]:
             and parts[1] in {"edit", "undo", "view"}
         ):
             return CallbackAction(f"weight_{parts[1]}", record_id=_parse_id(parts[2]))
+        if len(parts) == 3 and parts[0] == "photo" and parts[1] in {"save", "cancel"}:
+            # The ID is the owner's photo message; the proposal itself is in memory.
+            return CallbackAction(f"photo_{parts[1]}", record_id=_parse_id(parts[2]))
         if len(parts) == 4 and parts[:2] == ["entry", "undo"]:
             return CallbackAction(
                 "entry_undo",

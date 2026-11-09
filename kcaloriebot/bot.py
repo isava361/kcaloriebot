@@ -38,6 +38,18 @@ from .photo_ai import (
     PhotoUnavailable,
     build_analyzer,
 )
+from .photo_proposals import (
+    CANCELLED,
+    OPEN,
+    SAVED,
+    PhotoProposal,
+    PhotoProposalStore,
+    has_proposal_buttons,
+    proposal_keyboard,
+    proposal_text,
+    saved_keyboard,
+    saved_text,
+)
 from .domain import (
     EARLIEST_DIARY_DATE,
     FoodEntry,
@@ -140,6 +152,7 @@ __all__ = [
     "unknown_command",
     "handle_non_text",
     "handle_photo",
+    "handle_photo_callback",
     "handle_error",
     "build_application",
 ]
@@ -639,6 +652,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     text = turn.message.text.strip()
     database = turn.database
+    if await _handle_photo_correction(turn, context, text):
+        return
 
     if text == "Cancel":
         if (
@@ -2240,37 +2255,358 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             "Фото больше 5 МБ — отправьте его сжатым.", reply_markup=MAIN_KEYBOARD
         )
         return
-    await message.reply_text("Распознаю фото…")
-    try:
-        telegram_file = await attachment.get_file()
-        image = bytes(await telegram_file.download_as_bytearray())
-        analysis = await analyzer.analyze(image, media_type, message.caption)
-    except (TelegramError, PhotoUnavailable):
-        logger.warning("Photo analysis failed user_id=%s", turn.user_id, exc_info=True)
-        await message.reply_text(
-            "Не удалось распознать фото. Попробуйте ещё раз или введите вручную.",
-            reply_markup=MAIN_KEYBOARD,
-        )
-        return
-    if not analysis.foods and analysis.weight_kg is None:
-        await message.reply_text(
-            analysis.comment or "На фото не нашлось, что записать.",
-            reply_markup=MAIN_KEYBOARD,
-        )
-        return
-    if analysis.comment:
-        await message.reply_text(analysis.comment)
+    status = await message.reply_text("Распознаю фото…")
     message_date = getattr(message, "date", None)
     event_epoch = (
         int(message_date.timestamp())
         if message_date is not None
         else database.now_epoch()
     )
-    for food in analysis.foods:
-        entry = await _call(
-            database.add_entry,
+    # The Claude call takes up to minutes; run it off the single update lane.
+    _start_photo_task(
+        context.application,
+        _propose_from_photo(
+            _photo_store(context.application),
+            analyzer,
+            message,
+            attachment,
+            media_type,
+            status,
             turn.user_id,
+            turn.chat_id,
             event_epoch,
+        ),
+        name=f"photo-{message.message_id}",
+    )
+
+
+PHOTO_FAILED_TEXT = (
+    "Не удалось распознать фото. Попробуйте ещё раз или введите вручную."
+)
+PHOTO_EXPIRED_TEXT = "Предложение устарело — отправьте фото ещё раз."
+PHOTO_RESTART_TEXT = (
+    "Бот перезапускается, фото не успело распознаться — отправьте его ещё раз."
+)
+PHOTO_CORRECTION_FAILED_TEXT = (
+    "Не удалось учесть исправление — попробуйте ещё раз. Предложение не изменилось."
+)
+PHOTO_BUSY_TEXT = "Пересчитываю с учётом исправления — подождите."
+# How long a restart waits for interrupted analyses to tell the owner.
+PHOTO_SHUTDOWN_GRACE_SECONDS = 10.0
+# Text sent by reply-keyboard buttons is never a correction, even when the
+# owner taps a button while replying to a proposal.
+_REPLY_KEYBOARD_LABELS = frozenset(
+    button.text
+    for markup in (
+        MAIN_KEYBOARD,
+        STATS_KEYBOARD,
+        SETTINGS_KEYBOARD,
+        CANCEL_KEYBOARD,
+        SKIP_KEYBOARD,
+        FAVORITE_DECISION_KEYBOARD,
+        GOAL_KEYBOARD,
+        REPEAT_KEYBOARD,
+        MANUAL_ENTRY_KEYBOARD,
+        SERVINGS_KEYBOARD,
+        FAVORITE_SERVINGS_MANUAL_KEYBOARD,
+        TIMEZONE_CHANGE_KEYBOARD,
+    )
+    for row in markup.keyboard
+    for button in row
+)
+
+
+def _photo_store(application: Any) -> PhotoProposalStore:
+    return application.bot_data.setdefault("photo_proposals", PhotoProposalStore())
+
+
+def _start_photo_task(application: Any, coroutine: Any, name: str) -> asyncio.Task:
+    """Run a photo analysis in the background and keep a reference to it.
+
+    Not Application.create_task: Application.stop() awaits those, so a restart
+    would wait for the whole Claude call and then post a proposal whose buttons
+    die with the process. These tasks are cancelled by _stop_photo_tasks.
+    """
+    tasks: set[asyncio.Task] = application.bot_data.setdefault("photo_tasks", set())
+    task = asyncio.create_task(coroutine, name=name)
+    tasks.add(task)
+    task.add_done_callback(lambda done: _photo_task_done(tasks, done))
+    return task
+
+
+def _photo_task_done(tasks: set[asyncio.Task], task: asyncio.Task) -> None:
+    tasks.discard(task)
+    # The tasks report their own failures; this is the last line of defence.
+    if not task.cancelled() and task.exception() is not None:
+        logger.error(
+            "Photo task %s crashed", task.get_name(), exc_info=task.exception()
+        )
+
+
+async def _stop_photo_tasks(application: Application) -> None:
+    """post_stop hook: interrupt running analyses so they tell the owner."""
+    tasks = list(application.bot_data.get("photo_tasks", ()))
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.wait(tasks, timeout=PHOTO_SHUTDOWN_GRACE_SECONDS)
+
+
+async def _photo_post(
+    status: Any, anchor: Any, text: str, reply_markup: Any = None
+) -> Any:
+    """Post a background result and remove the «working on it» status message.
+
+    A new message (quoting the photo or correction it answers) notifies the
+    owner, unlike an edit, and keeps several photos in flight apart.
+    """
+    sent = await anchor.reply_text(
+        text,
+        reply_markup=reply_markup,
+        do_quote=True,
+        allow_sending_without_reply=True,
+    )
+    try:
+        await status.delete()
+    except TelegramError:
+        logger.warning("Photo status message could not be deleted", exc_info=True)
+    return sent
+
+
+async def _photo_report(status: Any, anchor: Any, text: str) -> None:
+    """Tell the owner about a failed background step; never raises."""
+    try:
+        await _photo_post(status, anchor, text, MAIN_KEYBOARD)
+    except Exception:
+        logger.exception("Photo failure could not be reported")
+
+
+async def _show_proposal(
+    store: PhotoProposalStore,
+    proposal: PhotoProposal,
+    status: Any,
+    anchor: Any,
+    prefix: str = "",
+) -> None:
+    # Store first: the owner may tap the buttons as soon as they appear.
+    store.add(proposal)
+    shown = await _photo_post(
+        status,
+        anchor,
+        proposal_text(proposal.analysis, prefix),
+        proposal_keyboard(proposal.key),
+    )
+    proposal.show_in(shown)
+
+
+async def _propose_from_photo(
+    store: PhotoProposalStore,
+    analyzer: PhotoAnalyzer,
+    message: Any,
+    attachment: Any,
+    media_type: str,
+    status: Any,
+    user_id: int,
+    chat_id: int,
+    event_epoch: int,
+) -> None:
+    """Background task: analyze a photo and show the result for confirmation."""
+    try:
+        try:
+            telegram_file = await attachment.get_file()
+            image = bytes(await telegram_file.download_as_bytearray())
+            analysis = await analyzer.analyze(image, media_type, message.caption)
+        except (TelegramError, PhotoUnavailable):
+            logger.warning("Photo analysis failed user_id=%s", user_id, exc_info=True)
+            await _photo_report(status, message, PHOTO_FAILED_TEXT)
+            return
+        if not analysis.foods and analysis.weight_kg is None:
+            await _photo_post(
+                status,
+                message,
+                analysis.comment or "На фото не нашлось, что записать.",
+                MAIN_KEYBOARD,
+            )
+            return
+        proposal = PhotoProposal(
+            key=message.message_id,
+            user_id=user_id,
+            chat_id=chat_id,
+            image=image,
+            media_type=media_type,
+            caption=message.caption,
+            eaten_at_utc=event_epoch,
+            analysis=analysis,
+        )
+        await _show_proposal(store, proposal, status, message)
+    except asyncio.CancelledError:
+        await _photo_report(status, message, PHOTO_RESTART_TEXT)
+        raise
+    except Exception:
+        logger.exception("Photo proposal failed user_id=%s", user_id)
+        await _photo_report(status, message, PHOTO_FAILED_TEXT)
+
+
+async def _revise_photo_proposal(
+    store: PhotoProposalStore,
+    analyzer: PhotoAnalyzer,
+    proposal: PhotoProposal,
+    status: Any,
+    anchor: Any,
+) -> None:
+    """Background task: re-run the analysis with the owner's corrections."""
+    try:
+        try:
+            analysis = await analyzer.analyze(
+                proposal.image or b"",
+                proposal.media_type,
+                proposal.caption,
+                previous=proposal.analysis,
+                corrections=tuple(proposal.corrections),
+            )
+        except Exception:
+            logger.warning(
+                "Photo correction failed user_id=%s", proposal.user_id, exc_info=True
+            )
+            proposal.corrections.pop()
+            analysis = None
+        proposal.busy = False
+        if not store.is_current(proposal):
+            await _photo_post(status, anchor, PHOTO_EXPIRED_TEXT, MAIN_KEYBOARD)
+        elif analysis is None:
+            await _show_proposal(
+                store, proposal, status, anchor, PHOTO_CORRECTION_FAILED_TEXT
+            )
+        elif not analysis.foods and analysis.weight_kg is None:
+            proposal.close(CANCELLED)
+            await _photo_post(
+                status,
+                anchor,
+                (analysis.comment or "После исправления записывать нечего.")
+                + "\n\nНичего не записано.",
+                MAIN_KEYBOARD,
+            )
+        else:
+            proposal.analysis = analysis
+            await _show_proposal(store, proposal, status, anchor)
+    except asyncio.CancelledError:
+        await _photo_report(status, anchor, PHOTO_RESTART_TEXT)
+        raise
+    except Exception:
+        proposal.busy = False
+        logger.exception("Photo correction failed user_id=%s", proposal.user_id)
+        await _photo_report(status, anchor, PHOTO_FAILED_TEXT)
+
+
+async def _handle_photo_correction(
+    turn: Turn, context: ContextTypes.DEFAULT_TYPE, text: str
+) -> bool:
+    """Treat the owner's text reply to a photo proposal as a correction.
+
+    Only an explicit reply to a proposal counts, so quick-add, menu buttons and
+    active input sessions keep working; returns True when the text was handled.
+    """
+    reply_to = getattr(turn.message, "reply_to_message", None)
+    if (
+        reply_to is None
+        or turn.user_id != ADMIN_USER_ID
+        or context.application.bot_data.get("photo_analyzer") is None
+        or not text
+        or text in _REPLY_KEYBOARD_LABELS
+    ):
+        return False
+    store = _photo_store(context.application)
+    proposal = store.find_by_message(turn.user_id, turn.chat_id, reply_to.message_id)
+    if proposal is None:
+        if not has_proposal_buttons(reply_to):
+            return False
+        await turn.message.reply_text(PHOTO_EXPIRED_TEXT, reply_markup=MAIN_KEYBOARD)
+        return True
+    if proposal.state != OPEN:
+        await turn.message.reply_text(
+            "Это фото уже записано."
+            if proposal.state == SAVED
+            else "Это предложение уже отменено.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return True
+    if proposal.busy:
+        await turn.message.reply_text(PHOTO_BUSY_TEXT)
+        return True
+    proposal.busy = True
+    try:
+        status = await turn.message.reply_text("Пересчитываю с учётом исправления…")
+    except BaseException:
+        proposal.busy = False
+        raise
+    proposal.corrections.append(text)
+    previous = proposal.message
+    if previous is not None:
+        # Take the buttons off the old version so it cannot be saved by mistake.
+        try:
+            await previous.edit_text("Исправление принято — новое предложение ниже.")
+        except TelegramError:
+            logger.warning("Old photo proposal could not be edited", exc_info=True)
+    _start_photo_task(
+        context.application,
+        _revise_photo_proposal(
+            store,
+            context.application.bot_data["photo_analyzer"],
+            proposal,
+            status,
+            turn.message,
+        ),
+        name=f"photo-{proposal.key}-correction",
+    )
+    return True
+
+
+async def handle_photo_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Save («Записать») or discard («Отмена») a photo proposal."""
+    query = update.callback_query
+    if query is None or not await _require_private(update):
+        return
+    action = parse_callback(query.data or "")
+    if query.message is None or not query.message.is_accessible:
+        await query.answer()
+        return
+    user_id, chat_id = _identity(update)
+    proposal = (
+        _photo_store(context.application).get(action.record_id, user_id, chat_id)
+        if action is not None
+        and action.kind in {"photo_save", "photo_cancel"}
+        and action.record_id is not None
+        else None
+    )
+    if proposal is None:
+        await query.answer()
+        await query.edit_message_text(PHOTO_EXPIRED_TEXT)
+        return
+    if proposal.state != OPEN:
+        await query.answer(
+            "Уже записано." if proposal.state == SAVED else "Предложение уже отменено."
+        )
+        return
+    if proposal.busy:
+        await query.answer(PHOTO_BUSY_TEXT)
+        return
+    if action.kind == "photo_cancel":
+        proposal.close(CANCELLED)
+        await query.answer()
+        await query.edit_message_text("Отменено — ничего не записано.")
+        return
+    # Close before the first await so a double tap cannot log twice.
+    proposal.close(SAVED)
+    await query.answer()
+    database = _db(context)
+    analysis = proposal.analysis
+    entries = [
+        await _call(
+            database.add_entry,
+            user_id,
+            proposal.eaten_at_utc,
             food.name,
             food.calories_per_100g,
             food.grams,
@@ -2278,12 +2614,22 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             food.fat_per_100g,
             food.carbs_per_100g,
         )
-        await _send_receipt(database, turn.user_id, message, entry)
-    if analysis.weight_kg is not None:
-        record = await _call(
-            database.add_weight, turn.user_id, event_epoch, analysis.weight_kg
+        for food in analysis.foods
+    ]
+    weight = (
+        await _call(
+            database.add_weight, user_id, proposal.eaten_at_utc, analysis.weight_kg
         )
-        await _send_weight_receipt(database, turn.user_id, message, record)
+        if analysis.weight_kg is not None
+        else None
+    )
+    progress = [await _today_progress(database, user_id)] if entries else []
+    if weight is not None:
+        progress.append(await _weight_summary(database, user_id) or "")
+    await query.edit_message_text(
+        saved_text(entries, weight, "\n".join(line for line in progress if line)),
+        reply_markup=saved_keyboard(entries, weight, database.now_epoch()),
+    )
 
 
 async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2619,6 +2965,7 @@ def build_application(
         .write_timeout(30.0)
         .pool_timeout(10.0)
         .concurrent_updates(False)
+        .post_stop(_stop_photo_tasks)
         .build()
     )
     application.bot_data["database"] = store
@@ -2652,6 +2999,9 @@ def build_application(
         CallbackQueryHandler(
             health_callback, pattern=r"^health:(connect|status|rotate|rotate:yes)$"
         )
+    )
+    application.add_handler(
+        CallbackQueryHandler(handle_photo_callback, pattern=r"^photo:")
     )
     application.add_handler(CallbackQueryHandler(handle_callback))
     application.add_handler(
