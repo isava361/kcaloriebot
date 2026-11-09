@@ -380,10 +380,19 @@ values per serving.
 
 ### Goals, editing, and statistics
 
-`Daily Goal` stores a calorie target; every logged entry replies with today's
-total and the remaining budget, and `Food Today` shows today's totals with
-progress against the goal above the entry list. Choose `Remove` in the goal
-prompt to clear it.
+`Settings → Daily goal` stores a calorie target and, optionally, daily protein,
+fat, and carbs targets in grams, all in one message: `2000` sets only the
+calorie goal (as before), `2000 p150 f70 c200` (or `б`/`ж`/`у`, in any order)
+sets everything, and `p150` alone changes just the protein goal. Goals you leave
+out keep their value, `p0` removes one macro goal, and `Remove` clears all of
+them. The prompt shows the current goals in the same format so they are easy to
+copy and edit. Every logged entry replies with today's total and the remaining
+budget, plus a `Today's macros` line for each macro goal, and the diary's
+today header shows the same progress above the entry list. When some of today's
+entries have no value for a macro, its known total is only a lower bound: the
+bot then says "at least" (receipts) or "remaining unknown" (diary) instead of
+showing a misleading remaining amount. The Mini App's goal dialog edits the
+same four goals.
 
 The diary is browsable by day: `Food Today` has previous/next-day arrows and a
 `Today` shortcut, entry buttons show the local time of each entry, and every
@@ -395,6 +404,34 @@ weight (or serving count), the entry time — including backdating with `HH:MM`
 (today, local time) or `YYYY-MM-DD HH:MM` — the name, and calories, protein,
 fat, and carbs (per 100g for weighed entries, per serving for serving-based
 ones). Future timestamps and dates more than a year old are rejected.
+
+### Reminders and weekly summary
+
+Both are off by default and are configured under `Settings → Reminders`.
+
+- **Evening reminder**: choose a local time (`21:00`, `9.30`, or one of the
+  suggested buttons; `Off` turns it off). If nothing is in your diary for the
+  current local day by then, the bot sends one nudge with an `Add food` button.
+  It never fires twice for the same local day and is skipped on days that
+  already have an entry (weight measurements do not count). A time that has
+  already passed when you set it starts the next day.
+- **Weekly summary**: every Monday from 09:00 local time, a short recap of the
+  previous Monday–Sunday: days logged, average calories per logged day and the
+  difference from the calorie goal, average intake for each macro goal (marked
+  "at least" when some entries lack the macro), the highest and lowest day,
+  and the weight change between the week's first and last measurement. Weeks
+  with neither food nor weight are skipped. Turning it on mid-week schedules the
+  first summary for the next Monday.
+
+Times follow the profile timezone, including DST changes; changing the
+timezone does not repeat a reminder for a day that was already handled.
+Delivery state is stored in the database, so a restart neither repeats nor
+loses a notification: a reminder or summary that was due while the bot was down
+is sent once it is back, as long as its local day has not ended (reminder) or
+the next week's summary has not been released (summary). Each notification is marked as handled just before it is sent,
+which makes delivery at most once; it is retried on the next minute only when
+Telegram certainly did not receive it (flood control, or no connection). Users
+who blocked the bot are skipped without affecting anyone else.
 
 ### Weight tracking
 
@@ -433,7 +470,8 @@ python -m ruff format --check .
 
 Tests cover validation, nutrient scaling, owner-scoped CRUD, durable sessions,
 transactions, paging, foreign keys, callback parsing, complete handler-level
-user workflows, retry behavior, and DST boundaries.
+user workflows, retry behavior, DST boundaries, and reminder/summary
+scheduling across timezones, DST, and restarts.
 
 ## Existing Go Database
 

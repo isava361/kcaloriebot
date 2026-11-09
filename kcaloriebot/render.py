@@ -20,12 +20,15 @@ from .domain import (
     DayStats,
     FavoriteFood,
     FoodEntry,
+    Goals,
+    NotificationSettings,
     NutritionTotals,
     Page,
     Session,
     SessionState,
     Stats,
     local_datetime,
+    minute_text,
     per_unit_from_totals,
 )
 
@@ -52,7 +55,7 @@ STATS_KEYBOARD = ReplyKeyboardMarkup(
 SETTINGS_KEYBOARD = ReplyKeyboardMarkup(
     [
         [KeyboardButton("Daily goal"), KeyboardButton("Timezone")],
-        [KeyboardButton("Apple Health")],
+        [KeyboardButton("Reminders"), KeyboardButton("Apple Health")],
         [KeyboardButton("Main menu")],
     ],
     resize_keyboard=True,
@@ -73,6 +76,14 @@ FAVORITE_DECISION_KEYBOARD = ReplyKeyboardMarkup(
 
 GOAL_KEYBOARD = ReplyKeyboardMarkup(
     [[KeyboardButton("Remove"), KeyboardButton("Cancel")]],
+    resize_keyboard=True,
+)
+
+REMINDER_TIME_KEYBOARD = ReplyKeyboardMarkup(
+    [
+        [KeyboardButton("20:00"), KeyboardButton("21:00"), KeyboardButton("22:00")],
+        [KeyboardButton("Off"), KeyboardButton("Cancel")],
+    ],
     resize_keyboard=True,
 )
 
@@ -146,7 +157,17 @@ FAVORITE_MATCH_GRAMS_PROMPT = (
     "Enter the serving weight in grams, or choose Enter Manually to type the "
     "nutrition values yourself:"
 )
-GOAL_PROMPT = "Enter your daily calorie goal in kcal, or choose Remove to clear it:"
+GOAL_PROMPT = (
+    "Enter your daily calorie goal in kcal, e.g. 2000. Optional macro goals in "
+    "grams go in the same message: 2000 p150 f70 c200 (or б/ж/у). Goals you "
+    "leave out stay as they are; p0 removes the protein goal. Choose Remove to "
+    "clear all goals:"
+)
+REMINDER_TIME_PROMPT = (
+    "Send the reminder time as HH:MM in your local time, e.g. 21:00. The bot "
+    "nudges you then only if nothing is logged for the day. Choose Off to "
+    "turn the reminder off:"
+)
 RECENT_GRAMS_PROMPT = "Enter the serving weight in grams, or choose Same as last time:"
 RECENT_SERVINGS_PROMPT = "Enter the number of servings, or choose Same as last time:"
 ENTRY_GRAMS_PROMPT = "Enter the new serving weight in grams:"
@@ -252,6 +273,7 @@ def session_prompt(session: Session, has_timezone: bool) -> tuple[str, Markup]:
             "Enter the corrected weight in kg:",
             CANCEL_KEYBOARD,
         ),
+        SessionState.WAIT_REMINDER_TIME: (REMINDER_TIME_PROMPT, REMINDER_TIME_KEYBOARD),
     }
     return prompts[session.state]
 
@@ -311,7 +333,12 @@ def stat_macro_line(
     return rendered
 
 
-def stats_totals_text(title: str, stats: Stats, goal: Optional[float] = None) -> str:
+def stats_totals_text(
+    title: str,
+    stats: Stats,
+    goal: Optional[float] = None,
+    macro_goals: Optional[Goals] = None,
+) -> str:
     calories_line = f"Calories: {stats.calories:.0f} kcal"
     if goal is not None:
         remaining = goal - stats.calories
@@ -320,15 +347,96 @@ def stats_totals_text(title: str, stats: Stats, goal: Optional[float] = None) ->
             if remaining >= 0
             else f" / {goal:.0f} goal ({-remaining:.0f} over)"
         )
-    if stats.protein is None and stats.fat is None and stats.carbs is None:
+    has_macro_goals = macro_goals is not None and macro_goals.has_macros
+    if (
+        stats.protein is None
+        and stats.fat is None
+        and stats.carbs is None
+        and not has_macro_goals
+    ):
         return f"{title}:\n{calories_line}\nMacros not recorded"
-    return (
-        f"{title}:\n"
-        f"{calories_line}\n"
-        f"{stat_macro_line('Protein', stats.protein, stats.protein_coverage, stats.coverage_total, 'entries')}\n"
-        f"{stat_macro_line('Fat', stats.fat, stats.fat_coverage, stats.coverage_total, 'entries')}\n"
-        f"{stat_macro_line('Carbs', stats.carbs, stats.carbs_coverage, stats.coverage_total, 'entries')}"
-    )
+    lines = [f"{title}:", calories_line]
+    for label, value, coverage in (
+        ("Protein", stats.protein, stats.protein_coverage),
+        ("Fat", stats.fat, stats.fat_coverage),
+        ("Carbs", stats.carbs, stats.carbs_coverage),
+    ):
+        line = stat_macro_line(label, value, coverage, stats.coverage_total, "entries")
+        target = None if macro_goals is None else getattr(macro_goals, label.lower())
+        if target is not None:
+            line += " / " + macro_goal_progress(
+                value, coverage, stats.coverage_total, target
+            )
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def macro_goal_progress(
+    value: Optional[float], coverage: int, entry_count: int, goal: float
+) -> str:
+    """Progress towards one macro goal that never overstates what is known.
+
+    When some entries lack the macro the known total is only a lower bound,
+    so no remaining amount is shown unless that bound already exceeds the
+    goal.
+    """
+    known = value or 0.0
+    if coverage < entry_count:
+        if known > goal:
+            return f"{number(goal)} g goal (over by at least {known - goal:.0f})"
+        return f"{number(goal)} g goal (remaining unknown)"
+    remaining = goal - known
+    if remaining >= 0:
+        return f"{number(goal)} g goal ({remaining:.0f} left)"
+    return f"{number(goal)} g goal ({-remaining:.0f} over)"
+
+
+def _macro_today_fragment(
+    label: str, value: Optional[float], coverage: int, entry_count: int, goal: float
+) -> str:
+    known = value or 0.0
+    if entry_count and coverage == 0:
+        return f"{label} not recorded / {number(goal)} g"
+    if coverage < entry_count:
+        return (
+            f"{label} at least {known:.0f} / {number(goal)} g "
+            f"(known for {coverage}/{entry_count} entries)"
+        )
+    remaining = goal - known
+    state = f"{remaining:.0f} left" if remaining >= 0 else f"{-remaining:.0f} over"
+    return f"{label} {known:.0f} / {number(goal)} g ({state})"
+
+
+def today_progress_text(stats: Stats, goals: Goals) -> str:
+    """Today's calorie total with goal progress, plus macro goals if set."""
+    total = stats.calories
+    if goals.calories is None:
+        text = f"Today: {total:.0f} kcal."
+    else:
+        remaining = goals.calories - total
+        state = f"{remaining:.0f} left" if remaining >= 0 else f"{-remaining:.0f} over"
+        text = f"Today: {total:.0f} / {goals.calories:.0f} kcal ({state})."
+    fragments = [
+        _macro_today_fragment(label, value, coverage, stats.coverage_total, goal)
+        for label, value, coverage, goal in (
+            ("protein", stats.protein, stats.protein_coverage, goals.protein),
+            ("fat", stats.fat, stats.fat_coverage, goals.fat),
+            ("carbs", stats.carbs, stats.carbs_coverage, goals.carbs),
+        )
+        if goal is not None
+    ]
+    if fragments:
+        text += "\nToday's macros: " + " · ".join(fragments) + "."
+    return text
+
+
+def goals_summary(goals: Goals) -> str:
+    """The goals in the same shape they are entered, e.g. 2000 p150 f70."""
+    parts = [] if goals.calories is None else [f"{goals.calories:.0f} kcal"]
+    for prefix, value in (("p", goals.protein), ("f", goals.fat), ("c", goals.carbs)):
+        if value is not None:
+            parts.append(f"{prefix}{number(value)}")
+    return " ".join(parts)
 
 
 def month_navigation_row(
@@ -549,4 +657,58 @@ def stats_day_rows(
     ]
     return [
         buttons[start : start + per_row] for start in range(0, len(buttons), per_row)
+    ]
+
+
+def reminder_settings_text(settings: NotificationSettings) -> str:
+    """The Reminders panel: what is on, when, and what each one does."""
+    zone = settings.timezone or "your timezone"
+    if settings.reminder_minute is None:
+        reminder = "Evening reminder: off."
+    else:
+        reminder = (
+            f"Evening reminder: on at {minute_text(settings.reminder_minute)} "
+            f"({zone}), only on days with nothing logged."
+        )
+    weekly = (
+        "Weekly summary: on, every Monday morning for the previous week."
+        if settings.weekly_summary
+        else "Weekly summary: off."
+    )
+    return (
+        f"Reminders\n\n{reminder}\n{weekly}\n\n"
+        "The weekly summary recaps days logged, average calories, your goals, "
+        "the highest and lowest day, and weight change."
+    )
+
+
+def reminder_settings_rows(
+    settings: NotificationSettings,
+) -> list[list[InlineKeyboardButton]]:
+    reminder_row = [
+        InlineKeyboardButton(
+            "Set reminder time"
+            if settings.reminder_minute is None
+            else "Change reminder time",
+            callback_data="notify:reminder:time",
+        )
+    ]
+    if settings.reminder_minute is not None:
+        reminder_row.append(
+            InlineKeyboardButton(
+                "Turn reminder off", callback_data="notify:reminder:off"
+            )
+        )
+    return [
+        reminder_row,
+        [
+            InlineKeyboardButton(
+                "Turn weekly summary off"
+                if settings.weekly_summary
+                else "Turn weekly summary on",
+                callback_data="notify:weekly:off"
+                if settings.weekly_summary
+                else "notify:weekly:on",
+            )
+        ],
     ]

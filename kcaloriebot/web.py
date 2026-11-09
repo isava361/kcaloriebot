@@ -22,10 +22,15 @@ from .food_search import FoodSearch, OpenFoodFacts, SearchBusy, SearchUnavailabl
 from .health import HealthStore, HealthUnauthorized
 from .domain import (
     EARLIEST_DIARY_DATE,
+    GOAL_NUTRIENTS,
+    MAX_DAILY_GOAL_KCAL,
     MAX_ENTRY_AGE_SECONDS,
+    MAX_MACRO_GOAL_G,
+    Goals,
     NotFound,
     StateConflict,
     ValidationError,
+    check_goals,
     day_bounds,
     local_date,
     local_datetime,
@@ -188,6 +193,7 @@ def snapshot(store: Database, user_id: int, query) -> dict:
             store.now_epoch() - MAX_ENTRY_AGE_SECONDS, zone
         ).strftime("%Y-%m-%dT%H:%M"),
         "goal": store.get_daily_goal(user_id),
+        "goals": asdict(store.get_goals(user_id)),
         "stats": asdict(store.stats(user_id, bounds.start_utc, bounds.end_utc)),
         "entries": {
             **asdict(page),
@@ -215,9 +221,28 @@ async def profile(request: web.Request) -> web.Response:
             goal = parse_daily_goal(str(number(data, "goal")))
         await asyncio.to_thread(store.ensure_user, user_id)
         await asyncio.to_thread(store.set_daily_goal, user_id, goal)
+    elif set(data) == {"goals"} and isinstance(data["goals"], dict):
+        goals = goals_from_json(data["goals"])
+        await asyncio.to_thread(store.ensure_user, user_id)
+        await asyncio.to_thread(store.set_goals, user_id, goals)
     else:
         raise ValueError
     return web.json_response({"ok": True})
+
+
+def goals_from_json(data: dict) -> Goals:
+    """All four goals from the Mini App goal form; null removes a goal."""
+    if set(data) != set(GOAL_NUTRIENTS):
+        raise ValueError
+    values = {key: number(data, key, True) for key in GOAL_NUTRIENTS}
+    if values["calories"] is not None and not (
+        0 < values["calories"] <= MAX_DAILY_GOAL_KCAL
+    ):
+        raise ValidationError("Цель по калориям — больше 0 и не более 50 000 ккал.")
+    for key in ("protein", "fat", "carbs"):
+        if values[key] is not None and not 0 < values[key] <= MAX_MACRO_GOAL_G:
+            raise ValidationError("Цель по БЖУ — больше 0 и не более 2000 г.")
+    return check_goals(Goals(**values))
 
 
 async def favorites(request: web.Request) -> web.Response:

@@ -22,6 +22,10 @@ MAX_CALORIES_PER_SERVING = 50_000.0
 MAX_MACRO_PER_SERVING = 10_000.0
 MIN_WEIGHT_KG = 1.0
 MAX_WEIGHT_KG = 500.0
+MAX_MACRO_GOAL_G = 2_000.0
+# The weekly summary of the previous Monday-Sunday is released on Monday at
+# this local time (minutes after midnight).
+WEEKLY_SUMMARY_MINUTE = 9 * 60
 # Oldest day the diary and statistics can be browsed back to. Entries imported
 # from the Go database can be older than MAX_ENTRY_AGE_SECONDS, which limits
 # only how far back a new entry may be backdated, so browsing uses its own
@@ -66,6 +70,7 @@ class SessionState(str, Enum):
     WAIT_ENTRY_AMENDMENT = "wait_entry_amendment"
     WAIT_WEIGHT = "wait_weight"
     WAIT_WEIGHT_EDIT = "wait_weight_edit"
+    WAIT_REMINDER_TIME = "wait_reminder_time"
 
 
 class Period(str, Enum):
@@ -329,6 +334,134 @@ def parse_macro(text: str, label: str) -> float:
 
 def parse_daily_goal(text: str) -> float:
     return check_daily_goal(_parse_finite(text, "Daily goal"))
+
+
+GOAL_NUTRIENTS = ("calories", "protein", "fat", "carbs")
+
+
+@dataclass(frozen=True)
+class Goals:
+    """Optional daily targets: calories in kcal, macronutrients in grams."""
+
+    calories: Optional[float] = None
+    protein: Optional[float] = None
+    fat: Optional[float] = None
+    carbs: Optional[float] = None
+
+    @property
+    def has_macros(self) -> bool:
+        return any(value is not None for value in (self.protein, self.fat, self.carbs))
+
+    def merged(self, changes: dict[str, Optional[float]]) -> Goals:
+        """These goals with the given nutrients replaced (None clears one)."""
+        values = {key: getattr(self, key) for key in GOAL_NUTRIENTS}
+        for key, value in changes.items():
+            if key not in values:
+                raise ValueError(f"Unknown goal nutrient: {key}")
+            values[key] = value
+        return Goals(**values)
+
+
+def check_macro_goal(value: float, label: str) -> float:
+    if not math.isfinite(value) or not 0 < value <= MAX_MACRO_GOAL_G:
+        raise ValidationError(
+            f"{label} goal must be greater than 0 and no more than "
+            f"{MAX_MACRO_GOAL_G:.0f} g."
+        )
+    return value
+
+
+def check_goals(goals: Goals) -> Goals:
+    if goals.calories is not None:
+        check_daily_goal(goals.calories)
+    for label, value in (
+        ("Protein", goals.protein),
+        ("Fat", goals.fat),
+        ("Carbs", goals.carbs),
+    ):
+        if value is not None:
+            check_macro_goal(value, label)
+    return goals
+
+
+GOALS_FORMAT_HINT = (
+    "Send goals like 2000 p150 f70 c200: calories, then optional protein (p), "
+    "fat (f) and carbs (c) in grams. Use p0 to remove one macro goal."
+)
+_GOAL_MACRO = re.compile(r"([pfcбжу])(\d+(?:[.,]\d+)?)")
+_GOAL_CALORIES = re.compile(r"(\d+(?:[.,]\d+)?)(kcal|cal|ккал|кал)?")
+
+
+def parse_goals(text: str) -> dict[str, Optional[float]]:
+    """Parse a goal message into the nutrients it changes.
+
+    ``2000`` changes only the calorie goal, exactly as before macro goals
+    existed. Macro tokens use the quick-add syntax (``p150 f70 c200`` or
+    ``б150 ж70 у200``, in grams) and may come with or without calories, in any
+    order. Nutrients not mentioned keep their current goal; a macro token of
+    0 (``p0``) removes that macro goal. The result maps each mentioned
+    nutrient to its new goal, None meaning removed.
+    """
+    tokens = [token.lower().rstrip(".") for token in text.split()]
+    if len(tokens) == 1 and not (
+        _GOAL_MACRO.fullmatch(tokens[0]) or _GOAL_CALORIES.fullmatch(tokens[0])
+    ):
+        # Keep the original single-number behavior and messages.
+        return {"calories": parse_daily_goal(text)}
+    changes: dict[str, Optional[float]] = {}
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        # Allow "p 150" as well as "p150".
+        if (
+            token in _QUICK_ADD_MACRO_PREFIXES
+            and index + 1 < len(tokens)
+            and re.fullmatch(r"\d+(?:[.,]\d+)?", tokens[index + 1])
+        ):
+            token += tokens[index + 1]
+            index += 1
+        macro = _GOAL_MACRO.fullmatch(token)
+        calories = None if macro else _GOAL_CALORIES.fullmatch(token)
+        if macro is not None:
+            nutrient = _QUICK_ADD_MACRO_PREFIXES[macro.group(1)]
+            raw = macro.group(2)
+        elif calories is not None:
+            nutrient, raw = "calories", calories.group(1)
+        elif token in _QUICK_ADD_CALORIE_UNITS and "calories" in changes:
+            index += 1
+            continue
+        else:
+            raise ValidationError(GOALS_FORMAT_HINT)
+        if nutrient in changes:
+            raise ValidationError(
+                f"Give the {nutrient} goal only once. {GOALS_FORMAT_HINT}"
+            )
+        value = _quick_add_float(raw)
+        if nutrient == "calories":
+            changes[nutrient] = check_daily_goal(value)
+        else:
+            changes[nutrient] = (
+                None if value == 0 else check_macro_goal(value, nutrient.title())
+            )
+        index += 1
+    if not changes:
+        raise ValidationError(GOALS_FORMAT_HINT)
+    return changes
+
+
+def parse_reminder_time(text: str) -> int:
+    """Parse a local time of day like ``21:00``, ``9.30`` or ``21``; returns
+    minutes after midnight."""
+    match = re.fullmatch(r"(\d{1,2})(?:[:.](\d{2}))?", text.strip())
+    if match is not None:
+        hour, minute = int(match.group(1)), int(match.group(2) or 0)
+        if hour < 24 and minute < 60:
+            return hour * 60 + minute
+    raise ValidationError("Enter the time as HH:MM in your local time, e.g. 21:00.")
+
+
+def minute_text(minute: int) -> str:
+    return f"{minute // 60:02d}:{minute % 60:02d}"
 
 
 def normalize_food_name(text: str) -> str:
@@ -840,3 +973,109 @@ def day_bounds(day: date, timezone_name: str) -> PeriodBounds:
     except ZoneInfoNotFoundError as exc:
         raise ValidationError("The saved timezone is no longer available.") from exc
     return _bounds_from_dates(zone, day, day + timedelta(days=1))
+
+
+@dataclass(frozen=True)
+class NotificationSettings:
+    """A user's reminder and weekly-summary settings and delivery state."""
+
+    user_id: int
+    timezone: Optional[str]
+    reminder_minute: Optional[int] = None
+    reminder_sent_day: Optional[date] = None
+    weekly_summary: bool = False
+    summary_sent_week: Optional[date] = None
+
+
+def stored_date(value: Optional[str]) -> Optional[date]:
+    """A stored ISO date, or None when absent or unreadable."""
+    try:
+        return None if value is None else date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _local_now(now_utc: int, timezone_name: str) -> Optional[datetime]:
+    try:
+        return local_datetime(now_utc, timezone_name)
+    except (ZoneInfoNotFoundError, ValueError):
+        return None
+
+
+def reminder_due_day(
+    now_utc: int,
+    timezone_name: str,
+    reminder_minute: Optional[int],
+    sent_day: Optional[date],
+) -> Optional[date]:
+    """The local day whose evening reminder is due at ``now_utc``, or None.
+
+    A reminder becomes due once the local wall clock reaches the chosen time
+    and stays due for the rest of that local day, so a bot that was down at
+    the exact minute still sends it after a restart. On a spring-forward day
+    a time inside the skipped hour fires at the first tick after the jump; on
+    a fall-back day the repeated hour cannot fire twice because ``sent_day``
+    already holds the date.
+
+    ``sent_day`` is the last local day that was handled (sent, or skipped
+    because food was logged). It is compared as a date, not for equality: after
+    a timezone change moves the user west across midnight the stored day can
+    be "tomorrow", and that must not trigger a second reminder within hours.
+    A stored day more than one day ahead cannot come from a timezone change
+    (offsets differ by at most 26 hours), so it is treated as corrupt rather
+    than suppressing reminders forever.
+    """
+    if reminder_minute is None:
+        return None
+    local = _local_now(now_utc, timezone_name)
+    if local is None:
+        return None
+    today = local.date()
+    if sent_day is not None and today <= sent_day <= today + timedelta(days=1):
+        return None
+    if local.hour * 60 + local.minute < reminder_minute:
+        return None
+    return today
+
+
+def latest_summary_week(now_utc: int, timezone_name: str) -> Optional[date]:
+    """Monday of the latest local Monday-Sunday week whose summary is released.
+
+    A week's summary is released on the following Monday at
+    WEEKLY_SUMMARY_MINUTE local time.
+    """
+    local = _local_now(now_utc, timezone_name)
+    if local is None:
+        return None
+    monday = local.date() - timedelta(days=local.weekday())
+    released = (
+        local.weekday() > 0 or local.hour * 60 + local.minute >= WEEKLY_SUMMARY_MINUTE
+    )
+    return monday - timedelta(days=7 if released else 14)
+
+
+def summary_due_week(
+    now_utc: int, timezone_name: str, sent_week: Optional[date]
+) -> Optional[date]:
+    """Monday of the week whose summary is due at ``now_utc``, or None.
+
+    Only the latest released week is ever due: after a long outage the bot
+    sends one summary, not a backlog. ``sent_week`` is the Monday of the last
+    week handled; a value up to one week ahead can follow a westward timezone
+    change and suppresses a repeat, anything later is treated as corrupt.
+    """
+    week = latest_summary_week(now_utc, timezone_name)
+    if week is None:
+        return None
+    if sent_week is not None and week <= sent_week <= week + timedelta(days=7):
+        return None
+    return week
+
+
+def week_bounds(week_start: date, timezone_name: str) -> PeriodBounds:
+    """Bounds of the seven local days starting at ``week_start``."""
+    try:
+        zone = ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError as exc:
+        raise ValidationError("The saved timezone is no longer available.") from exc
+    return _bounds_from_dates(zone, week_start, week_start + timedelta(days=7))

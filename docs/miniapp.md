@@ -64,7 +64,10 @@ partial/unknown macro indicators, and these workflows:
 Entries are grouped into meals by their local time (breakfast, lunch, afternoon
 snack, dinner, night snack) with per-meal totals. The summary shows the calories
 left against the goal, the day's energy split by meal on one bar, and the share
-of energy from each macronutrient. The strip under the date shows the seven days
+of energy from each macronutrient. Optional protein, fat and carbs goals (set in
+the same goal dialog) appear as `known / goal` under each macronutrient; a value
+marked ≈ is only a lower bound because some entries lack that macronutrient.
+The strip under the date shows the seven days
 ending on the selected one, scaled to the goal when one is set.
 
 Telegram's theme takes precedence over the system theme and updates live.

@@ -63,6 +63,15 @@ def parse_callback(data: str) -> Optional[CallbackAction]:
             return None
     if data in {"menu:add", "menu:search", "menu:progress", "menu:settings"}:
         return CallbackAction(data.replace(":", "_"))
+    # Reminder settings panel and its toggles.
+    if data in {
+        "menu:reminders",
+        "notify:reminder:time",
+        "notify:reminder:off",
+        "notify:weekly:on",
+        "notify:weekly:off",
+    }:
+        return CallbackAction(data.replace(":", "_"))
     if data in {"cancel", "cancel_all"}:
         return CallbackAction("cancel")
     if data == "dismiss":

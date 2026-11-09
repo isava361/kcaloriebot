@@ -7,9 +7,17 @@ import unittest
 from dataclasses import replace
 from datetime import date
 from pathlib import Path
+from unittest import mock
 
+from kcaloriebot import database as database_module
 from kcaloriebot.database import Database, SCHEMA_VERSION
-from kcaloriebot.domain import NotFound, SessionState, StateConflict, ValidationError
+from kcaloriebot.domain import (
+    Goals,
+    NotFound,
+    SessionState,
+    StateConflict,
+    ValidationError,
+)
 
 
 # The exact schema shipped as user_version 3, frozen for migration tests.
@@ -548,6 +556,105 @@ class DailyGoalTests(DatabaseTestCase):
             self.database.set_daily_goal(999, 2000.0, 2)
 
 
+class GoalsTests(DatabaseTestCase):
+    def test_goals_roundtrip_and_calorie_goal_compatibility(self) -> None:
+        self.assertEqual(Goals(), self.database.get_goals(1))
+        self.database.set_goals(1, Goals(2000.0, 150.0, None, 200.0), 2)
+        self.assertEqual(Goals(2000.0, 150.0, None, 200.0), self.database.get_goals(1))
+        self.assertEqual(2000.0, self.database.get_daily_goal(1))
+        # The calorie-only setter leaves macro goals alone.
+        self.database.set_daily_goal(1, 1800.0, 3)
+        self.assertEqual(Goals(1800.0, 150.0, None, 200.0), self.database.get_goals(1))
+
+    def test_goal_session_merges_changes_and_remove_clears_all(self) -> None:
+        self.database.set_goals(1, Goals(2000.0, 150.0, 70.0, None), 2)
+        session = self.database.start_session(
+            1, 10, SessionState.WAIT_GOAL, now_utc=1_700_000_100
+        )
+        goals = self.database.complete_goals_session(
+            session, {"calories": 1800.0, "fat": None}, 1_700_000_101
+        )
+        self.assertEqual(Goals(1800.0, 150.0, None, None), goals)
+        self.assertEqual(goals, self.database.get_goals(1))
+        self.assertIsNone(self.database.get_session(1, 10))
+
+        session = self.database.start_session(
+            1, 10, SessionState.WAIT_GOAL, now_utc=1_700_000_102
+        )
+        self.assertEqual(
+            Goals(), self.database.complete_goals_session(session, None, 1_700_000_103)
+        )
+        self.assertEqual(Goals(), self.database.get_goals(1))
+
+    def test_goal_session_requires_the_current_session(self) -> None:
+        session = self.database.start_session(
+            1, 10, SessionState.WAIT_GOAL, now_utc=1_700_000_100
+        )
+        self.database.clear_session(1, 10)
+        with self.assertRaises(StateConflict):
+            self.database.complete_goals_session(session, {"protein": 120.0})
+        self.assertEqual(Goals(), self.database.get_goals(1))
+
+    def test_invalid_macro_goals_are_rejected_before_storage(self) -> None:
+        for goals in (Goals(protein=0.0), Goals(fat=2001.0), Goals(carbs=math.nan)):
+            with self.subTest(goals=goals):
+                with self.assertRaises(ValidationError):
+                    self.database.set_goals(1, goals, 2)
+        self.assertEqual(Goals(), self.database.get_goals(1))
+        with self.assertRaises(sqlite3.IntegrityError):
+            with self.database._connect() as connection:
+                connection.execute(
+                    "UPDATE users SET protein_goal = -1 WHERE user_id = 1"
+                )
+
+
+class NotificationSettingsTests(DatabaseTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.database.set_timezone(1, "Europe/Moscow", 1)
+
+    def test_defaults_are_off(self) -> None:
+        settings = self.database.get_notification_settings(1)
+        self.assertIsNone(settings.reminder_minute)
+        self.assertFalse(settings.weekly_summary)
+        self.assertEqual([], self.database.notification_candidates())
+
+    def test_reminder_session_sets_time_and_is_atomic(self) -> None:
+        session = self.database.start_session(
+            1, 10, SessionState.WAIT_REMINDER_TIME, now_utc=1_700_000_100
+        )
+        settings = self.database.complete_reminder_session(session, 21 * 60, 1)
+        self.assertEqual(21 * 60, settings.reminder_minute)
+        self.assertEqual(
+            21 * 60, self.database.get_notification_settings(1).reminder_minute
+        )
+        self.assertIsNone(self.database.get_session(1, 10))
+        self.assertEqual(
+            [1], [c.user_id for c in self.database.notification_candidates()]
+        )
+        with self.assertRaises(ValidationError):
+            self.database.set_reminder(1, 24 * 60, 2)
+
+    def test_users_without_timezone_are_not_candidates(self) -> None:
+        self.database.set_reminder(2, 21 * 60, 2)
+        self.assertEqual(
+            [], [c.user_id for c in self.database.notification_candidates()]
+        )
+
+    def test_unreadable_stored_day_counts_as_never_sent(self) -> None:
+        with self.database._connect() as connection:
+            connection.execute("UPDATE users SET reminder_sent_day = 'garbage'")
+        self.assertIsNone(self.database.get_notification_settings(1).reminder_sent_day)
+
+    def test_weight_range_returns_first_and_last(self) -> None:
+        self.assertEqual((None, None), self.database.weight_range(1, 0, 10_000))
+        first = self.database.add_weight(1, 100, 80.0)
+        self.database.add_weight(1, 200, 79.5)
+        last = self.database.add_weight(1, 300, 79.0)
+        self.database.add_weight(1, 20_000, 70.0)
+        self.assertEqual((first, last), self.database.weight_range(1, 0, 10_000))
+
+
 class QuickEntryTests(DatabaseTestCase):
     def test_add_entry_scales_and_stores(self) -> None:
         entry = self.database.add_entry(
@@ -920,6 +1027,82 @@ class SchemaTests(DatabaseTestCase):
                 connection.execute("SELECT count(*) FROM web_operations").fetchone()[0],
                 0,
             )
+
+    def test_v9_database_gains_goal_and_notification_columns(self) -> None:
+        v9_path = Path(self.temporary_directory.name) / "version-nine.db"
+
+        class StopAtV9(Exception):
+            pass
+
+        def stop(connection: sqlite3.Connection) -> None:
+            raise StopAtV9
+
+        # Build an exact v9 database by running the real chain up to v9.
+        with mock.patch.object(database_module, "_upgrade_v9_to_v10", stop):
+            with self.assertRaises(StopAtV9):
+                Database(v9_path).initialize()
+        with sqlite3.connect(v9_path) as connection:
+            self.assertEqual(9, connection.execute("PRAGMA user_version").fetchone()[0])
+            connection.execute(
+                "INSERT INTO users(user_id, timezone, daily_calorie_goal, "
+                "created_at_utc, updated_at_utc) VALUES (1, 'Europe/Moscow', 2000, 1, 1)"
+            )
+            connection.execute(
+                "INSERT INTO food_entries(user_id, eaten_at_utc, name, grams, calories) "
+                "VALUES (1, 1700000100, 'Rice', 40, 100)"
+            )
+        connection.close()
+
+        migrated = Database(v9_path)
+        migrated.initialize()
+        with sqlite3.connect(v9_path) as connection:
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+            integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(users)")}
+        connection.close()
+        self.assertEqual(SCHEMA_VERSION, version)
+        self.assertEqual("ok", integrity)
+        self.assertLessEqual(
+            {
+                "protein_goal",
+                "fat_goal",
+                "carbs_goal",
+                "reminder_minute",
+                "reminder_sent_day",
+                "weekly_summary",
+                "summary_sent_week",
+            },
+            columns,
+        )
+        self.assertEqual(Goals(calories=2000.0), migrated.get_goals(1))
+        settings = migrated.get_notification_settings(1)
+        self.assertIsNone(settings.reminder_minute)
+        self.assertFalse(settings.weekly_summary)
+        self.assertEqual("Rice", migrated.page_entries(1, 0, 2**40).items[0].name)
+        migrated.set_goals(1, Goals(2000.0, 150.0, 70.0, 250.0), 2)
+        migrated.set_reminder(1, 21 * 60, 2)
+        with self.assertRaises(sqlite3.IntegrityError):
+            with migrated._connect() as connection:
+                connection.execute("UPDATE users SET reminder_minute = 1440")
+        with self.assertRaises(sqlite3.IntegrityError):
+            with migrated._connect() as connection:
+                connection.execute("UPDATE users SET weekly_summary = 2")
+
+        # Re-running the step over an already migrated table is a no-op.
+        with sqlite3.connect(v9_path) as connection:
+            connection.execute("PRAGMA user_version = 9")
+        connection.close()
+        migrated.initialize()
+        self.assertEqual(Goals(2000.0, 150.0, 70.0, 250.0), migrated.get_goals(1))
+        self.assertEqual(21 * 60, migrated.get_notification_settings(1).reminder_minute)
+
+    def test_fresh_database_has_the_v10_columns(self) -> None:
+        self.database.set_goals(1, Goals(protein=100.0), 2)
+        self.assertEqual(Goals(protein=100.0), self.database.get_goals(1))
+        with sqlite3.connect(self.path) as connection:
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+        connection.close()
+        self.assertEqual(10, version)
 
     def test_unversioned_legacy_schema_is_rejected(self) -> None:
         legacy_path = Path(self.temporary_directory.name) / "legacy.db"
