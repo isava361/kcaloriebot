@@ -543,6 +543,21 @@ kilograms. Replies show the latest measurement, the floating average over the
 last 7 local days, and the difference against the previous 7 days once enough
 history exists.
 
+### Exporting data
+
+The diary page of a day and the week and month statistics each have an
+`Export CSV` button that sends the food entries of exactly that day, week or
+month as a file. **Settings → Export data** sends the whole history instead:
+all food entries plus a second file with the weight measurements.
+
+Food files have one row per entry (`date`, `time`, `name`, `grams`,
+`servings`, `calories`, `protein`, `fat`, `carbs` — totals for that entry);
+the weight file has `date`, `time`, `weight_kg`. Dates and times are local to
+the profile timezone, unknown macronutrients are empty cells rather than zeros,
+and the files are comma-separated UTF-8 with a byte order mark. An Excel
+installation whose list separator is a semicolon (the Russian locale, for
+example) needs **Data → From Text/CSV** instead of a double click.
+
 The bot intentionally declines group-chat use because food history and inline
 button contents are personal data.
 

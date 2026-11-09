@@ -52,7 +52,7 @@ STATS_KEYBOARD = ReplyKeyboardMarkup(
 SETTINGS_KEYBOARD = ReplyKeyboardMarkup(
     [
         [KeyboardButton("Daily goal"), KeyboardButton("Timezone")],
-        [KeyboardButton("Apple Health")],
+        [KeyboardButton("Apple Health"), KeyboardButton("Export data")],
         [KeyboardButton("Main menu")],
     ],
     resize_keyboard=True,
@@ -537,6 +537,11 @@ def day_navigation_row(
     if day != today:
         row.append(InlineKeyboardButton("Today", callback_data="entry:list:0"))
     return row
+
+
+def export_row(target: str) -> list[InlineKeyboardButton]:
+    """Button that sends the shown day, week or month as a CSV file."""
+    return [InlineKeyboardButton("Export CSV", callback_data=f"export:{target}")]
 
 
 def stats_day_rows(

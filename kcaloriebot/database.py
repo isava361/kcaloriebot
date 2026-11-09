@@ -1761,6 +1761,39 @@ class Database:
         items = tuple(self._row_to_entry(row) for row in rows[:limit])
         return Page(items, offset, offset > 0, len(rows) > limit)
 
+    def export_entries(
+        self,
+        user_id: int,
+        start_utc: Optional[int] = None,
+        end_utc: Optional[int] = None,
+    ) -> tuple[FoodEntry, ...]:
+        """A user's entries oldest first; all of them when no bounds are given."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM food_entries
+                WHERE user_id = ?
+                  AND (? IS NULL OR eaten_at_utc >= ?)
+                  AND (? IS NULL OR eaten_at_utc < ?)
+                ORDER BY eaten_at_utc, entry_id
+                """,
+                (user_id, start_utc, start_utc, end_utc, end_utc),
+            ).fetchall()
+        return tuple(self._row_to_entry(row) for row in rows)
+
+    def all_weights(self, user_id: int) -> tuple[WeightRecord, ...]:
+        """Every weight measurement of a user, oldest first, for export."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM weights
+                WHERE user_id = ?
+                ORDER BY measured_at_utc, weight_id
+                """,
+                (user_id,),
+            ).fetchall()
+        return tuple(self._row_to_weight(row) for row in rows)
+
     def recent_entry_templates(
         self, user_id: int, limit: int = 10
     ) -> tuple[FoodEntry, ...]:
