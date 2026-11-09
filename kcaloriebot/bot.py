@@ -10,7 +10,7 @@ from urllib.parse import urljoin
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, WebAppInfo
 from telegram.constants import ChatType, ParseMode
-from telegram.error import TelegramError
+from telegram.error import BadRequest, TelegramError
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -146,7 +146,23 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
-SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
+# An input prompt survives restarts and /start resumes it, but only while it is
+# in use: a draft left idle this long is abandoned, so a message sent later (say,
+# the next day's quick add) is no longer taken as its answer.
+SESSION_TTL_SECONDS = 3 * 60 * 60
+# Callbacks that only show records. They neither start nor change an input, so
+# an open prompt has no reason to block them.
+READ_ONLY_CALLBACKS = frozenset(
+    {
+        "entry_list",
+        "entry_view",
+        "favorite_list",
+        "favorite_view",
+        "stats_page",
+        "stats_day",
+        "weight_view",
+    }
+)
 # The only Telegram account allowed to run /users and log food from photos.
 ADMIN_USER_ID = 193117018
 
@@ -177,17 +193,44 @@ def _identity(update: Update) -> tuple[int, int]:
     return update.effective_user.id, update.effective_chat.id
 
 
+async def _answer(query: Any, *args: Any, **kwargs: Any) -> None:
+    """Acknowledge a callback; a stale query must not abort the action itself.
+
+    Telegram refuses to answer a query after a short while (for example when
+    the bot catches up after a restart), but the message can still be edited.
+    """
+    try:
+        await query.answer(*args, **kwargs)
+    except BadRequest as exc:
+        text = exc.message.lower()
+        if "query is too old" not in text and "query id is invalid" not in text:
+            raise
+
+
+async def _edit(
+    query: Any, text: str, reply_markup: Optional[InlineKeyboardMarkup] = None
+) -> None:
+    """Edit a callback's message; an identical edit (a repeated tap) is a no-op."""
+    try:
+        await query.edit_message_text(text, reply_markup=reply_markup)
+    except BadRequest as exc:
+        if "message is not modified" not in exc.message.lower():
+            raise
+
+
 async def _require_private(update: Update) -> bool:
     chat = update.effective_chat
     if chat is not None and chat.type == ChatType.PRIVATE:
         return True
     if chat is None:
         if update.callback_query is not None:
-            await update.callback_query.answer("This action is unavailable.")
+            await _answer(update.callback_query, "This action is unavailable.")
         return False
     if update.callback_query is not None:
-        await update.callback_query.answer(
-            "Open the bot in a private chat to protect your food data.", show_alert=True
+        await _answer(
+            update.callback_query,
+            "Open the bot in a private chat to protect your food data.",
+            show_alert=True,
         )
     elif update.effective_message is not None:
         await update.effective_message.reply_text(
@@ -202,6 +245,13 @@ async def _active_session(
     """Fetch the current session, clearing and flagging it when expired."""
     session = await _call(database.get_session, user_id, chat_id)
     if session is None or not _session_expired(session, database.now_epoch()):
+        return session, False
+    # Onboarding is mandatory, so its prompt never goes stale: a timezone sent
+    # the next day is still the answer it asked for.
+    if (
+        session.state == SessionState.WAIT_TIMEZONE
+        and await _call(database.get_timezone, user_id) is None
+    ):
         return session, False
     await _call(database.clear_session, user_id, chat_id)
     return None, True
@@ -667,12 +717,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 "The previous input expired. Enter your timezone to continue:",
                 TIMEZONE_REQUIRED_MARKUP,
             )
-        else:
-            await turn.message.reply_text(
-                "The previous input expired. Choose an option again.",
-                reply_markup=MAIN_KEYBOARD,
-            )
-        return
+            return
+        # The draft was abandoned; this message is not its answer, so it is
+        # handled as if no input were open.
+        await turn.message.reply_text(
+            "The previous unfinished input expired.", reply_markup=MAIN_KEYBOARD
+        )
     message_id = getattr(turn.message, "message_id", None)
     if session is not None and (
         session.prompt_pending
@@ -1156,7 +1206,23 @@ async def _handle_session_text(
             timezone_name = await _call(database.get_timezone, session.user_id)
             if timezone_name is None:
                 raise StateConflict("Timezone is required to edit entry time")
-            eaten_at = parse_entry_time(text, timezone_name, now)
+            entry = (
+                await _call(
+                    database.get_entry, session.user_id, session.selected_entry_id
+                )
+                if session.selected_entry_id is not None
+                else None
+            )
+            if entry is None:
+                raise NotFound("Food entry not found")
+            # A bare HH:MM keeps the entry on its own day: retiming yesterday's
+            # dinner must not move it to today.
+            eaten_at = parse_entry_time(
+                text,
+                timezone_name,
+                now,
+                local_date(entry.eaten_at_utc, timezone_name),
+            )
             await _call(
                 database.update_entry_time,
                 session.user_id,
@@ -1393,7 +1459,7 @@ async def _show_daily_stats(
             rows.append(months)
     keyboard = InlineKeyboardMarkup(rows) if rows else None
     if edit and update.callback_query is not None:
-        await update.callback_query.edit_message_text(text, reply_markup=keyboard)
+        await _edit(update.callback_query, text, reply_markup=keyboard)
     elif update.effective_message is not None:
         await update.effective_message.reply_text(text, reply_markup=keyboard)
 
@@ -1469,7 +1535,7 @@ async def _show_entries(
         rows.append(day_navigation)
     keyboard = InlineKeyboardMarkup(rows)
     if edit and update.callback_query is not None:
-        await update.callback_query.edit_message_text(text, reply_markup=keyboard)
+        await _edit(update.callback_query, text, reply_markup=keyboard)
     elif update.effective_message is not None:
         await update.effective_message.reply_text(text, reply_markup=keyboard)
 
@@ -1511,7 +1577,7 @@ async def _show_favorites(
         )
         text, keyboard = "Your favorite foods:", InlineKeyboardMarkup(rows)
     if edit and update.callback_query is not None:
-        await update.callback_query.edit_message_text(text, reply_markup=keyboard)
+        await _edit(update.callback_query, text, reply_markup=keyboard)
     elif update.effective_message is not None:
         await update.effective_message.reply_text(text, reply_markup=keyboard)
 
@@ -1553,19 +1619,23 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     if not await _require_private(update):
         return
-    await query.answer()
+    await _answer(query)
     if query.message is None or not query.message.is_accessible:
         return
 
     action = parse_callback(query.data or "")
     if action is None:
-        await query.edit_message_text("This action is invalid or has expired.")
+        await _edit(query, "This action is invalid or has expired.")
         return
 
     user_id, chat_id = _identity(update)
     database = _db(context)
     active_session, _ = await _active_session(database, user_id, chat_id)
-    if active_session is not None and action.kind not in {"cancel", "dismiss"}:
+    if (
+        active_session is not None
+        and action.kind not in {"cancel", "dismiss"}
+        and action.kind not in READ_ONLY_CALLBACKS
+    ):
         has_timezone = await _call(database.get_timezone, user_id) is not None
         prompt, markup = session_prompt(active_session, has_timezone)
         await query.message.reply_text(
@@ -1589,7 +1659,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if action.kind == "cancel":
             timezone_name = await _call(database.get_timezone, user_id)
             if timezone_name is None:
-                await query.edit_message_text("Timezone setup is required.")
+                await _edit(query, "Timezone setup is required.")
                 await _start_with_prompt(
                     database,
                     user_id,
@@ -1614,10 +1684,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 SessionState.WAIT_WEIGHT,
                 SessionState.WAIT_WEIGHT_EDIT,
             }:
-                await query.edit_message_text("This prompt has expired.")
+                await _edit(query, "This prompt has expired.")
             else:
                 await _call(database.clear_session, user_id, chat_id)
-                await query.edit_message_text("Cancelled.")
+                await _edit(query, "Cancelled.")
                 await query.message.reply_text(
                     "Select an option:", reply_markup=MAIN_KEYBOARD
                 )
@@ -1626,7 +1696,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     active_session,
                 )
         elif action.kind == "dismiss":
-            await query.edit_message_text("No changes made.")
+            await _edit(query, "No changes made.")
         elif action.kind in {"menu_add", "menu_search"}:
             has_timezone = await _call(database.get_timezone, user_id) is not None
             state = (
@@ -1664,7 +1734,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         ):
             record = await _call(database.get_weight, user_id, action.record_id)
             if record is None:
-                await query.edit_message_text(
+                await _edit(
+                    query,
                     "This measurement is no longer available.",
                     reply_markup=InlineKeyboardMarkup(
                         [
@@ -1679,7 +1750,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             elif action.kind == "weight_undo":
                 await _call(database.delete_weight, user_id, record.weight_id)
                 summary = await _weight_summary(database, user_id)
-                await query.edit_message_text(
+                await _edit(
+                    query,
                     "Weight measurement removed.\n\n"
                     + (summary or "No weight measurements yet."),
                     reply_markup=InlineKeyboardMarkup(
@@ -1731,9 +1803,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         elif action.kind == "stats_day":
             timezone_name = await _call(database.get_timezone, user_id)
             if timezone_name is None:
-                await query.edit_message_text(
-                    "Set your timezone first with /updatetimezone."
-                )
+                await _edit(query, "Set your timezone first with /updatetimezone.")
             else:
                 yesterday = local_date(database.now_epoch(), timezone_name) - timedelta(
                     days=1
@@ -1752,7 +1822,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 action.offset,
                 action.day.isoformat() if action.day else None,
             )
-            await query.edit_message_text(text, reply_markup=keyboard)
+            await _edit(query, text, reply_markup=keyboard)
         elif action.kind == "entry_grams" and action.record_id is not None:
             entry = await _call(database.get_entry, user_id, action.record_id)
             if entry is None:
@@ -1769,9 +1839,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 draft_unit=UNIT_SERVING if serving_based else UNIT_100G,
                 prompt_pending=True,
             )
-            await query.edit_message_text(
+            await _edit(
+                query,
                 f"Editing the amount for {entry.name or 'Unnamed food'} "
-                f"(currently {amount_text(entry.nutrition)})."
+                f"(currently {amount_text(entry.nutrition)}).",
             )
             await query.message.reply_text(
                 ENTRY_SERVINGS_PROMPT if serving_based else ENTRY_GRAMS_PROMPT,
@@ -1792,7 +1863,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 return_offset=action.offset,
                 prompt_pending=True,
             )
-            await query.edit_message_text(f"Renaming {entry.name or 'Unnamed food'}.")
+            await _edit(query, f"Renaming {entry.name or 'Unnamed food'}.")
             await query.message.reply_text(
                 ENTRY_NAME_PROMPT, reply_markup=CANCEL_KEYBOARD
             )
@@ -1819,8 +1890,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 draft_unit=UNIT_SERVING if serving_based else UNIT_100G,
                 prompt_pending=True,
             )
-            await query.edit_message_text(
-                f"Editing {action.nutrient} for {entry.name or 'Unnamed food'}."
+            await _edit(
+                query, f"Editing {action.nutrient} for {entry.name or 'Unnamed food'}."
             )
             await query.message.reply_text(
                 started.prompt_text,
@@ -1853,9 +1924,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 return_offset=action.offset,
                 prompt_pending=True,
             )
-            await query.edit_message_text(
-                f"Editing time for {entry.name or 'Unnamed food'}."
-            )
+            await _edit(query, f"Editing time for {entry.name or 'Unnamed food'}.")
             await query.message.reply_text(
                 ENTRY_TIME_PROMPT, reply_markup=CANCEL_KEYBOARD
             )
@@ -1877,7 +1946,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 prompt_pending=True,
             )
             name = entry.name or "Unnamed food"
-            await query.edit_message_text(f"Selected: {name}")
+            await _edit(query, f"Selected: {name}")
             amount = (
                 "the number of servings"
                 if serving_based
@@ -1915,7 +1984,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     ]
                 ]
             )
-            await query.edit_message_text(
+            await _edit(
+                query,
                 f"Delete {entry.name or 'this food'} · {amount_text(entry.nutrition)}?",
                 reply_markup=keyboard,
             )
@@ -1924,7 +1994,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             and action.record_id is not None
         ):
             if confirmation_expired(action, database.now_epoch()):
-                await query.edit_message_text(
+                await _edit(
+                    query,
                     "Undo is no longer available. Open the entry to edit or delete it."
                     if action.kind == "entry_undo"
                     else "This delete confirmation has expired. Open the entry to try again.",
@@ -1944,9 +2015,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     ),
                 )
                 return
-            await _call(database.delete_entry, user_id, action.record_id)
-            await query.edit_message_text(
-                "Food entry deleted.",
+            try:
+                await _call(database.delete_entry, user_id, action.record_id)
+                text = "Food entry deleted."
+            except NotFound:
+                # A repeated tap, or the entry was deleted elsewhere: the
+                # outcome the user asked for already holds.
+                text = "This food entry was already deleted."
+            await _edit(
+                query,
+                text,
                 reply_markup=InlineKeyboardMarkup(
                     [
                         [
@@ -1966,7 +2044,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             favorite = await _call(database.get_favorite, user_id, action.record_id)
             if favorite is None:
                 raise NotFound("Favorite not found")
-            await query.edit_message_text(
+            await _edit(
+                query,
                 favorite_details(favorite),
                 reply_markup=InlineKeyboardMarkup(
                     favorite_action_rows(favorite, action.offset)
@@ -1988,7 +2067,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 return_offset=action.offset,
                 prompt_pending=True,
             )
-            await query.edit_message_text(f"Selected favorite: {favorite.name}")
+            await _edit(query, f"Selected favorite: {favorite.name}")
             if serving_based:
                 await query.message.reply_text(
                     f"Enter the number of servings of {favorite.name}, "
@@ -2006,7 +2085,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             if favorite is None:
                 raise NotFound("Favorite not found")
             if favorite.unit == UNIT_SERVING:
-                await query.edit_message_text("This favorite is already serving-based.")
+                await _edit(query, "This favorite is already serving-based.")
             else:
                 started = await _call(
                     database.start_session,
@@ -2017,9 +2096,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     return_offset=action.offset,
                     prompt_pending=True,
                 )
-                await query.edit_message_text(
-                    f"Converting {favorite.name} to a serving."
-                )
+                await _edit(query, f"Converting {favorite.name} to a serving.")
                 await query.message.reply_text(
                     FAVORITE_TO_SERVING_PROMPT, reply_markup=CANCEL_KEYBOARD
                 )
@@ -2070,7 +2147,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     ],
                 ]
             )
-            await query.edit_message_text(
+            await _edit(
+                query,
                 favorite_details(favorite) + "\n\nChoose a nutrient to edit:",
                 reply_markup=keyboard,
             )
@@ -2093,9 +2171,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 prompt_text=nutrient_edit_prompt(favorite, action.nutrient),
                 prompt_pending=True,
             )
-            await query.edit_message_text(
-                f"Editing {action.nutrient} for {favorite.name}."
-            )
+            await _edit(query, f"Editing {action.nutrient} for {favorite.name}.")
             await query.message.reply_text(
                 started.prompt_text,
                 reply_markup=CANCEL_KEYBOARD,
@@ -2124,12 +2200,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     ]
                 ]
             )
-            await query.edit_message_text(
-                f"Delete favorite {favorite.name}?", reply_markup=keyboard
+            await _edit(
+                query, f"Delete favorite {favorite.name}?", reply_markup=keyboard
             )
         elif action.kind == "favorite_delete_confirm" and action.record_id is not None:
             if confirmation_expired(action, database.now_epoch()):
-                await query.edit_message_text(
+                await _edit(
+                    query,
                     "This delete confirmation has expired. Open the favorite to try again.",
                     reply_markup=InlineKeyboardMarkup(
                         [
@@ -2145,9 +2222,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     ),
                 )
                 return
-            await _call(database.delete_favorite, user_id, action.record_id)
-            await query.edit_message_text(
-                "Favorite product deleted.",
+            try:
+                await _call(database.delete_favorite, user_id, action.record_id)
+                text = "Favorite product deleted."
+            except NotFound:
+                text = "This favorite product was already deleted."
+            await _edit(
+                query,
+                text,
                 reply_markup=InlineKeyboardMarkup(
                     [
                         [
@@ -2160,13 +2242,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 ),
             )
         else:
-            await query.edit_message_text("This action is invalid or has expired.")
+            await _edit(query, "This action is invalid or has expired.")
     except (NotFound, StateConflict):
-        await query.edit_message_text(
-            "This item is unavailable or belongs to another user."
-        )
+        await _edit(query, "This item is unavailable or belongs to another user.")
     except ValidationError as exc:
-        await query.edit_message_text(str(exc))
+        await _edit(query, str(exc))
 
 
 async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2387,7 +2467,7 @@ async def health_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     query = update.callback_query
     if query is None:
         return
-    await query.answer()
+    await _answer(query)
     if query.message is None or not query.message.is_accessible:
         return
     args = []

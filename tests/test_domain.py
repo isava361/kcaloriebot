@@ -1,6 +1,6 @@
 import math
 import unittest
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
 from kcaloriebot.domain import (
@@ -365,6 +365,18 @@ class EntryTimeParsingTests(unittest.TestCase):
     def test_clock_only_uses_the_local_today(self) -> None:
         expected = int(datetime(2024, 6, 15, 12, 0, tzinfo=timezone.utc).timestamp())
         self.assertEqual(expected, parse_entry_time("12:00", "UTC", self.NOW))
+
+    def test_clock_only_keeps_the_given_local_day(self) -> None:
+        # Retiming an entry from yesterday keeps it on yesterday, local time.
+        expected = int(
+            datetime(2024, 6, 14, 19, 30, tzinfo=ZoneInfo("Europe/Moscow")).timestamp()
+        )
+        self.assertEqual(
+            expected,
+            parse_entry_time("19:30", "Europe/Moscow", self.NOW, date(2024, 6, 14)),
+        )
+        with self.assertRaises(ValidationError):
+            parse_entry_time("23:59", "UTC", self.NOW, date(2024, 6, 15))
 
     def test_future_and_ancient_times_are_rejected(self) -> None:
         for text in ("23:59", "2023-01-01 12:00"):

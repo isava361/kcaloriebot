@@ -151,7 +151,10 @@ RECENT_GRAMS_PROMPT = "Enter the serving weight in grams, or choose Same as last
 RECENT_SERVINGS_PROMPT = "Enter the number of servings, or choose Same as last time:"
 ENTRY_GRAMS_PROMPT = "Enter the new serving weight in grams:"
 ENTRY_SERVINGS_PROMPT = "Enter the new number of servings, for example 1 or 0.5:"
-ENTRY_TIME_PROMPT = "Enter the new entry time as HH:MM for today, or YYYY-MM-DD HH:MM:"
+ENTRY_TIME_PROMPT = (
+    "Enter the new entry time as HH:MM to keep the entry's day, "
+    "or YYYY-MM-DD HH:MM to move it to another day:"
+)
 ENTRY_NAME_PROMPT = "Enter the new food name:"
 SERVING_CALORIES_PROMPT = "Enter calories per one serving:"
 SERVINGS_COUNT_PROMPT = "Enter the number of servings, for example 1 or 0.5:"

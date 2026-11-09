@@ -697,8 +697,14 @@ def parse_quick_add(text: str) -> Optional[QuickAdd]:
     return QuickAdd(name, calories, grams, protein, fat, carbs)
 
 
-def parse_entry_time(text: str, timezone_name: str, now_utc: int) -> int:
-    """Parse ``HH:MM`` (today in the user's timezone) or a full local datetime."""
+def parse_entry_time(
+    text: str, timezone_name: str, now_utc: int, day: Optional[date] = None
+) -> int:
+    """Parse ``HH:MM`` or a full local datetime in the user's timezone.
+
+    A bare ``HH:MM`` falls on ``day``, the local date it is relative to: the
+    entry's own day when an existing entry is retimed, today when omitted.
+    """
     try:
         zone = ZoneInfo(timezone_name)
     except ZoneInfoNotFoundError as exc:
@@ -716,11 +722,17 @@ def parse_entry_time(text: str, timezone_name: str, now_utc: int) -> int:
             clock = datetime.strptime(raw, "%H:%M")
         except ValueError as exc:
             raise ValidationError(
-                "Enter the time as HH:MM for today, or YYYY-MM-DD HH:MM."
+                "Enter the time as HH:MM, or YYYY-MM-DD HH:MM."
             ) from exc
-        local_today = datetime.fromtimestamp(now_utc, UTC).astimezone(zone).date()
-        parsed = datetime.combine(local_today, clock.time())
-    epoch = int(parsed.replace(tzinfo=zone).astimezone(UTC).timestamp())
+        if day is None:
+            day = datetime.fromtimestamp(now_utc, UTC).astimezone(zone).date()
+        parsed = datetime.combine(day, clock.time())
+    try:
+        epoch = int(parsed.replace(tzinfo=zone).astimezone(UTC).timestamp())
+    except OverflowError:
+        # Only the first and last days of the calendar cannot be converted,
+        # and both are far outside the accepted range.
+        epoch = 0 if parsed.year == 1 else now_utc + ENTRY_TIME_GRACE_SECONDS + 1
     if epoch > now_utc + ENTRY_TIME_GRACE_SECONDS:
         raise ValidationError("The entry time cannot be in the future.")
     if epoch < now_utc - MAX_ENTRY_AGE_SECONDS:

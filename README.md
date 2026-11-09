@@ -327,8 +327,11 @@ Start a private chat with the bot and send `/start`. The required first prompt
 records an IANA timezone such as `Europe/Moscow`; an unambiguous city such as
 `New York` also works. Use the `Update Timezone` menu option or
 `/updatetimezone` to change it and `/cancel` to leave an active workflow.
-`/start` resumes an unfinished prompt instead of silently discarding it. Drafts
-that have been inactive for seven days expire automatically.
+`/start` resumes an unfinished prompt instead of silently discarding it, also
+after a restart. A draft left untouched for three hours expires automatically:
+the next message is then handled as a normal menu choice or quick add instead of
+as an answer to the old prompt. Diary, statistics, and favorites navigation
+buttons keep working while a prompt is open.
 
 ### Logging food
 
@@ -391,8 +394,8 @@ day listed in week or month statistics is a button that opens that day's
 diary. Backdated entries are therefore reachable for editing on their own day.
 
 Entries can be fully corrected after logging from the entry view: the serving
-weight (or serving count), the entry time — including backdating with `HH:MM`
-(today, local time) or `YYYY-MM-DD HH:MM` — the name, and calories, protein,
+weight (or serving count), the entry time — `HH:MM` (local time on the entry's
+own day) or `YYYY-MM-DD HH:MM` to move it to another day — the name, and calories, protein,
 fat, and carbs (per 100g for weighed entries, per serving for serving-based
 ones). Future timestamps and dates more than a year old are rejected.
 

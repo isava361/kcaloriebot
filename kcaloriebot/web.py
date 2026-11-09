@@ -33,7 +33,14 @@ from .domain import (
     normalize_search_query,
     parse_daily_goal,
 )
-from .web_store import WebStore, entry_data, favorite_data, number
+from .web_store import (
+    INVALID_INPUT,
+    WebStore,
+    entry_data,
+    favorite_data,
+    int_param,
+    number,
+)
 
 DATABASE = web.AppKey("database", Database)
 SETTINGS = web.AppKey("settings", Settings)
@@ -125,11 +132,9 @@ async def boundary(request: web.Request, handler):
             else:
                 message = "Проверьте формат и допустимые значения полей."
         response = web.json_response({"error": message}, status=400)
-    except (ValueError, TypeError, KeyError, OverflowError):
-        response = web.json_response(
-            {"error": "Проверьте введённые данные и допустимые значения."}, status=400
-        )
     except Exception:
+        # Request input is validated explicitly and fails as ValidationError,
+        # so anything else here, a ValueError or KeyError included, is a bug.
         # Do not log headers or request contents: initData is a credential.
         # A traceback carries frames and source lines, not locals, so it stays
         # on the right side of that rule and names the handler that failed.
@@ -149,6 +154,25 @@ async def boundary(request: web.Request, handler):
     return response
 
 
+def _strict_json(text: str):
+    """Standard JSON only: no NaN or Infinity, no integer SQLite cannot hold."""
+
+    def constant(name: str):
+        raise ValueError(name)
+
+    def integer(digits: str) -> int:
+        value = int(digits)
+        if not -(2**63) <= value < 2**63:
+            raise ValueError(digits)
+        return value
+
+    data = json.loads(text, parse_constant=constant, parse_int=integer)
+    # A lone surrogate such as "\ud800" is valid JSON but not text SQLite can
+    # store; encoding raises UnicodeEncodeError, a ValueError, for it here.
+    json.dumps(data, ensure_ascii=False).encode()
+    return data
+
+
 async def payload(request: web.Request, empty_as_object: bool = False) -> dict:
     # Apple Shortcuts sends no body at all for a JSON request body with no
     # fields, which is what a parameterless export request looks like there.
@@ -157,10 +181,14 @@ async def payload(request: web.Request, empty_as_object: bool = False) -> dict:
     if empty_as_object and not (await request.read()).strip():
         return {}
     if request.content_type != "application/json":
-        raise ValueError
-    data = await request.json()
+        raise ValidationError(INVALID_INPUT)
+    try:
+        data = await request.json(loads=_strict_json)
+    except ValueError:
+        # Malformed JSON or text encoding: the body is the client's.
+        raise ValidationError(INVALID_INPUT) from None
     if not isinstance(data, dict):
-        raise ValueError
+        raise ValidationError(INVALID_INPUT)
     return data
 
 
@@ -169,11 +197,14 @@ def snapshot(store: Database, user_id: int, query) -> dict:
     if zone is None:
         return {"needs_timezone": True, "user_id": user_id}
     today = local_date(store.now_epoch(), zone)
-    day = date.fromisoformat(query.get("day", today.isoformat()))
-    if not EARLIEST_DIARY_DATE <= day <= today:
-        raise ValueError
+    try:
+        day = date.fromisoformat(query.get("day", today.isoformat()))
+    except ValueError:
+        day = None
+    if day is None or not EARLIEST_DIARY_DATE <= day <= today:
+        raise ValidationError(INVALID_INPUT)
     bounds = day_bounds(day, zone)
-    offset = int(query.get("offset", "0"))
+    offset = int_param(query, "offset")
     page = store.page_entries(user_id, bounds.start_utc, bounds.end_utc, offset, 30)
     return {
         "needs_timezone": False,
@@ -216,7 +247,7 @@ async def profile(request: web.Request) -> web.Response:
         await asyncio.to_thread(store.ensure_user, user_id)
         await asyncio.to_thread(store.set_daily_goal, user_id, goal)
     else:
-        raise ValueError
+        raise ValidationError(INVALID_INPUT)
     return web.json_response({"ok": True})
 
 
@@ -224,7 +255,7 @@ async def favorites(request: web.Request) -> web.Response:
     query = request.query.get("q", "").strip()
     if len(query) > 200:
         raise ValidationError("Поисковый запрос слишком длинный.")
-    offset = int(request.query.get("offset", "0"))
+    offset = int_param(request.query, "offset")
     if query:
         items = await asyncio.to_thread(
             request.app[DATABASE].search_favorites,
@@ -244,7 +275,7 @@ async def favorites(request: web.Request) -> web.Response:
     result = await asyncio.to_thread(
         request.app[DATABASE].page_favorites,
         request["user_id"],
-        int(request.query.get("offset", "0")),
+        offset,
         30,
     )
     return web.json_response(
@@ -255,11 +286,11 @@ async def favorites(request: web.Request) -> web.Response:
 async def create_favorite(request: web.Request) -> web.Response:
     data = await payload(request)
     if set(data) - {"name", "unit", "calories", "protein", "fat", "carbs"}:
-        raise ValueError
+        raise ValidationError(INVALID_INPUT)
     if data.get("unit", "100g") not in ("100g", "serving") or not isinstance(
         data.get("name"), str
     ):
-        raise ValueError
+        raise ValidationError(INVALID_INPUT)
     result, created = await asyncio.to_thread(
         request.app[DATABASE].save_favorite,
         request["user_id"],
@@ -280,9 +311,9 @@ async def search_foods(request: web.Request) -> web.Response:
     query = normalize_search_query(request.query.get("q", ""))
     if len(query) < 2:
         raise ValidationError("Введите хотя бы два символа.")
-    page = int(request.query.get("page", "1"))
+    page = int_param(request.query, "page", 1)
     if not 1 <= page <= 10:
-        raise ValueError
+        raise ValidationError(INVALID_INPUT)
     return web.json_response(await search.search(request["user_id"], query, page))
 
 
@@ -295,12 +326,9 @@ async def recent(request: web.Request) -> web.Response:
 
 async def mutate(request: web.Request, action: str, status: int = 200) -> web.Response:
     data = await payload(request)
-    if "entry_id" in request.match_info:
-        data["entry_id"] = int(request.match_info["entry_id"])
-    if "weight_id" in request.match_info:
-        data["weight_id"] = int(request.match_info["weight_id"])
-    if "recipe_id" in request.match_info:
-        data["recipe_id"] = int(request.match_info["recipe_id"])
+    for key in ("entry_id", "weight_id", "recipe_id"):
+        if key in request.match_info:
+            data[key] = int_param(request.match_info, key)
     result = await asyncio.to_thread(
         WebStore(request.app[DATABASE].path).mutate,
         request["user_id"],
@@ -390,7 +418,7 @@ async def get_entry(request: web.Request) -> web.Response:
     entry = await asyncio.to_thread(
         request.app[DATABASE].get_entry,
         request["user_id"],
-        int(request.match_info["entry_id"]),
+        int_param(request.match_info, "entry_id"),
     )
     if entry is None:
         raise NotFound
@@ -401,7 +429,7 @@ async def save_favorite(request: web.Request) -> web.Response:
     result, _created = await asyncio.to_thread(
         request.app[DATABASE].add_favorite_from_entry,
         request["user_id"],
-        int(request.match_info["entry_id"]),
+        int_param(request.match_info, "entry_id"),
     )
     return web.json_response(favorite_data(result), status=201)
 

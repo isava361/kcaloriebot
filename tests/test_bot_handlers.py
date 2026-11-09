@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from telegram.constants import ChatType
-from telegram.error import NetworkError
+from telegram.error import BadRequest, NetworkError
 
 from telegram import InlineKeyboardMarkup
 
@@ -75,6 +75,30 @@ class FakeQuery:
 
     async def edit_message_text(self, text: str, reply_markup: Any = None) -> None:
         self.edits.append((text, reply_markup))
+
+
+class TelegramLikeQuery(FakeQuery):
+    """Refuses what Telegram refuses: an identical edit, or a stale answer."""
+
+    def __init__(self, data: str, message: FakeMessage, stale: bool = False):
+        super().__init__(data, message)
+        self.stale = stale
+
+    async def answer(self, *args: Any, **kwargs: Any) -> None:
+        if self.stale:
+            raise BadRequest(
+                "Bad Request: query is too old and response timeout expired "
+                "or query id is invalid"
+            )
+        await super().answer(*args, **kwargs)
+
+    async def edit_message_text(self, text: str, reply_markup: Any = None) -> None:
+        if self.edits and self.edits[-1] == (text, reply_markup):
+            raise BadRequest(
+                "Bad Request: message is not modified: specified new message "
+                "content and reply markup are exactly the same"
+            )
+        await super().edit_message_text(text, reply_markup)
 
 
 def make_update(
@@ -597,6 +621,71 @@ class BotHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.database.get_session(1, 10))
         self.assertIs(MAIN_KEYBOARD, update.effective_message.replies[-1][1])
 
+    async def test_abandoned_draft_does_not_swallow_the_next_days_message(
+        self,
+    ) -> None:
+        self.database.ensure_user(1, 1)
+        self.database.set_timezone(1, "UTC", 1)
+        now = self.database.now_epoch()
+        # Tapped Add Food yesterday evening and never answered.
+        self.database.start_session(
+            1, 10, SessionState.WAIT_FOOD_NAME, now_utc=now - 16 * 3600
+        )
+        update = make_update("oatmeal 370 60")
+
+        await handle_text(update, self.context)
+
+        self.assertIsNone(self.database.get_session(1, 10))
+        entries = self.database.page_entries(1, 0, 4_000_000_000).items
+        self.assertEqual(["oatmeal"], [entry.name for entry in entries])
+        self.assertIn("expired", update.effective_message.replies[0][0])
+        self.assertIs(MAIN_KEYBOARD, update.effective_message.replies[0][1])
+
+    async def test_a_wizard_paused_for_a_while_still_takes_its_answer(self) -> None:
+        self.database.ensure_user(1, 1)
+        self.database.set_timezone(1, "UTC", 1)
+        self.database.start_session(
+            1,
+            10,
+            SessionState.WAIT_FOOD_NAME,
+            now_utc=self.database.now_epoch() - 3600,
+        )
+
+        await handle_text(make_update("oatmeal 370 60"), self.context)
+
+        session = self.database.get_session(1, 10)
+        self.assertEqual(SessionState.WAIT_CALORIES, session.state)
+        self.assertEqual("oatmeal 370 60", session.draft_name)
+
+    async def test_onboarding_prompt_never_goes_stale(self) -> None:
+        self.database.start_session(1, 10, SessionState.WAIT_TIMEZONE, now_utc=1)
+
+        await handle_text(make_update("Europe/Moscow"), self.context)
+
+        self.assertEqual("Europe/Moscow", self.database.get_timezone(1))
+
+    async def test_navigation_buttons_work_during_an_open_prompt(self) -> None:
+        self.database.ensure_user(1, 1)
+        self.database.set_timezone(1, "UTC", 1)
+        entry = self.database.add_entry(1, self.database.now_epoch(), "Rice", 100, 25)
+        self.database.start_session(1, 10, SessionState.WAIT_CALORIES, draft_name="X")
+
+        browse = FakeQuery("entry:list:0", FakeMessage())
+        await handle_callback(make_update(query=browse), self.context)
+        view = FakeQuery(f"entry:view:{entry.entry_id}:0", FakeMessage())
+        await handle_callback(make_update(query=view), self.context)
+        # Anything that would start another input still waits for this one.
+        edit = FakeQuery(f"entry:grams:{entry.entry_id}", FakeMessage())
+        await handle_callback(make_update(query=edit), self.context)
+
+        self.assertIn("Today's food entries", browse.edits[-1][0])
+        self.assertIn("Rice", view.edits[-1][0])
+        self.assertEqual([], edit.edits)
+        self.assertIn("Finish the current input", edit.message.replies[-1][0])
+        session = self.database.get_session(1, 10)
+        self.assertEqual(SessionState.WAIT_CALORIES, session.state)
+        self.assertEqual("X", session.draft_name)
+
     async def test_receipt_undo_deletes_the_committed_entry(self) -> None:
         self.database.ensure_user(1, 1)
         self.database.set_timezone(1, "UTC", 1)
@@ -619,6 +708,60 @@ class BotHandlerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(self.database.get_entry(1, entry.entry_id))
         self.assertIn("deleted", undo_query.edits[-1][0].lower())
+
+    async def test_repeated_taps_and_stale_queries_are_harmless(self) -> None:
+        self.database.ensure_user(1, 1)
+        self.database.set_timezone(1, "UTC", 1)
+        entry = self.database.add_entry(1, self.database.now_epoch(), "Rice", 100, 25)
+        message = FakeMessage()
+        # Tapping the same button twice asks Telegram for an identical edit.
+        view = TelegramLikeQuery(f"entry:view:{entry.entry_id}:0", message)
+        await handle_callback(make_update(query=view), self.context)
+        await handle_callback(make_update(query=view), self.context)
+        self.assertEqual(1, len(view.edits))
+        self.assertIn("Rice", view.edits[0][0])
+        # A query Telegram no longer lets us answer still does its job.
+        stale = TelegramLikeQuery("entry:list:0", message, stale=True)
+        await handle_callback(make_update(query=stale), self.context)
+        self.assertIn("Today's food entries", stale.edits[-1][0])
+        # A double-tapped Undo leaves a true message and a way back.
+        undo = TelegramLikeQuery(
+            f"entry:undo:{entry.entry_id}:{self.database.now_epoch()}", message
+        )
+        await handle_callback(make_update(query=undo), self.context)
+        await handle_callback(make_update(query=undo), self.context)
+        self.assertIsNone(self.database.get_entry(1, entry.entry_id))
+        self.assertEqual("Food entry deleted.", undo.edits[0][0])
+        self.assertEqual("This food entry was already deleted.", undo.edits[-1][0])
+        self.assertEqual(["entry:list:0"], keyboard_callbacks(undo.edits[-1][1]))
+        favorite = self.database.add_favorite(1, "Rice", 250, 10, 20, 30, 2)
+        delete = TelegramLikeQuery(
+            f"fav:delete-confirm:{favorite.favorite_id}:{self.database.now_epoch()}",
+            message,
+        )
+        await handle_callback(make_update(query=delete), self.context)
+        await handle_callback(make_update(query=delete), self.context)
+        self.assertIn("already deleted", delete.edits[-1][0])
+
+    async def test_other_telegram_refusals_still_surface(self) -> None:
+        self.database.ensure_user(1, 1)
+        self.database.set_timezone(1, "UTC", 1)
+
+        class GoneQuery(FakeQuery):
+            async def edit_message_text(self, text: str, reply_markup: Any = None):
+                raise BadRequest("Message to edit not found")
+
+        query = GoneQuery("entry:list:0", FakeMessage())
+        with self.assertRaises(BadRequest):
+            await handle_callback(make_update(query=query), self.context)
+
+        class RefusedQuery(FakeQuery):
+            async def answer(self, *args: Any, **kwargs: Any) -> None:
+                raise BadRequest("Message is too long")
+
+        query = RefusedQuery("entry:list:0", FakeMessage())
+        with self.assertRaises(BadRequest):
+            await handle_callback(make_update(query=query), self.context)
 
     async def test_stats_label_partial_macronutrient_coverage(self) -> None:
         self.database.ensure_user(1, 1)
@@ -1165,6 +1308,27 @@ class NewFeatureTests(unittest.IsolatedAsyncioTestCase):
 
         stored = self.database.get_entry(1, entry.entry_id)
         self.assertEqual(expected, stored.eaten_at_utc)
+        self.assertIsNone(self.database.get_session(1, 10))
+
+    async def test_clock_only_time_edit_keeps_the_entrys_own_day(self) -> None:
+        two_days_ago = datetime.now(timezone.utc) - timedelta(days=2)
+        entry = self.database.add_entry(
+            1, int(two_days_ago.timestamp()), "Rice", 250.0, 40.0
+        )
+        expected = int(
+            two_days_ago.replace(
+                hour=19, minute=30, second=0, microsecond=0
+            ).timestamp()
+        )
+
+        query = FakeQuery(f"entry:time:{entry.entry_id}", FakeMessage())
+        await handle_callback(make_update(query=query), self.context)
+        self.assertIn("keep the entry's day", query.message.replies[-1][0])
+        await handle_text(make_update("19:30"), self.context)
+
+        self.assertEqual(
+            expected, self.database.get_entry(1, entry.entry_id).eaten_at_utc
+        )
         self.assertIsNone(self.database.get_session(1, 10))
 
     async def test_future_entry_time_keeps_the_session_for_retry(self) -> None:

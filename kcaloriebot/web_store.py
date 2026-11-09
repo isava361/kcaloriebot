@@ -38,6 +38,9 @@ from .domain import (
 )
 
 MAX_RECIPE_INGREDIENTS = 40
+# Malformed requests are the client's error (HTTP 400); any other exception is
+# ours, so the web boundary logs it and answers 500.
+INVALID_INPUT = "Проверьте введённые данные и допустимые значения."
 
 
 def json_text(value) -> str:
@@ -51,6 +54,21 @@ def number(data: dict, key: str, optional: bool = False) -> float | None:
     if type(value) not in (int, float) or not math.isfinite(value):
         raise ValidationError(f"Некорректное число: {key}.")
     return float(value)
+
+
+def int_param(params, key: str, default: int = 0) -> int:
+    """A non-negative integer from the query string or the path."""
+    raw = params.get(key)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValidationError(INVALID_INPUT) from None
+    # SQLite integers are 64-bit; a larger id or offset cannot name anything.
+    if not 0 <= value < 2**63:
+        raise ValidationError(INVALID_INPUT)
+    return value
 
 
 def entry_data(entry: FoodEntry) -> dict:
@@ -149,8 +167,11 @@ class WebStore(Database):
         if zone is None:
             raise ValidationError("Сначала укажите часовой пояс.")
         today = local_date(self.now_epoch(), zone)
-        day = date.fromisoformat(query.get("day", today.isoformat()))
-        if not EARLIEST_DIARY_DATE <= day <= today:
+        try:
+            day = date.fromisoformat(query.get("day", today.isoformat()))
+        except ValueError:
+            day = None
+        if day is None or not EARLIEST_DIARY_DATE <= day <= today:
             raise ValidationError("Выберите доступную дату дневника.")
         return day, zone
 
@@ -195,7 +216,7 @@ class WebStore(Database):
 
     def weight_snapshot(self, user_id, query):
         day, zone = self.selected_day(user_id, query)
-        offset = int(query.get("offset", 0))
+        offset = int_param(query, "offset")
         self._validate_page(offset, 30)
         end = day_bounds(day, zone).end_utc
         week = day_bounds(day - timedelta(days=6), zone).start_utc
@@ -593,7 +614,7 @@ class WebStore(Database):
             "ingredients",
             "portion",
         }:
-            raise ValueError
+            raise ValidationError(INVALID_INPUT)
         name = self._name(data)
         items = self._ingredients(data.get("ingredients"))
         cooked = number(data, "cooked_grams", True)
@@ -675,7 +696,7 @@ class WebStore(Database):
                 "fat",
                 "carbs",
             }:
-                raise ValueError
+                raise ValidationError(INVALID_INPUT)
             if not isinstance(item.get("name"), str) or not item["name"].strip():
                 raise ValidationError(f"Ингредиент {position}: укажите название.")
             if len(" ".join(item["name"].split())) > 200:
@@ -733,7 +754,7 @@ class WebStore(Database):
         if raw is None:
             return None
         if not isinstance(raw, dict) or set(raw) != {"grams", "eaten_at"}:
-            raise ValueError
+            raise ValidationError(INVALID_INPUT)
         grams = number(raw, "grams")
         if not 0 < grams <= MAX_SERVING_GRAMS:
             raise ValidationError("Порция — больше 0 и не больше 100 кг.")
