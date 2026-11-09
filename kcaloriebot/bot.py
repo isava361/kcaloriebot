@@ -30,6 +30,7 @@ from .callbacks import (
 )
 from .config import Settings
 from .database import Database
+from .export import food_csv, weight_csv
 from .health import HealthStore
 from .photo_ai import (
     MAX_IMAGE_BYTES,
@@ -109,6 +110,7 @@ from .render import (
     day_navigation_row,
     day_stats_block,
     entry_button_text,
+    export_row,
     entry_details,
     favorite_button_text,
     favorite_details,
@@ -725,11 +727,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
     elif text == "Settings":
         await turn.message.reply_text(
-            "Settings — daily goal, timezone and Apple Health:",
+            "Settings — daily goal, timezone, Apple Health and data export:",
             reply_markup=SETTINGS_KEYBOARD,
         )
     elif text == "Apple Health":
         await _health_action(update, context, [])
+    elif text == "Export data":
+        await _send_export(turn, timezone_name)
     elif text == "Week Stats":
         await _show_daily_stats(update, context, Period.WEEK, 0)
     elif text == "Month Stats":
@@ -1387,6 +1391,9 @@ async def _show_daily_stats(
         navigation = navigation_row(page, prefix, STATS_PAGE_SIZE)
         if navigation:
             rows.append(navigation)
+        rows.append(
+            export_row("week" if shown_month is None else f"month:{shown_month:%Y-%m}")
+        )
     if shown_month is not None:
         months = month_navigation_row(shown_month.year, shown_month.month, today)
         if months:
@@ -1464,6 +1471,7 @@ async def _show_entries(
         navigation = navigation_row(page, list_prefix)
         if navigation:
             rows.append(navigation)
+        rows.append(export_row(f"day:{shown_day.isoformat()}"))
     day_navigation = day_navigation_row(shown_day, today, oldest)
     if day_navigation:
         rows.append(day_navigation)
@@ -1653,7 +1661,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.message.reply_text(
                 "Progress — food statistics and weight:"
                 if action.kind == "menu_progress"
-                else "Settings — daily goal, timezone and Apple Health:",
+                else "Settings — daily goal, timezone, Apple Health and data export:",
                 reply_markup=STATS_KEYBOARD
                 if action.kind == "menu_progress"
                 else SETTINGS_KEYBOARD,
@@ -1739,6 +1747,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     days=1
                 )
                 await _show_entries(update, context, 0, edit=True, day=yesterday)
+        elif action.kind == "export":
+            await _send_period_export(database, user_id, query.message, action)
         elif action.kind == "favorite_list":
             await _show_favorites(update, context, action.offset, edit=True)
         elif action.kind == "entry_view" and action.record_id is not None:
@@ -2589,6 +2599,63 @@ async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.effective_message.reply_text(
             chunk, parse_mode=ParseMode.HTML, disable_web_page_preview=True
         )
+
+
+async def _send_export(turn: Turn, timezone_name: str) -> None:
+    """Send the user's whole history, food and weight, as CSV files."""
+    database = turn.database
+    entries = await _call(database.export_entries, turn.user_id)
+    weights = await _call(database.all_weights, turn.user_id)
+    if not entries and not weights:
+        await turn.message.reply_text(
+            "There is nothing to export yet.", reply_markup=SETTINGS_KEYBOARD
+        )
+        return
+    stamp = local_date(database.now_epoch(), timezone_name).isoformat()
+    if entries:
+        await turn.message.reply_document(
+            document=food_csv(entries, timezone_name),
+            filename=f"food-all-{stamp}.csv",
+            caption=f"Food diary: {len(entries)} entries. Times are {timezone_name}.",
+        )
+    if weights:
+        await turn.message.reply_document(
+            document=weight_csv(weights, timezone_name),
+            filename=f"weight-all-{stamp}.csv",
+            caption=f"Weight: {len(weights)} measurements.",
+        )
+
+
+async def _send_period_export(
+    database: Database, user_id: int, message: Any, action: CallbackAction
+) -> None:
+    """Send the food entries of the day, week or month a screen was showing."""
+    timezone_name = await _call(database.get_timezone, user_id)
+    if timezone_name is None:
+        await message.reply_text("Set your timezone first with /updatetimezone.")
+        return
+    if action.period == "day" and action.day is not None:
+        bounds = day_bounds(action.day, timezone_name)
+        label = action.day.isoformat()
+    elif action.period == "month" and action.month is not None:
+        year_text, month_text = action.month.split("-")
+        bounds = month_bounds(int(year_text), int(month_text), timezone_name)
+        label = action.month
+    else:
+        bounds = period_bounds(Period.WEEK, timezone_name)
+        last_day = bounds.end_local_date - timedelta(days=1)
+        label = f"{bounds.start_local_date.isoformat()}_{last_day.isoformat()}"
+    entries = await _call(
+        database.export_entries, user_id, bounds.start_utc, bounds.end_utc
+    )
+    if not entries:
+        await message.reply_text("There are no food entries to export for that period.")
+        return
+    await message.reply_document(
+        document=food_csv(entries, timezone_name),
+        filename=f"food-{label}.csv",
+        caption=f"{len(entries)} entries. Times are {timezone_name}.",
+    )
 
 
 async def miniapp_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

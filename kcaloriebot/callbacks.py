@@ -90,6 +90,14 @@ def parse_callback(data: str) -> Optional[CallbackAction]:
                 day=_parse_day(parts[2]),
                 offset=_parse_offset(parts[3]),
             )
+        if parts == ["export", "week"]:
+            return CallbackAction("export", period="week")
+        if len(parts) == 3 and parts[:2] == ["export", "day"]:
+            return CallbackAction("export", period="day", day=_parse_day(parts[2]))
+        if len(parts) == 3 and parts[:2] == ["export", "month"]:
+            return CallbackAction(
+                "export", period="month", month=_parse_month(parts[2])
+            )
         if len(parts) == 3 and parts[:2] == ["fav", "list"]:
             return CallbackAction("favorite_list", offset=_parse_offset(parts[2]))
         if len(parts) == 3 and parts[:2] == ["recent", "use"]:

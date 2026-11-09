@@ -51,11 +51,17 @@ class FakeMessage:
         self.date = date
         self.message_id = next(self._ids) if message_id is None else message_id
         self.replies: list[tuple[str, Any]] = []
+        self.documents: list[tuple[str, bytes, str | None]] = []
 
     async def reply_text(
         self, text: str, reply_markup: Any = None, **kwargs: Any
     ) -> None:
         self.replies.append((text, reply_markup))
+
+    async def reply_document(
+        self, document: bytes, filename: str, caption: str | None = None
+    ) -> None:
+        self.documents.append((filename, document, caption))
 
 
 class FailingMessage(FakeMessage):
@@ -118,6 +124,90 @@ class BotHandlerTests(unittest.IsolatedAsyncioTestCase):
         group = make_update("/app", chat_type=ChatType.GROUP)
         await miniapp_command(group, self.context)
         self.assertIsNone(group.effective_message.replies[-1][1])
+
+    async def test_export_sends_own_diary_as_csv_in_local_time(self) -> None:
+        self.database.ensure_user(1)
+        self.database.set_timezone(1, "Europe/Moscow")
+        empty = make_update("Export data")
+        await handle_text(empty, self.context)
+        self.assertIn("nothing to export", empty.effective_message.replies[-1][0])
+        self.assertEqual(empty.effective_message.documents, [])
+
+        # 2026-01-01 22:30 UTC is already 2 January in Moscow.
+        late = int(datetime(2026, 1, 1, 22, 30, tzinfo=timezone.utc).timestamp())
+        self.database.add_entry(1, late, "Борщ, домашний", 50, 300, 2, 1.5, None)
+        self.database.add_weight(1, late, 80.25)
+        self.database.ensure_user(2)
+        self.database.add_entry(2, late, "someone else", 100, 100)
+
+        update = make_update("Export data")
+        await handle_text(update, self.context)
+        food, weight = update.effective_message.documents
+        self.assertRegex(food[0], r"^food-all-\d{4}-\d\d-\d\d\.csv$")
+        self.assertEqual(
+            food[1].decode("utf-8-sig").splitlines(),
+            [
+                "date,time,name,grams,servings,calories,protein,fat,carbs",
+                '2026-01-02,01:30,"Борщ, домашний",300,,150,6,4.5,',
+            ],
+        )
+        self.assertTrue(food[1].startswith(b"\xef\xbb\xbf"))
+        self.assertEqual(
+            weight[1].decode("utf-8-sig").splitlines(),
+            ["date,time,weight_kg", "2026-01-02,01:30,80.25"],
+        )
+
+    async def test_diary_and_stats_screens_export_the_shown_period(self) -> None:
+        self.database.ensure_user(1)
+        self.database.set_timezone(1, "Europe/Moscow")
+        now = self.database.now_epoch()
+        self.database.add_entry(1, now, "today", 100, 100)
+        self.database.add_entry(1, now - 3 * 86400, "three days ago", 100, 100)
+        self.database.add_entry(1, now - 200 * 86400, "long ago", 100, 100)
+
+        async def names(callback: str) -> list[str]:
+            message = FakeMessage()
+            await handle_callback(
+                make_update(query=FakeQuery(callback, message)), self.context
+            )
+            (document,) = message.documents
+            lines = document[1].decode("utf-8-sig").splitlines()[1:]
+            return [line.split(",")[2] for line in lines]
+
+        diary = make_update("Diary")
+        await handle_text(diary, self.context)
+        (day_export,) = [
+            data
+            for data in keyboard_callbacks(diary.effective_message.replies[-1][1])
+            if data.startswith("export:")
+        ]
+        self.assertRegex(day_export, r"^export:day:\d{4}-\d\d-\d\d$")
+        self.assertEqual(await names(day_export), ["today"])
+
+        week = make_update("Week Stats")
+        await handle_text(week, self.context)
+        self.assertIn(
+            "export:week", keyboard_callbacks(week.effective_message.replies[-1][1])
+        )
+        self.assertEqual(await names("export:week"), ["three days ago", "today"])
+
+        month = make_update("Month Stats")
+        await handle_text(month, self.context)
+        (month_export,) = [
+            data
+            for data in keyboard_callbacks(month.effective_message.replies[-1][1])
+            if data.startswith("export:")
+        ]
+        self.assertRegex(month_export, r"^export:month:\d{4}-\d\d$")
+        self.assertIn("today", await names(month_export))
+        self.assertNotIn("long ago", await names(month_export))
+
+        empty = FakeMessage()
+        await handle_callback(
+            make_update(query=FakeQuery("export:day:2021-01-01", empty)), self.context
+        )
+        self.assertEqual(empty.documents, [])
+        self.assertIn("no food entries", empty.replies[-1][0])
 
     async def test_users_command_lists_users_only_for_admin(self) -> None:
         async def get_chat(user_id: int) -> SimpleNamespace:
