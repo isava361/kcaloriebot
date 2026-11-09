@@ -140,6 +140,23 @@ class CallbackParsingTests(unittest.TestCase):
             with self.subTest(data=data):
                 self.assertIsNone(parse_callback(data))
 
+    def test_reminder_callbacks(self) -> None:
+        for data in (
+            "menu:reminders",
+            "notify:reminder:time",
+            "notify:reminder:off",
+            "notify:weekly:on",
+            "notify:weekly:off",
+        ):
+            with self.subTest(data=data):
+                self.assertLess(len(data.encode()), 64)
+                self.assertEqual(
+                    CallbackAction(data.replace(":", "_")), parse_callback(data)
+                )
+        for data in ("notify:weekly", "notify:reminder:on", "notify:weekly:on|0|"):
+            with self.subTest(data=data):
+                self.assertIsNone(parse_callback(data))
+
     def test_unknown_or_malformed_actions_are_rejected(self) -> None:
         for data in (
             "",

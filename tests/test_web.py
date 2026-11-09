@@ -22,7 +22,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from kcaloriebot.config import Settings
 from kcaloriebot.database import Database
 from kcaloriebot.health import HealthStore
-from kcaloriebot.domain import SessionState
+from kcaloriebot.domain import Goals, SessionState
 from kcaloriebot.domain import local_datetime
 from kcaloriebot.web_store import entry_data
 from kcaloriebot.web import authenticate, build_web_app
@@ -220,6 +220,53 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.headers["Cache-Control"], "no-store")
         response = await self.client.get("/static/config.py")
         self.assertEqual(response.status, 404)
+
+    async def test_macro_goals_are_saved_and_returned_with_the_diary(self):
+        self.store.set_timezone(123, "Europe/Moscow")
+        goals = {"calories": 2000, "protein": 150, "fat": None, "carbs": 220.5}
+        response = await self.request("PUT", "/api/profile", json={"goals": goals})
+        self.assertEqual(response.status, 200)
+        diary = await (await self.request("GET", "/api/diary")).json()
+        self.assertEqual(diary["goals"], goals)
+        self.assertEqual(diary["goal"], 2000)
+        # The calorie-only request of older clients keeps the macro goals.
+        response = await self.request("PUT", "/api/profile", json={"goal": 1800})
+        self.assertEqual(response.status, 200)
+        diary = await (await self.request("GET", "/api/diary")).json()
+        self.assertEqual(diary["goals"], {**goals, "calories": 1800})
+        # Empty fields remove goals.
+        empty = dict.fromkeys(goals)
+        response = await self.request("PUT", "/api/profile", json={"goals": empty})
+        self.assertEqual(response.status, 200)
+        diary = await (await self.request("GET", "/api/diary")).json()
+        self.assertEqual(diary["goals"], empty)
+        self.assertIsNone(diary["goal"])
+
+    async def test_invalid_macro_goals_write_nothing(self):
+        self.store.set_timezone(123, "UTC")
+        valid = {"calories": 2000, "protein": 150, "fat": 70, "carbs": 200}
+        for goals in (
+            {**valid, "protein": 0},
+            {**valid, "fat": 2001},
+            {**valid, "carbs": -1},
+            {**valid, "calories": 50001},
+            {**valid, "protein": "150"},
+            {**valid, "protein": True},
+            {key: value for key, value in valid.items() if key != "carbs"},
+            {**valid, "sodium": 5},
+            [2000, 150, 70, 200],
+        ):
+            with self.subTest(goals=goals):
+                response = await self.request(
+                    "PUT", "/api/profile", json={"goals": goals}
+                )
+                self.assertEqual(response.status, 400)
+                self.assertIn("error", await response.json())
+        response = await self.request(
+            "PUT", "/api/profile", json={"goals": {**valid, "fat": 2001}}
+        )
+        self.assertIn("БЖУ", (await response.json())["error"])
+        self.assertEqual(self.store.get_goals(123), Goals())
 
     async def test_onboarding_add_goal_favorite_and_delete(self):
         response = await self.request("GET", "/api/diary")

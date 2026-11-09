@@ -289,8 +289,12 @@ async function loadDiary(day = "", append = false) {
       const value = state.stats[key];
       const incomplete = value !== null && state.stats[`${key}_coverage`] < state.stats.entry_count;
       partial ||= incomplete;
-      $(key).textContent = value === null ? "—" : `${incomplete ? "≈ " : ""}${fmt(value)} г`;
+      const target = state.goals?.[key];
+      const known = value === null ? "—" : `${incomplete ? "≈ " : ""}${fmt(value)}`;
+      $(key).textContent = target == null ? (value === null ? "—" : `${known} г`) : `${known} / ${fmt(target)} г`;
       $(key).classList.toggle("unknown", value === null);
+      // The known part is a lower bound, so exceeding the goal is certain even when partial.
+      $(key).classList.toggle("over", target != null && value !== null && value > target);
     }
     $("partial").hidden = !partial;
     renderMacroSplit(partial);
@@ -531,7 +535,12 @@ submit("food-form", async (form) => {
   $("food-form").reset();
   await added("food-dialog", data.eaten_at.slice(0, 10));
 });
-submit("goal-form", async (form) => { await api("profile", "PUT", {goal: form.get("goal") === "" ? null : Number(form.get("goal"))}); $("goal-dialog").close(); await loadDiary(state.day); });
+const GOAL_FIELDS = {goal: "calories", protein_goal: "protein", fat_goal: "fat", carbs_goal: "carbs"};
+submit("goal-form", async (form) => {
+  const goals = {};
+  for (const [field, key] of Object.entries(GOAL_FIELDS)) goals[key] = form.get(field) === "" ? null : Number(form.get(field));
+  await api("profile", "PUT", {goals}); $("goal-dialog").close(); await loadDiary(state.day);
+});
 submit("favorite-form", async (form) => { await api("entries", "POST", {favorite_id: selectedFavorite.favorite_id, amount: Number(form.get("amount")), eaten_at: form.get("eaten_at"), favorite_version: selectedFavorite.version}); await added("favorites-dialog", form.get("eaten_at").slice(0, 10)); });
 function resetFavorite(favorite) {
   selectedFavorite = favorite;
@@ -587,7 +596,10 @@ function onClick(id, handler) {
   });
 }
 onClick("add-button", () => openFood());
-onClick("goal-button", () => { $("goal-form").elements.goal.value = state.goal ?? ""; openDialog("goal-dialog"); });
+onClick("goal-button", () => {
+  for (const [field, key] of Object.entries(GOAL_FIELDS)) $("goal-form").elements[field].value = state.goals?.[key] ?? (key === "calories" ? state.goal ?? "" : "");
+  openDialog("goal-dialog");
+});
 onClick("favorites-button", async () => { $("favorite-search").value = ""; openDialog("favorites-dialog"); await loadFavorites(); });
 onClick("recent-button", async () => {
   const result = await api("recent");

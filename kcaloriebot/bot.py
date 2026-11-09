@@ -46,26 +46,30 @@ from .domain import (
     UNIT_100G,
     UNIT_SERVING,
     NotFound,
+    NotificationSettings,
     Period,
     Session,
     SessionState,
     StateConflict,
     ValidationError,
+    WEEKLY_SUMMARY_MINUTE,
     canonical_timezone,
     day_bounds,
     local_date,
+    minute_text,
     month_bounds,
     normalize_food_name,
     normalize_search_query,
     parse_calories,
     parse_calories_per_serving,
-    parse_daily_goal,
     parse_entry_time,
+    parse_goals,
     parse_grams,
     parse_macro,
     parse_macro_per_serving,
     parse_nutrient_value,
     parse_quick_add,
+    parse_reminder_time,
     parse_servings,
     parse_weight,
     period_bounds,
@@ -119,7 +123,14 @@ from .render import (
     session_prompt,
     stats_day_rows,
     stats_totals_text,
+    goals_summary,
+    reminder_settings_rows,
+    reminder_settings_text,
+    today_progress_text,
+    REMINDER_TIME_KEYBOARD,
+    REMINDER_TIME_PROMPT,
 )
+from .notifications import start_notifier, stop_notifier
 
 
 __all__ = [
@@ -163,6 +174,7 @@ READ_ONLY_CALLBACKS = frozenset(
         "stats_page",
         "stats_day",
         "weight_view",
+        "export",
     }
 )
 # The only Telegram account allowed to run /users and log food from photos.
@@ -496,20 +508,14 @@ async def _log_quick_add(turn: Turn, text: str) -> bool:
 
 
 async def _today_progress(database: Database, user_id: int) -> str:
-    """One-line calorie total for the user's local today, with goal if set."""
+    """Calorie total for the user's local today, with goal progress if set."""
     timezone_name = await _call(database.get_timezone, user_id)
     if timezone_name is None:
         return ""
     bounds = period_bounds(Period.TODAY, timezone_name)
     stats = await _call(database.stats, user_id, bounds.start_utc, bounds.end_utc)
-    goal = await _call(database.get_daily_goal, user_id)
-    total = stats.calories
-    if goal is None:
-        return f"Today: {total:.0f} kcal."
-    remaining = goal - total
-    if remaining >= 0:
-        return f"Today: {total:.0f} / {goal:.0f} kcal ({remaining:.0f} left)."
-    return f"Today: {total:.0f} / {goal:.0f} kcal ({-remaining:.0f} over)."
+    goals = await _call(database.get_goals, user_id)
+    return today_progress_text(stats, goals)
 
 
 async def _send_receipt(
@@ -523,8 +529,9 @@ async def _send_receipt(
     progress = await _today_progress(database, user_id)
     text = (
         f"Added {entry.name or 'food'} · {amount_text(entry.nutrition)}\n"
-        f"{entry.nutrition.calories:.0f} kcal\n{progress}\n"
-        f"{macro_text(entry.nutrition.protein, entry.nutrition.fat, entry.nutrition.carbs)}"
+        f"{entry.nutrition.calories:.0f} kcal\n"
+        f"{macro_text(entry.nutrition.protein, entry.nutrition.fat, entry.nutrition.carbs)}\n"
+        f"{progress}"
     )
     rows = [
         [
@@ -777,7 +784,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
     elif text == "Settings":
         await turn.message.reply_text(
-            "Settings — daily goal, timezone, Apple Health and data export:",
+            "Settings — goals, reminders, timezone, Apple Health and data export:",
             reply_markup=SETTINGS_KEYBOARD,
         )
     elif text == "Apple Health":
@@ -803,12 +810,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     elif text.casefold() == "recent foods":
         await _show_recent(update, context)
     elif text.casefold() == "daily goal":
-        goal = await _call(database.get_daily_goal, turn.user_id)
-        prompt = (
-            f"Your daily goal is {goal:.0f} kcal. {GOAL_PROMPT}"
-            if goal is not None
-            else GOAL_PROMPT
-        )
+        goals = await _call(database.get_goals, turn.user_id)
+        current = goals_summary(goals)
+        prompt = f"Your goals: {current}. {GOAL_PROMPT}" if current else GOAL_PROMPT
         await _start_with_prompt(
             database,
             turn.user_id,
@@ -832,6 +836,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
     elif text in {"Back", "Main menu"}:
         await turn.message.reply_text("Select an option:", reply_markup=MAIN_KEYBOARD)
+    elif text == "Reminders":
+        await _show_reminder_settings(database, turn.user_id, turn.message)
     elif not await _log_quick_add(turn, text):
         await turn.message.reply_text(
             "Choose an option from the keyboard, or log a food in one message, "
@@ -1126,13 +1132,20 @@ async def _handle_session_text(
                 database, session.user_id, message, entry, restore_keyboard=True
             )
         elif session.state == SessionState.WAIT_GOAL:
-            goal = None if text == "Remove" else parse_daily_goal(text)
-            await _call(database.complete_goal_session, session, goal, now)
+            changes = None if text == "Remove" else parse_goals(text)
+            goals = await _call(database.complete_goals_session, session, changes, now)
+            summary = goals_summary(goals)
             await message.reply_text(
-                "Daily goal removed."
-                if goal is None
-                else f"Daily goal set to {goal:.0f} kcal.",
+                f"Goals set: {summary}." if summary else "Goals removed.",
                 reply_markup=MAIN_KEYBOARD,
+            )
+        elif session.state == SessionState.WAIT_REMINDER_TIME:
+            minute = None if text == "Off" else parse_reminder_time(text)
+            settings = await _call(
+                database.complete_reminder_session, session, minute, now
+            )
+            await message.reply_text(
+                _reminder_confirmation(settings, now), reply_markup=MAIN_KEYBOARD
             )
         elif session.state == SessionState.WAIT_ENTRY_GRAMS:
             amount = _parse_entry_amount(session, text)
@@ -1393,8 +1406,10 @@ async def _day_totals_text(
         title = "Yesterday's totals"
     else:
         title = f"Totals for {day.isoformat()}"
-    goal = await _call(database.get_daily_goal, user_id) if day == today else None
-    return stats_totals_text(title, stats, goal)
+    goals = await _call(database.get_goals, user_id) if day == today else None
+    return stats_totals_text(
+        title, stats, None if goals is None else goals.calories, goals
+    )
 
 
 async def _show_daily_stats(
@@ -1731,11 +1746,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.message.reply_text(
                 "Progress — food statistics and weight:"
                 if action.kind == "menu_progress"
-                else "Settings — daily goal, timezone, Apple Health and data export:",
+                else "Settings — goals, reminders, timezone, Apple Health and data export:",
                 reply_markup=STATS_KEYBOARD
                 if action.kind == "menu_progress"
                 else SETTINGS_KEYBOARD,
             )
+        elif action.kind == "menu_reminders" or action.kind.startswith("notify_"):
+            await _handle_notify_action(query, database, user_id, chat_id, action.kind)
         elif (
             action.kind in {"weight_edit", "weight_undo", "weight_view"}
             and action.record_id is not None
@@ -2753,6 +2770,92 @@ async def miniapp_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     )
 
 
+def _reminder_confirmation(settings: NotificationSettings, now_utc: int) -> str:
+    if settings.reminder_minute is None:
+        return "Evening reminder turned off."
+    when = minute_text(settings.reminder_minute)
+    zone = settings.timezone or "UTC"
+    today = local_date(now_utc, zone)
+    starts = (
+        "tomorrow"
+        if settings.reminder_sent_day is not None
+        and settings.reminder_sent_day >= today
+        else "today"
+    )
+    return (
+        f"Evening reminder set for {when} ({zone}), starting {starts}. "
+        "It is sent only on days with nothing logged."
+    )
+
+
+async def _show_reminder_settings(
+    database: Database, user_id: int, message: Any, prefix: str = ""
+) -> None:
+    settings = await _call(database.get_notification_settings, user_id)
+    text = reminder_settings_text(settings)
+    await message.reply_text(
+        f"{prefix}\n\n{text}" if prefix else text,
+        reply_markup=InlineKeyboardMarkup(reminder_settings_rows(settings)),
+    )
+
+
+async def _handle_notify_action(
+    query: Any, database: Database, user_id: int, chat_id: int, kind: str
+) -> None:
+    """Reminder settings panel: show it, or apply one of its buttons."""
+    timezone_name = await _call(database.get_timezone, user_id)
+    if timezone_name is None:
+        await _edit(query, "Timezone setup is required.")
+        await _start_with_prompt(
+            database,
+            user_id,
+            chat_id,
+            SessionState.WAIT_TIMEZONE,
+            query.message,
+            TIMEZONE_ONBOARDING_PROMPT,
+            TIMEZONE_REQUIRED_MARKUP,
+        )
+        return
+    if kind == "menu_reminders":
+        await _show_reminder_settings(database, user_id, query.message)
+        return
+    if kind == "notify_reminder_time":
+        await _start_with_prompt(
+            database,
+            user_id,
+            chat_id,
+            SessionState.WAIT_REMINDER_TIME,
+            query.message,
+            REMINDER_TIME_PROMPT,
+            REMINDER_TIME_KEYBOARD,
+        )
+        return
+    now = database.now_epoch()
+    note = ""
+    if kind == "notify_reminder_off":
+        settings = await _call(database.set_reminder, user_id, None, now)
+        note = "Evening reminder turned off."
+    elif kind in {"notify_weekly_on", "notify_weekly_off"}:
+        enabled = kind == "notify_weekly_on"
+        settings = await _call(database.set_weekly_summary, user_id, enabled, now)
+        note = "Weekly summary turned off."
+        if enabled and settings.summary_sent_week is not None:
+            first = settings.summary_sent_week + timedelta(days=14)
+            note = (
+                "Weekly summary turned on. The first one arrives on "
+                f"{first:%a} {first.day} {first:%b} at "
+                f"{minute_text(WEEKLY_SUMMARY_MINUTE)}."
+            )
+    else:
+        await _edit(query, "This action is invalid or has expired.")
+        return
+    await _edit(
+        query,
+        f"{note}\n\n{reminder_settings_text(settings)}",
+        reply_markup=InlineKeyboardMarkup(reminder_settings_rows(settings)),
+    )
+
+
 def build_application(
     settings: Settings, database: Optional[Database] = None
 ) -> Application:
@@ -2766,6 +2869,8 @@ def build_application(
         .write_timeout(30.0)
         .pool_timeout(10.0)
         .concurrent_updates(False)
+        .post_init(start_notifier)
+        .post_stop(stop_notifier)
         .build()
     )
     application.bot_data["database"] = store
