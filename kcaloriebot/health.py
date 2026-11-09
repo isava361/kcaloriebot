@@ -214,10 +214,16 @@ class HealthStore(Database):
     def _state(
         self, conn, user_id: int, start_utc: int, end_utc: int | None = None
     ) -> dict:
+        # /health corrected on a deleted record stores a null payload: the user
+        # confirmed it is gone from Health too. Such a row no longer stands for
+        # anything exported, so if the record comes back (an undone deletion, a
+        # macro set again) it is an ordinary new sample and is issued again.
         ledger = {
             row["sample_id"]: row
             for row in conn.execute(
-                "SELECT * FROM health_samples WHERE user_id=?", (user_id,)
+                "SELECT * FROM health_samples WHERE user_id=? "
+                "AND NOT (state='confirmed' AND payload_json='null')",
+                (user_id,),
             )
         }
         pending = next(
@@ -302,8 +308,11 @@ class HealthStore(Database):
             if action == "next" and result["status"] == "ready":
                 receipt = secrets.token_hex(16)
                 sample = result["sample"]
+                # Replaces the null row of a removal that was reconciled before
+                # the record came back; any other row keeps the sample out of
+                # "ready" in the first place.
                 conn.execute(
-                    "INSERT INTO health_samples "
+                    "INSERT OR REPLACE INTO health_samples "
                     "(user_id, sample_id, payload_json, receipt, state) "
                     "VALUES (?, ?, ?, ?, 'pending')",
                     (user_id, sample["id"], encoded(sample), receipt),

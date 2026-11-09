@@ -194,6 +194,71 @@ class HealthTests(unittest.TestCase):
         self.ack(first)  # An old ack cannot resurrect a deleted/corrected payload.
         self.assertEqual(self.next()["status"], "done")
 
+    def test_a_reconciled_removal_that_comes_back_is_exported_again(self):
+        food = self.food(protein_per_100g=10)
+        while (result := self.next())["status"] == "sample":
+            self.ack(result)
+        with self.store._connect() as conn:
+            row = dict(
+                conn.execute(
+                    "SELECT * FROM food_entries WHERE entry_id=?", (food.entry_id,)
+                ).fetchone()
+            )
+            conn.execute("DELETE FROM food_entries WHERE entry_id=?", (food.entry_id,))
+        removed = self.next()
+        self.assertEqual(removed["status"], "changed")
+        for issue in removed["issues"]:
+            self.assertIsNone(issue["current"])
+            self.store.corrected(1, issue["id"], issue["revision"])
+        done = self.next()
+        self.assertEqual((done["status"], done["confirmed"]), ("done", 0))
+        # Undo puts the same row back while an older confirmed sample changes.
+        older = self.store.add_entry(1, self.epoch - 60, "Гречка", 200, 50)
+        self.ack(self.next())
+        with self.store._connect() as conn:
+            conn.execute(
+                f"INSERT INTO food_entries ({', '.join(row)}) "
+                f"VALUES ({', '.join('?' * len(row))})",
+                tuple(row.values()),
+            )
+            conn.execute(
+                "UPDATE food_entries SET calories=90 WHERE entry_id=?",
+                (older.entry_id,),
+            )
+        status = self.store.status(1)
+        self.assertEqual((status["status"], status["remaining"]), ("ready", 2))
+        self.assertEqual(
+            [issue["id"] for issue in status["issues"]],
+            [f"food:{older.entry_id}:calories"],
+        )
+        exported = []
+        while (result := self.next())["status"] == "sample":
+            exported.append((result["sample"]["id"], result["sample"]["value"]))
+            self.ack(result)
+        self.assertEqual(
+            exported,
+            [
+                (f"food:{food.entry_id}:calories", 100),
+                (f"food:{food.entry_id}:protein", 5),
+            ],
+        )
+        # Exported once: only the unrelated change is left, and a later edit
+        # of the returned record is a normal conflict again.
+        self.assertEqual((result["status"], result["issue_count"]), ("changed", 1))
+        self.assertEqual(result["confirmed"], 3)
+        self.store.corrected(
+            1, result["issues"][0]["id"], result["issues"][0]["revision"]
+        )
+        self.assertEqual(self.next()["status"], "done")
+        with self.store._connect() as conn:
+            conn.execute(
+                "UPDATE food_entries SET calories=120 WHERE entry_id=?",
+                (food.entry_id,),
+            )
+        again = self.next()
+        self.assertEqual(again["status"], "changed")
+        self.assertEqual(again["issues"][0]["previous"]["value"], 100)
+
     def test_newly_known_macro_and_rename_do_not_duplicate_calories(self):
         food = self.food()
         self.ack(self.next())
@@ -518,6 +583,47 @@ class HealthBotTests(unittest.IsolatedAsyncioTestCase):
             context.args = ["disconnect"]
             await health_command(update, context)
             self.assertFalse(health.status(1)["connected"])
+
+    async def test_health_reports_a_returned_removal_as_ready_to_export(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = HealthStore(Path(directory) / "bot.db")
+            store.initialize()
+            store.set_timezone(1, "UTC")
+            token = store.connect(1, "2020-01-01")
+            food = store.add_entry(1, 1780000000, "Food", 100, 100)
+            result = store.request(token, "next", {})
+            store.request(token, "ack", {"receipt": result["receipt"]})
+            store.delete_entry(1, food.entry_id)
+            issue = store.status(1)["issues"][0]
+            store.corrected(1, issue["id"], issue["revision"])
+            with store._connect() as conn:
+                conn.execute(
+                    "INSERT INTO food_entries "
+                    "(entry_id, user_id, eaten_at_utc, name, grams, calories) "
+                    "VALUES (?, 1, 1780000000, 'Food', 100, 100)",
+                    (food.entry_id,),
+                )
+            context = SimpleNamespace(
+                args=[],
+                application=SimpleNamespace(
+                    bot_data={
+                        "database": store,
+                        "miniapp_url": "https://example.com:8443/",
+                    }
+                ),
+            )
+            message = SimpleNamespace(reply_text=AsyncMock())
+            update = SimpleNamespace(
+                effective_user=SimpleNamespace(id=1),
+                effective_chat=SimpleNamespace(id=1, type=ChatType.PRIVATE),
+                effective_message=message,
+                callback_query=None,
+            )
+            # This used to raise for good: every /health call failed.
+            await health_command(update, context)
+            text = message.reply_text.call_args.args[0]
+            self.assertNotIn("Запись изменилась", text)
+            self.assertEqual(store.request(token, "status", {})["status"], "ready")
 
     async def test_missing_https_does_not_issue_key(self):
         with tempfile.TemporaryDirectory() as directory:

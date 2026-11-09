@@ -10,6 +10,7 @@ import unittest
 from datetime import datetime, timezone, timedelta
 from uuid import uuid4
 from pathlib import Path
+from unittest.mock import patch
 from urllib.parse import urlencode
 
 if importlib.util.find_spec("aiohttp") is None:
@@ -556,6 +557,96 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(totals["calories"], 400)
         self.assertEqual(totals["protein"], 20)
         self.assertIsNone(totals["fat"])
+
+    async def test_malformed_requests_are_client_errors(self):
+        self.store.set_timezone(123, "Europe/Moscow")
+        entry = self.store.add_entry(123, int(time.time()), "Food", 100, 100)
+        food = {"name": "Food", "calories": 100, "grams": 100}
+        huge = "9" * 30
+        cases = [
+            ("GET", "/api/diary?day=bad", {}),
+            ("GET", "/api/diary?offset=-1", {}),
+            ("GET", f"/api/diary?offset={huge}", {}),
+            ("GET", "/api/favorites?offset=x", {}),
+            ("GET", "/api/favorites?q=rice&offset=-5", {}),
+            ("GET", "/api/statistics?day=2026-02-30", {}),
+            ("GET", "/api/weights?offset=bad", {}),
+            ("GET", f"/api/weights?offset={huge}", {}),
+            ("GET", "/api/entries/abc", {}),
+            ("GET", f"/api/entries/{huge}", {}),
+            ("PATCH", f"/api/entries/{huge}", {"json": {}}),
+            ("DELETE", "/api/weights/abc", {"json": {}}),
+            ("POST", f"/api/entries/{huge}/favorite", {"json": {}}),
+            ("PUT", "/api/profile", {"json": {"other": 1}}),
+            (
+                "PUT",
+                "/api/profile",
+                {"data": "[]", "headers": {"Content-Type": "application/json"}},
+            ),
+            (
+                "PUT",
+                "/api/profile",
+                {"data": "{}", "headers": {"Content-Type": "text/plain"}},
+            ),
+            ("POST", "/api/favorites", {"json": {"name": 5, "calories": 1}}),
+            ("POST", "/api/entries", {"json": {"favorite_id": 10**30, "amount": 1}}),
+            ("POST", "/api/entries", {"json": {**food, "grams": 10**400}}),
+            ("POST", "/api/entries", {"json": {**food, "name": "\ud800"}}),
+            (
+                "POST",
+                "/api/entries",
+                {"json": {**food, "eaten_at": "0001-01-01T00:00"}},
+            ),
+            (
+                "POST",
+                "/api/entries",
+                {"json": {**food, "eaten_at": "9999-12-31T23:59"}},
+            ),
+            (
+                "POST",
+                "/api/entries",
+                {"data": b"\xff", "headers": {"Content-Type": "application/json"}},
+            ),
+            (
+                "POST",
+                "/api/recipes",
+                {"json": {"name": "Каша", "ingredients": [], "x": 1}},
+            ),
+        ]
+        with self.assertNoLogs("kcaloriebot.web", logging.ERROR):
+            for method, path, kwargs in cases:
+                with self.subTest(method=method, path=path, body=kwargs):
+                    response = await self.request(method, path, **kwargs)
+                    self.assertEqual(response.status, 400, await response.text())
+                    self.assertTrue((await response.json())["error"])
+        self.assertEqual(self.store.get_entry(123, entry.entry_id), entry)
+        response = await self.request("GET", "/api/diary")
+        self.assertEqual((await response.json())["stats"]["entry_count"], 1)
+
+    async def test_our_own_errors_are_logged_server_errors(self):
+        self.store.set_timezone(123, "UTC")
+        for error in (KeyError("bug"), TypeError("bug"), ValueError("bug")):
+            with (
+                self.subTest(error=error),
+                patch("kcaloriebot.web_store.WebStore._create", side_effect=error),
+                self.assertLogs("kcaloriebot.web", logging.ERROR) as logs,
+            ):
+                response = await self.request(
+                    "POST",
+                    "/api/entries",
+                    json={"name": "Food", "calories": 100, "grams": 100},
+                )
+                self.assertEqual(response.status, 500)
+                self.assertEqual(
+                    (await response.json())["error"],
+                    "Не удалось выполнить запрос. Попробуйте ещё раз.",
+                )
+            output = "\n".join(logs.output)
+            self.assertIn(type(error).__name__, output)
+            # initData is a credential and never reaches the log.
+            self.assertNotIn(self.headers["Authorization"][4:], output)
+        response = await self.request("GET", "/api/diary")
+        self.assertEqual((await response.json())["stats"]["entry_count"], 0)
 
     async def test_other_user_cannot_edit_or_restore(self):
         self.store.set_timezone(123, "UTC")
