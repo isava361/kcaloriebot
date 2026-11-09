@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -228,6 +229,33 @@ class UpdateScriptTests(unittest.TestCase):
                 self.assertNotEqual(result["code"], 0)
                 self.assertEqual(result["services"], "stopped", result["output"])
                 self.assertIn("ROLLBACK FAILED", result["output"])
+
+    def test_failed_recovery_prints_the_restore_command(self):
+        for scenario in ("restore", "reset"):
+            with self.subTest(scenario=scenario):
+                result = self.run_update(scenario)
+                self.assertIn("ROLLBACK FAILED", result["output"])
+                lines = result["output"].splitlines()
+                index = next(
+                    i for i, line in enumerate(lines) if "Restore it with" in line
+                )
+                command = lines[index + 1]
+                backup = re.search(r"'([^']*/before-[^']*\.db)'", command)
+                self.assertIsNotNone(backup, command)
+                # Same checks as the README restore procedure, in the same order.
+                self.assertTrue(command.endswith(" = ok && echo restored"), command)
+                self.assertRegex(
+                    command,
+                    r"\s{4}test \"\$\(sudo -u kcaloriebot sqlite3 '"
+                    + re.escape(backup.group(1))
+                    + r"' 'PRAGMA integrity_check;'\)\" = ok && ",
+                )
+                self.assertIn(
+                    f"live.db' \".restore '{backup.group(1)}'\" && test", command
+                )
+                self.assertIn("live.db' 'PRAGMA integrity_check;')\" = ok", command)
+                if scenario == "reset":
+                    self.assertIn("migration never ran", result["output"])
 
     def test_preflight_and_check_never_stop_services(self):
         for scenario, args in (
