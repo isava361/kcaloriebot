@@ -10,6 +10,12 @@ partial/unknown macro indicators, and these workflows:
   defaults to the current time; past days default to noon. New or moved entries
   must be within the last 366 days. Existing older entries can still be edited
   without changing their time.
+- Returning from the background (or from the chat) reloads the diary: one left
+  on today moves to the new day after midnight, so new entries default to the
+  current time, and changes made in the bot meanwhile appear. A chosen past day
+  stays selected. Deleting or editing an entry that changed elsewhere reports
+  the conflict and redraws the diary. If the very first load fails, the notice
+  offers «Повторить».
 - Enter nutrition per 100 g or per serving, repeat recent food, or search
   favorites.
 - Adding from the favorites list checks the selected favorite's version. If its
@@ -44,9 +50,11 @@ partial/unknown macro indicators, and these workflows:
   ingredient with calories lacks it. Filling «Съедено, г» saves the recipe and
   logs that portion in one step. Recipe names are unique per user, ignoring
   case. Each recipe publishes its per-100 g values to a favorite of the same
-  name (adopting an existing plain favorite of that name), so the chat bot can
-  log portions by weight too; saving the recipe again overwrites edits made to
-  that favorite in the bot, and deleting the recipe deletes its favorite.
+  name (adopting an existing plain favorite of that name, also when renamed
+  onto one: its previous favorite is then merged into the adopted one), so the
+  chat bot can log portions by weight too; saving the recipe again overwrites
+  edits made to that favorite in the bot, and deleting the recipe deletes its
+  favorite.
   Logged entries are ordinary entries and stay when the recipe changes.
 - Edit names, amounts, nutrition and dates. Concurrent changes in the bot or
   another window produce a conflict instead of overwriting newer data.
@@ -59,7 +67,10 @@ partial/unknown macro indicators, and these workflows:
   the calorie average uses only days with entries. Tap a bar to open that day.
 - Record, correct and delete weight measurements. The journal shows measurements
   through the selected day, a 30-day chart of daily means, and means of all
-  measurements in the last 7 days and preceding 7 days.
+  measurements in the last 7 days and preceding 7 days. The chart's bars span
+  the range shown, padded by at least 0.5 kg on each side and labelled with
+  that scale, so a few hundred grams are visible; a single measurement sits
+  mid-scale.
 
 Entries are grouped into meals by their local time (breakfast, lunch, afternoon
 snack, dinner, night snack) with per-meal totals. The summary shows the calories
@@ -73,7 +84,11 @@ confirmation. Older clients retain ordinary HTML controls. Supported clients
 disable vertical swipe-to-minimize and adjust dialogs to the visible viewport.
 
 The HTTP server and polling bot run as separate processes against the same
-`DATABASE_PATH`. The frontend has no build step. The bot still works when the
+`DATABASE_PATH`. Both create or migrate the schema on startup; every step runs
+under SQLite's write lock and re-checks the version there, so they may start
+together. A favorite name is unique per user, so saving one name twice from
+both processes, or with a double tap, updates one favorite. The frontend has
+no build step. The bot still works when the
 optional web server is disabled.
 
 ## Local run
@@ -95,8 +110,10 @@ node --check kcaloriebot/static/app.js
 ```
 
 Optional mobile browser checks use a fake Telegram SDK, signed test credentials,
-temporary SQLite, and headless Chromium. They cover backdating, a committed but
-lost response, draft recovery, editing, undo, theme changes, statistics and weight:
+temporary SQLite, and headless Chromium. They cover a failed first load and its
+retry, resuming after midnight and after changes in the bot, backdating, a
+committed but lost response, draft recovery, editing, edit conflicts, undo,
+theme changes, statistics, the weight chart's scale and an expired session:
 
 ```bash
 npm install --prefix data/ui-check --no-save playwright
@@ -281,8 +298,11 @@ systemctl is-active "$BOT_SERVICE" "$WEB_SERVICE"
 )
 ```
 
-Для текущего релиза проверка БД должна вывести `6` и `ok`. Схема 6 добавляет
-журнал повторных запросов и снимки удалённых записей; данные бота сохраняются.
+Для текущего релиза проверка БД должна вывести `10` и `ok`. Схема 10 делает
+название избранного уникальным для пользователя: точные дубли объединяются
+(ссылки сессий бота и блюд переходят на оставшуюся запись), а дубли с другими
+значениями сохраняются под именем вида «Рис (2)». Остальные данные бота
+сохраняются.
 Если проверка чистоты Git или возможности fast-forward не прошла, сначала
 разбери локальные изменения/расхождение веток. Этот блок не делает `reset --hard`.
 
@@ -521,9 +541,14 @@ update leaves the Mini App down and Nginx answering 502. The script also
 installs `.[miniapp]` and fails the update if the web unit does not stay
 running, printing its last journal lines.
 
-The current SQLite schema is 7. Version 6 added durable operation receipts
-and temporary deleted-entry snapshots; version 7 adds Apple Health connections
-and per-sample export receipts. Back up the database and stop **both**
+The current SQLite schema is 10. Version 6 added durable operation receipts
+and temporary deleted-entry snapshots; version 7 added Apple Health connections
+and per-sample export receipts, version 9 recipes. Version 10 makes favorite
+names unique per user. Its upgrade keeps, per name, the favorite a recipe
+publishes to, else the newest one (the row the bot already used for that name);
+another row with exactly the same values is merged into a kept one, with bot
+sessions and recipes that referenced it moved over, and a row with different
+values is kept under a free numbered name such as «Rice (2)». Back up the database and stop **both**
 processes before upgrading. Run the same code version for bot and web; rollback
 requires the pre-upgrade database backup. Restart the web service after every
 frontend deployment: it loads public assets into memory at startup.
@@ -894,8 +919,20 @@ set the same URL as the bot's menu button through BotFather's `/setmenubutton`.
 The frontend sends `Telegram.WebApp.initData` in an Authorization header. The
 server verifies Telegram's HMAC signature, rejects duplicate fields, requires a
 valid user ID, and rejects credentials older than one hour (or more than 30
-seconds in the future). After expiry, close and reopen the app. User IDs from
-request bodies or query parameters do not select another user's diary.
+seconds in the future). User IDs from request bodies or query parameters do not
+select another user's diary.
+
+`initData` is a bearer credential: whoever holds a copy acts as the user until
+it expires, and the server cannot revoke it. The one-hour window therefore
+stays short, even though Telegram keeps a minimized Mini App alive for longer.
+The page cannot obtain fresh `initData` itself; only reopening the app from the
+bot does. Once the server answers 401, the app shows «Сессия истекла» at the
+top, offers «Закрыть приложение», and reports the same in an open form's error
+line. Returning from the background re-checks the session immediately, so the
+notice appears before the next action rather than after it. The open form is
+saved as a draft first, and a submission rejected this way keeps its draft and
+its pending request key, so after reopening, «Продолжить» restores the form and
+the retry cannot create a duplicate.
 
 The server limits request bodies to 64 KiB and exposes only the explicitly listed
 static files, including the Apple Health setup guide.

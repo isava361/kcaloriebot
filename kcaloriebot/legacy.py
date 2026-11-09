@@ -120,6 +120,9 @@ def migrate_legacy_database(
             """,
             valid_entries,
         )
+        # The Go bot allowed one name twice; resolve those as the schema
+        # migration does, inside this transaction.
+        connection.execute("DROP INDEX favorites_user_name_key_idx")
         connection.executemany(
             """
             INSERT INTO favorite_foods(
@@ -130,6 +133,7 @@ def migrate_legacy_database(
             """,
             [values + (now, now) for values in valid_favorites],
         )
+        merged_favorites = database._enforce_unique_favorite_names(connection)
         connection.commit()
     except Exception:
         connection.rollback()
@@ -140,7 +144,7 @@ def migrate_legacy_database(
     return MigrationReport(
         users=len(imported_users),
         entries=len(valid_entries),
-        favorites=len(valid_favorites),
+        favorites=len(valid_favorites) - merged_favorites,
         skipped_entries=skipped_entries,
         skipped_favorites=skipped_favorites,
     )

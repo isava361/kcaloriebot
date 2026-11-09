@@ -12,6 +12,10 @@
 <body>
 <main>
   <p id="notice" role="status" aria-live="polite">Загружаем ваш дневник…</p>
+  <section id="expired" class="card" role="alert" hidden>
+    <p><strong>Сессия истекла.</strong> Вход из Telegram действует час. Закройте приложение и откройте его снова кнопкой в боте — несохранённые формы останутся черновиками на этом устройстве.</p>
+    <button id="expired-close" type="button" class="primary wide" hidden>Закрыть приложение</button>
+  </section>
   <section id="onboarding" class="card" hidden>
     <h2>Начнём с вашего времени</h2><p class="muted">Так приёмы пищи попадут в правильный день.</p>
     <form id="timezone-form"><label>Часовой пояс<input name="timezone" required placeholder="Europe/Moscow" maxlength="100"></label><button class="primary wide">Продолжить</button></form>

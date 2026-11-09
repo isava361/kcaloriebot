@@ -543,6 +543,20 @@ input,select,textarea{
   padding:var(--s3) 0;
   line-height:1.6
 }
+/* Stays in view while scrolling: every action fails until the app is reopened. */
+#expired{
+  position:sticky;
+  top:var(--s2);
+  z-index:5;
+  border-color:var(--warn)
+}
+#expired p{
+  margin:0;
+  line-height:1.5
+}
+#expired button{
+  margin-top:var(--s3)
+}
 #favorites>button{
   display:block;
   text-align:left;

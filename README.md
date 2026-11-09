@@ -164,6 +164,8 @@ keys, WAL mode, busy timeouts, numeric constraints, and deterministic indexes
 are enabled at startup. Databases from earlier versions are migrated to the
 current schema automatically on the first start; because the migration
 rebuilds tables, take the pre-update backup described below before upgrading.
+Each migration step re-checks the schema version under SQLite's write lock, so
+the bot and the Mini App server may start at the same time.
 
 ### 5. Verify the deployment
 

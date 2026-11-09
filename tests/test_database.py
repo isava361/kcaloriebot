@@ -3,7 +3,9 @@ from __future__ import annotations
 import sqlite3
 import math
 import tempfile
+import threading
 import unittest
+from contextlib import closing
 from dataclasses import replace
 from datetime import date
 from pathlib import Path
@@ -930,6 +932,251 @@ class SchemaTests(DatabaseTestCase):
 
         with self.assertRaisesRegex(RuntimeError, "legacy schema"):
             Database(legacy_path).initialize()
+
+    def _initialize_concurrently(self, path: Path, workers: int = 6) -> list[str]:
+        """Start like the bot and the Mini App server do: all at once."""
+        barrier = threading.Barrier(workers)
+        errors: list[str] = []
+
+        def start() -> None:
+            barrier.wait()
+            try:
+                Database(path).initialize()
+            except Exception as exc:  # collected for the assertion message
+                errors.append(repr(exc))
+
+        threads = [threading.Thread(target=start) for _ in range(workers)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        return errors
+
+    def test_concurrent_initialize_of_a_fresh_database(self) -> None:
+        for attempt in range(10):
+            path = Path(self.temporary_directory.name) / f"fresh-{attempt}.db"
+            self.assertEqual(self._initialize_concurrently(path), [])
+            with closing(sqlite3.connect(path)) as connection, connection:
+                self.assertEqual(
+                    connection.execute("PRAGMA user_version").fetchone()[0],
+                    SCHEMA_VERSION,
+                )
+                self.assertEqual(
+                    connection.execute("PRAGMA journal_mode").fetchone()[0], "wal"
+                )
+
+    def test_concurrent_initialize_migrates_an_old_database_once(self) -> None:
+        for attempt in range(5):
+            path = Path(self.temporary_directory.name) / f"old-{attempt}.db"
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.executescript(V3_SCHEMA)
+                connection.execute(
+                    "INSERT INTO users(user_id, created_at_utc, updated_at_utc) VALUES (1, 1, 1)"
+                )
+                connection.execute(
+                    """
+                    INSERT INTO favorite_foods(
+                        favorite_id, user_id, name, name_key, calories_per_100g,
+                        created_at_utc, updated_at_utc
+                    ) VALUES (3, 1, 'Rice', 'rice', 250.0, 1, 1)
+                    """
+                )
+            self.assertEqual(self._initialize_concurrently(path), [])
+            migrated = Database(path)
+            self.assertEqual("Rice", migrated.get_favorite(1, 3).name)
+            with closing(sqlite3.connect(path)) as connection, connection:
+                self.assertEqual(
+                    connection.execute("PRAGMA user_version").fetchone()[0],
+                    SCHEMA_VERSION,
+                )
+                self.assertEqual(
+                    connection.execute("PRAGMA foreign_key_check").fetchall(), []
+                )
+
+    def test_failed_v4_foreign_key_check_leaves_version_three(self) -> None:
+        path = Path(self.temporary_directory.name) / "dangling.db"
+        with closing(sqlite3.connect(path)) as connection, connection:
+            connection.executescript(V3_SCHEMA)
+            connection.execute(
+                "INSERT INTO users(user_id, created_at_utc, updated_at_utc) VALUES (1, 1, 1)"
+            )
+            # Foreign keys are off in this raw connection: a dangling reference.
+            connection.execute(
+                """
+                INSERT INTO sessions(user_id, chat_id, state, selected_favorite_id,
+                    updated_at_utc)
+                VALUES (1, 10, 'wait_favorite_grams', 404, 1)
+                """
+            )
+
+        for _ in range(2):  # the failure is not accepted on the next start
+            with self.assertRaisesRegex(RuntimeError, "foreign key violations"):
+                Database(path).initialize()
+            with closing(sqlite3.connect(path)) as connection, connection:
+                self.assertEqual(
+                    connection.execute("PRAGMA user_version").fetchone()[0], 3
+                )
+                tables = {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table'"
+                    )
+                }
+                self.assertNotIn("weights", tables)
+                self.assertFalse(any(name.endswith("_v4") for name in tables))
+
+    def _downgrade_to_v9(self) -> sqlite3.Connection:
+        """The live database as v9 had it: no unique favorite names."""
+        connection = sqlite3.connect(self.path)
+        connection.executescript(
+            "DROP INDEX favorites_user_name_key_idx; PRAGMA user_version = 9;"
+        )
+        return connection
+
+    def test_v10_upgrade_resolves_duplicate_favorites_without_losing_data(
+        self,
+    ) -> None:
+        insert = """
+            INSERT INTO favorite_foods(
+                favorite_id, user_id, name, name_key, unit, serving_grams,
+                calories_per_100g, protein_per_100g, fat_per_100g, carbs_per_100g,
+                created_at_utc, updated_at_utc
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1)
+        """
+        connection = self._downgrade_to_v9()
+        try:
+            connection.executemany(
+                insert,
+                [
+                    # A double tap: the same values twice.
+                    (1, 1, "Rice", "rice", "100g", None, 250, 10, 20, 30),
+                    (2, 1, "rice", "rice", "100g", None, 250, 10, 20, 30),
+                    # The same name with different values, and a taken suffix.
+                    (3, 1, "Oats", "oats", "100g", None, 370, None, None, None),
+                    (4, 1, "OATS", "oats", "100g", None, 380, None, None, None),
+                    (5, 1, "Oats (2)", "oats (2)", "100g", None, 1, None, None, None),
+                    # The recipe's favorite wins over a newer plain namesake.
+                    (6, 1, "Plov", "plov", "100g", None, 140, None, None, None),
+                    (7, 1, "plov", "plov", "100g", None, 140, None, None, None),
+                    (8, 1, "Bar", "bar", "serving", 50, 200, None, None, None),
+                    # Another owner's namesake is not a duplicate.
+                    (9, 2, "Rice", "rice", "100g", None, 1, None, None, None),
+                ],
+            )
+            connection.execute(
+                """
+                INSERT INTO recipes(recipe_id, user_id, name, name_key, favorite_id,
+                    created_at_utc, updated_at_utc)
+                VALUES (1, 1, 'Plov', 'plov', 6, 1, 1)
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO sessions(user_id, chat_id, state, selected_favorite_id,
+                    revision, updated_at_utc)
+                VALUES (1, 10, 'wait_favorite_grams', 1, 4, 1),
+                       (1, 11, 'wait_favorite_grams', 7, 0, 1)
+                """
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        self.database.initialize()
+
+        def names(user_id: int) -> dict[int, str]:
+            return {
+                item.favorite_id: item.name
+                for item in self.database.page_favorites(user_id, 0, 50).items
+            }
+
+        self.assertEqual(
+            names(1),
+            {
+                2: "rice",
+                3: "Oats (3)",
+                4: "OATS",
+                5: "Oats (2)",
+                6: "Plov",
+                8: "Bar",
+            },
+        )
+        self.assertEqual(names(2), {9: "Rice"})
+        self.assertEqual(370, self.database.get_favorite(1, 3).calories_per_100g)
+        # Workflows that had picked a merged duplicate now hold the survivor,
+        # under a new revision so a stale handler cannot write the old id back.
+        rice_session = self.database.get_session(1, 10)
+        self.assertEqual(2, rice_session.selected_favorite_id)
+        self.assertEqual(5, rice_session.revision)
+        self.assertEqual(6, self.database.get_session(1, 11).selected_favorite_id)
+        with closing(sqlite3.connect(self.path)) as connection, connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT favorite_id FROM recipes WHERE recipe_id = 1"
+                ).fetchone()[0],
+                6,
+            )
+            self.assertEqual(
+                connection.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION
+            )
+            self.assertEqual(
+                connection.execute("PRAGMA foreign_key_check").fetchall(), []
+            )
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    insert, (10, 1, "RICE", "rice", "100g", None, 1) + (None,) * 3
+                )
+
+    def test_concurrent_saves_of_a_new_name_create_one_favorite(self) -> None:
+        workers = 8
+        barrier = threading.Barrier(workers)
+        results: list[tuple[int, bool]] = []
+        errors: list[str] = []
+
+        def save(index: int) -> None:
+            barrier.wait()
+            try:
+                favorite, created = self.database.save_favorite(
+                    1,
+                    "Rice" if index % 2 else "rice",
+                    "100g",
+                    250.0 + index,
+                    10,
+                    20,
+                    30,
+                )
+                results.append((favorite.favorite_id, created))
+            except Exception as exc:  # collected for the assertion message
+                errors.append(repr(exc))
+
+        threads = [threading.Thread(target=save, args=(i,)) for i in range(workers)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len({favorite_id for favorite_id, _ in results}), 1)
+        self.assertEqual([created for _, created in results].count(True), 1)
+        self.assertEqual(len(self.database.page_favorites(1, 0, 50).items), 1)
+
+    def test_every_favorite_save_path_updates_an_existing_name(self) -> None:
+        first = self.database.add_favorite(1, "Rice", 250.0, 10.0, 20.0, 30.0, 1)
+        again = self.database.add_favorite(1, "RICE", 200.0, None, None, None, 2)
+        self.assertEqual(first.favorite_id, again.favorite_id)
+        self.assertEqual(200.0, again.calories_per_100g)
+        self.database.start_session(
+            1,
+            10,
+            SessionState.WAIT_SAVE_FAVORITE,
+            now_utc=3,
+            draft_name="rice",
+            calories_per_100g=180.0,
+        )
+        saved = self.database.save_session_as_favorite(1, 10, 4)
+        self.assertEqual(first.favorite_id, saved.favorite_id)
+        self.assertEqual(180.0, saved.calories_per_100g)
+        self.assertEqual(1, len(self.database.page_favorites(1, 0, 50).items))
 
 
 if __name__ == "__main__":
