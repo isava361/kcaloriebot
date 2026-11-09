@@ -742,24 +742,35 @@ class WebStore(Database):
     def _publish_recipe(self, connection, user_id, recipe_id, name, per_100, now):
         """Keep the recipe's favorite in step, so the bot can log it by weight.
 
-        An unlinked recipe adopts a plain favorite of the same name, as saving
-        a favorite under an existing name does, but never another recipe's.
+        A recipe adopts a plain favorite of its name, as saving a favorite
+        under an existing name does, but never another recipe's. Renamed onto
+        such a favorite, it merges its old favorite into the adopted one, since
+        a name holds one favorite and a rename leaves the old name unused.
         """
         linked = connection.execute(
             "SELECT f.favorite_id FROM recipes r JOIN favorite_foods f ON f.favorite_id=r.favorite_id AND f.user_id=r.user_id WHERE r.recipe_id=?",
             (recipe_id,),
         ).fetchone()
-        if linked is None:
-            linked = connection.execute(
-                "SELECT favorite_id FROM favorite_foods WHERE user_id=? AND name_key=? AND favorite_id NOT IN (SELECT favorite_id FROM recipes WHERE user_id=? AND favorite_id IS NOT NULL) ORDER BY favorite_id DESC LIMIT 1",
-                (user_id, name.casefold(), user_id),
-            ).fetchone()
-        if linked is None:
+        favorite_id = None if linked is None else linked["favorite_id"]
+        namesake = connection.execute(
+            "SELECT favorite_id, EXISTS (SELECT 1 FROM recipes WHERE favorite_id=f.favorite_id AND recipe_id<>?) AS taken FROM favorite_foods f WHERE user_id=? AND name_key=?",
+            (recipe_id, user_id, name.casefold()),
+        ).fetchone()
+        if namesake is not None and namesake["favorite_id"] != favorite_id:
+            if namesake["taken"]:
+                raise ValidationError(
+                    "Это название уже занято избранным другого блюда — назовите блюдо иначе."
+                )
+            if favorite_id is not None:
+                self._merge_favorite(
+                    connection, user_id, favorite_id, namesake["favorite_id"]
+                )
+            favorite_id = namesake["favorite_id"]
+        if favorite_id is None:
             favorite_id = self._insert_favorite(
                 connection, user_id, name, *per_100, now
             )
         else:
-            favorite_id = linked["favorite_id"]
             connection.execute(
                 "UPDATE favorite_foods SET name=?,name_key=?,unit='100g',serving_grams=NULL,calories_per_100g=?,protein_per_100g=?,fat_per_100g=?,carbs_per_100g=?,updated_at_utc=? WHERE user_id=? AND favorite_id=?",
                 (name, name.casefold(), *per_100, now, user_id, favorite_id),

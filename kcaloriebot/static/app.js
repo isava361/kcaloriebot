@@ -44,8 +44,9 @@ async function api(path, method = "GET", data) {
       if (response.status >= 500 && response.status !== 503) throw new Error("Сервер временно недоступен.");
       const result = await response.json();
       if (key && response.status !== 401 && response.status !== 429) { delete pending[signature]; persistPending(); }
+      if (response.status === 401) sessionExpired();
       if (!response.ok) {
-        const error = new Error(result.error || "Не удалось выполнить запрос.");
+        const error = new Error(response.status === 401 ? EXPIRED_MESSAGE : result.error || "Не удалось выполнить запрос.");
         error.status = response.status;
         throw error;
       }
@@ -54,6 +55,42 @@ async function api(path, method = "GET", data) {
       if (error.status || attempt === 2) throw error.status ? error : new Error("Связь прервалась. Повторите отправку: повтор того же запроса не создаст дубль.");
     } finally { clearTimeout(timeout); }
     await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1)));
+  }
+}
+/* Telegram signs initData once per launch and the server accepts it for an hour
+   (it is a bearer credential); the page cannot renew it. Say so, keep drafts. */
+const EXPIRED_MESSAGE = "Сессия истекла. Закройте приложение и откройте его снова из бота — черновики форм сохранятся.";
+let expired = false;
+function sessionExpired() {
+  if (expired) return;
+  expired = true;
+  const form = activeForm();
+  if (form) saveDraft(form);
+  $("notice").hidden = true;
+  $("expired").hidden = false;
+  $("expired-close").hidden = !tg?.close;
+}
+$("expired-close").addEventListener("click", () => {
+  const form = activeForm();
+  if (form) saveDraft(form);
+  tg.close();
+});
+/* The first load has no diary to fall back on, so it offers its own retry. */
+function loadFailed(error) {
+  if (expired) return;
+  if (state) { notice(error.message); return; }
+  $("notice").replaceChildren(node("span", `${error.message} `), action("Повторить", () => {
+    $("notice").textContent = "Загружаем ваш дневник…";
+    return loadDiary().catch(loadFailed);
+  }));
+  $("notice").hidden = false;
+}
+/* A conflict means the diary on screen is out of date: redraw it, then report. */
+async function refreshOnConflict(request) {
+  try { return await request; }
+  catch (error) {
+    if (error.status === 409 || error.status === 404) await loadDiary(desiredDay || state.day).catch(() => {});
+    throw error;
   }
 }
 function notice(text = "") {
@@ -122,7 +159,7 @@ function renderEntry(entry) {
   const controls = node("div", "", "entry-actions");
   if (entry.name) controls.append(action("♡ В избранное", async () => { await api(`entries/${entry.entry_id}/favorite`, "POST", {}); notice("Сохранено в избранное."); }));
   controls.append(action("Удалить", async () => {
-    await api(`entries/${entry.entry_id}`, "DELETE", {version: entry.version});
+    await refreshOnConflict(api(`entries/${entry.entry_id}`, "DELETE", {version: entry.version}));
     const toast = node("div", `Удалено: ${entry.name || "Без названия"}`, "toast");
     toast.append(action("Отменить", async () => {
       await api(`entries/${entry.entry_id}/restore`, "POST", {});
@@ -388,7 +425,11 @@ function localInput(epoch) {
   return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`;
 }
 function currentLocalTime() { return localInput(state.server_now + (performance.now() - receivedAt) / 1000); }
-function defaultTime() { return state.day === currentLocalTime().slice(0, 10) ? currentLocalTime() : `${state.day}T12:00`; }
+/* A diary showing today means "now", even past midnight before it refreshes. */
+function defaultTime() {
+  const now = currentLocalTime();
+  return state.day === now.slice(0, 10) || state.day === state.today ? now : `${state.day}T12:00`;
+}
 function foodUnit() {
   const form = $("food-form");
   const serving = form.elements.unit.value === "serving";
@@ -485,7 +526,8 @@ submit("food-form", async (form) => {
   if (data.unit === "serving") { data.amount = data.grams; delete data.grams; }
   if (data.unit === "serving" && foodTemplate?.nutrition.servings && foodTemplate.nutrition.grams != null) data.serving_grams = foodTemplate.nutrition.grams / foodTemplate.nutrition.servings;
   if (editingEntry) data.version = editingEntry.version;
-  await api(editingEntry ? `entries/${editingEntry.entry_id}` : "entries", editingEntry ? "PATCH" : "POST", data);
+  const request = api(editingEntry ? `entries/${editingEntry.entry_id}` : "entries", editingEntry ? "PATCH" : "POST", data);
+  await (editingEntry ? refreshOnConflict(request) : request);
   $("food-form").reset();
   await added("food-dialog", data.eaten_at.slice(0, 10));
 });
@@ -643,6 +685,14 @@ async function loadStats() {
     }
   } catch (error) { if (generation === statsGeneration) { $("stats-content").replaceChildren(node("p", error.message), action("Повторить", loadStats)); } }
 }
+/* Bars from zero make 80 and 79.2 kg look the same. Scale them to the days
+   shown, with room around the extremes (at least ±0.5 kg, so a single or flat
+   series sits mid-scale instead of filling or emptying the bar). */
+function weightScale(values) {
+  const low = Math.min(...values), high = Math.max(...values);
+  const pad = Math.max(0.5, (high - low) * 0.2);
+  return {from: Math.max(0, Math.floor((low - pad) * 10) / 10), to: Math.ceil((high + pad) * 10) / 10};
+}
 function resetWeight() {
   editingWeight = null;
   const form = $("weight-form"); form.reset();
@@ -686,12 +736,14 @@ async function loadWeights(append = false) {
     weightOffset=result.offset+result.items.length;
     $("weights-more").hidden=!result.has_next;
     $("weight-chart").replaceChildren();
-    const max = Math.max(1, ...result.days.map(day => day.weight_kg));
-    for (const day of result.days) {
-      const row=node("div", `${prettyDay(day.day)} · ${fmt(day.weight_kg)} кг`, "chart-row");
-      const bar=document.createElement("progress");bar.max=max;bar.value=day.weight_kg;bar.setAttribute("aria-label",`${prettyDay(day.day)}: ${fmt(day.weight_kg)} кг`);row.append(bar);$("weight-chart").append(row);
-    }
-    if (!result.days.length) $("weight-chart").textContent="Нет измерений за эти 30 дней.";
+    if (result.days.length) {
+      const scale = weightScale(result.days.map(day => day.weight_kg));
+      $("weight-chart").append(node("p", `Шкала полосок: ${fmt(scale.from)}–${fmt(scale.to)} кг`, "small muted"));
+      for (const day of result.days) {
+        const row=node("div", `${prettyDay(day.day)} · ${fmt(day.weight_kg)} кг`, "chart-row");
+        const bar=document.createElement("progress");bar.max=scale.to-scale.from;bar.value=day.weight_kg-scale.from;bar.setAttribute("aria-label",`${prettyDay(day.day)}: ${fmt(day.weight_kg)} кг`);row.append(bar);$("weight-chart").append(row);
+      }
+    } else $("weight-chart").textContent="Нет измерений за эти 30 дней.";
   } catch (error) { $("weight-status").replaceChildren(node("span",error.message),action("Повторить",()=>loadWeights(append))); }
 }
 submit("weight-form", async form => {
@@ -1132,5 +1184,23 @@ applyTheme();
 resizeViewport();
 tg?.ready();
 tg?.expand();
+/* Back from the background, the day may have changed and the bot may have
+   edited the diary. A diary left on today follows the clock; a chosen past day
+   stays. An expired session shows its notice here instead of on the next tap. */
+// visibilitychange and "activated" can both report one return. Wall-clock time:
+// a suspended WebView may not advance performance.now().
+let resumedAt = -Infinity;
+async function refreshAfterPause() {
+  if (document.hidden || expired || !tg?.initData || Date.now() - resumedAt < 2000) return;
+  resumedAt = Date.now();
+  try {
+    if (!state) { await loadDiary(); return; }
+    const day = desiredDay || state.day;
+    await loadDiary(state.needs_timezone || day === state.today ? "" : day);
+    document.querySelectorAll("dialog[open] input[type=datetime-local]").forEach(input => { if (input.max) input.max = currentLocalTime(); });
+  } catch (error) { loadFailed(error); }
+}
+document.addEventListener("visibilitychange", refreshAfterPause);
+if (tg?.initData) tg.onEvent?.("activated", refreshAfterPause);
 if (!tg?.initData) notice("Откройте дневник кнопкой в Telegram-боте: команда /app.");
-else loadDiary().catch((error) => notice(error.message));
+else loadDiary().catch(loadFailed);
