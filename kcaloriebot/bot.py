@@ -33,10 +33,17 @@ from .database import Database
 from .health import HealthStore
 from .photo_ai import (
     MAX_IMAGE_BYTES,
+    MAX_IMAGES_PER_REQUEST,
+    MAX_OWNER_FAVORITES,
+    MAX_OWNER_RECENT,
+    MAX_REQUEST_IMAGE_BYTES,
     SUPPORTED_MEDIA_TYPES,
+    OwnerFood,
     PhotoAnalyzer,
+    PhotoImage,
     PhotoUnavailable,
     build_analyzer,
+    owner_foods_from,
 )
 from .photo_proposals import (
     CANCELLED,
@@ -45,6 +52,7 @@ from .photo_proposals import (
     PhotoProposal,
     PhotoProposalStore,
     has_proposal_buttons,
+    missing_weight_alert,
     proposal_keyboard,
     proposal_text,
     saved_keyboard,
@@ -2255,7 +2263,24 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             "Фото больше 5 МБ — отправьте его сжатым.", reply_markup=MAIN_KEYBOARD
         )
         return
-    status = await message.reply_text("Распознаю фото…")
+    part = _PhotoPart(message, attachment, media_type)
+    group = getattr(message, "media_group_id", None)
+    albums = _photo_albums(context.application)
+    album_key = (turn.chat_id, str(group))
+    album = albums.get(album_key) if group is not None else None
+    if album is not None:
+        await _join_album(album, part)
+        return
+    if group is not None:
+        # Register before the first await so the rest of the album joins it.
+        album = _PendingAlbum([part], attachment.file_size or 0, asyncio.Event())
+        albums[album_key] = album
+    try:
+        status = await message.reply_text("Распознаю фото…")
+    except BaseException:
+        if album is not None:
+            albums.pop(album_key, None)
+        raise
     message_date = getattr(message, "date", None)
     event_epoch = (
         int(message_date.timestamp())
@@ -2268,13 +2293,13 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         _propose_from_photo(
             _photo_store(context.application),
             analyzer,
-            message,
-            attachment,
-            media_type,
+            database,
+            [part] if album is None else album.parts,
             status,
             turn.user_id,
             turn.chat_id,
             event_epoch,
+            None if album is None else (albums, album_key, album),
         ),
         name=f"photo-{message.message_id}",
     )
@@ -2291,8 +2316,18 @@ PHOTO_CORRECTION_FAILED_TEXT = (
     "Не удалось учесть исправление — попробуйте ещё раз. Предложение не изменилось."
 )
 PHOTO_BUSY_TEXT = "Пересчитываю с учётом исправления — подождите."
+PHOTO_ALBUM_FULL_TEXT = (
+    "Это фото не поместилось в общий запрос альбома — отправьте его отдельно."
+)
 # How long a restart waits for interrupted analyses to tell the owner.
 PHOTO_SHUTDOWN_GRACE_SECONDS = 10.0
+# Telegram delivers an album as separate messages sharing a media_group_id,
+# with no marker for the last one. A client sends them in one burst, so the
+# album counts as complete once no new photo arrived for ALBUM_QUIET_SECONDS;
+# the analysis starts after ALBUM_MAX_WAIT_SECONDS at the latest. A photo
+# outside an album is analyzed at once.
+ALBUM_QUIET_SECONDS = 1.5
+ALBUM_MAX_WAIT_SECONDS = 6.0
 # Text sent by reply-keyboard buttons is never a correction, even when the
 # owner taps a button while replying to a proposal.
 _REPLY_KEYBOARD_LABELS = frozenset(
@@ -2318,6 +2353,100 @@ _REPLY_KEYBOARD_LABELS = frozenset(
 
 def _photo_store(application: Any) -> PhotoProposalStore:
     return application.bot_data.setdefault("photo_proposals", PhotoProposalStore())
+
+
+@dataclass
+class _PhotoPart:
+    message: Any
+    attachment: Any
+    media_type: str
+
+
+@dataclass
+class _PendingAlbum:
+    """Photos of one album, collected while more of them may still arrive."""
+
+    parts: list[_PhotoPart]
+    total_bytes: int
+    arrived: asyncio.Event
+
+
+_AlbumSlot = tuple[dict[tuple[int, str], _PendingAlbum], tuple[int, str], _PendingAlbum]
+
+
+def _photo_albums(application: Any) -> dict[tuple[int, str], _PendingAlbum]:
+    return application.bot_data.setdefault("photo_albums", {})
+
+
+async def _join_album(album: _PendingAlbum, part: _PhotoPart) -> None:
+    size = part.attachment.file_size or 0
+    if (
+        len(album.parts) >= MAX_IMAGES_PER_REQUEST
+        or album.total_bytes + size > MAX_REQUEST_IMAGE_BYTES
+    ):
+        await part.message.reply_text(PHOTO_ALBUM_FULL_TEXT, reply_markup=MAIN_KEYBOARD)
+        return
+    album.parts.append(part)
+    album.total_bytes += size
+    album.arrived.set()
+
+
+async def _collect_album(slot: _AlbumSlot) -> None:
+    """Wait until the album stops growing, then close it to newcomers."""
+    albums, key, album = slot
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + ALBUM_MAX_WAIT_SECONDS
+    try:
+        while (remaining := deadline - loop.time()) > 0:
+            album.arrived.clear()
+            try:
+                await asyncio.wait_for(
+                    album.arrived.wait(), min(ALBUM_QUIET_SECONDS, remaining)
+                )
+            except asyncio.TimeoutError:
+                break
+    finally:
+        # A photo of this album arriving later starts its own analysis.
+        if albums.get(key) is album:
+            del albums[key]
+
+
+async def _owner_foods(database: Database, user_id: int) -> tuple[OwnerFood, ...]:
+    """The owner's favorites and recent foods; a failure only loses the hint."""
+    try:
+        favorites = await _call(
+            database.page_favorites, user_id, 0, MAX_OWNER_FAVORITES
+        )
+        recent = await _call(database.recent_entry_templates, user_id, MAX_OWNER_RECENT)
+    except Exception:
+        logger.warning("Owner foods could not be loaded", exc_info=True)
+        return ()
+    return owner_foods_from(favorites.items, recent)
+
+
+def _album_caption(parts: list[_PhotoPart]) -> Optional[str]:
+    """The caption, which Telegram attaches to any one photo of an album."""
+    captions = [
+        caption.strip()
+        for part in parts
+        if isinstance(caption := getattr(part.message, "caption", None), str)
+        and caption.strip()
+    ]
+    return "\n".join(captions) or None
+
+
+async def _download_images(parts: list[_PhotoPart]) -> tuple[PhotoImage, ...]:
+    images: list[PhotoImage] = []
+    total = 0
+    for part in parts:
+        telegram_file = await part.attachment.get_file()
+        data = bytes(await telegram_file.download_as_bytearray())
+        if images and total + len(data) > MAX_REQUEST_IMAGE_BYTES:
+            logger.warning("Album photo skipped: the request would be too large")
+            continue
+        total += len(data)
+        images.append(PhotoImage(data, part.media_type))
+    return tuple(images)
 
 
 def _start_photo_task(application: Any, coroutine: Any, name: str) -> asyncio.Task:
@@ -2402,20 +2531,28 @@ async def _show_proposal(
 async def _propose_from_photo(
     store: PhotoProposalStore,
     analyzer: PhotoAnalyzer,
-    message: Any,
-    attachment: Any,
-    media_type: str,
+    database: Database,
+    parts: list[_PhotoPart],
     status: Any,
     user_id: int,
     chat_id: int,
     event_epoch: int,
+    album: Optional[_AlbumSlot] = None,
 ) -> None:
-    """Background task: analyze a photo and show the result for confirmation."""
+    """Background task: analyze a photo or an album and show the result.
+
+    For an album, ``parts`` keeps growing until _collect_album returns.
+    """
+    message = parts[0].message
     try:
         try:
-            telegram_file = await attachment.get_file()
-            image = bytes(await telegram_file.download_as_bytearray())
-            analysis = await analyzer.analyze(image, media_type, message.caption)
+            if album is not None:
+                await _collect_album(album)
+            parts = sorted(parts, key=lambda part: part.message.message_id)
+            images = await _download_images(parts)
+            caption = _album_caption(parts)
+            owner_foods = await _owner_foods(database, user_id)
+            analysis = await analyzer.analyze(images, caption, owner_foods=owner_foods)
         except (TelegramError, PhotoUnavailable):
             logger.warning("Photo analysis failed user_id=%s", user_id, exc_info=True)
             await _photo_report(status, message, PHOTO_FAILED_TEXT)
@@ -2428,15 +2565,17 @@ async def _propose_from_photo(
                 MAIN_KEYBOARD,
             )
             return
+        photo_ids = frozenset(part.message.message_id for part in parts)
         proposal = PhotoProposal(
-            key=message.message_id,
+            key=min(photo_ids),
             user_id=user_id,
             chat_id=chat_id,
-            image=image,
-            media_type=media_type,
-            caption=message.caption,
+            images=images,
+            caption=caption,
             eaten_at_utc=event_epoch,
             analysis=analysis,
+            owner_foods=owner_foods,
+            photo_ids=photo_ids,
         )
         await _show_proposal(store, proposal, status, message)
     except asyncio.CancelledError:
@@ -2458,9 +2597,9 @@ async def _revise_photo_proposal(
     try:
         try:
             analysis = await analyzer.analyze(
-                proposal.image or b"",
-                proposal.media_type,
+                proposal.images,
                 proposal.caption,
+                owner_foods=proposal.owner_foods,
                 previous=proposal.analysis,
                 corrections=tuple(proposal.corrections),
             )
@@ -2596,6 +2735,11 @@ async def handle_photo_callback(
         proposal.close(CANCELLED)
         await query.answer()
         await query.edit_message_text("Отменено — ничего не записано.")
+        return
+    missing = proposal.analysis.missing_weight
+    if missing:
+        # Saving the rest would quietly leave out a food the owner ate.
+        await query.answer(missing_weight_alert(missing), show_alert=True)
         return
     # Close before the first await so a double tap cannot log twice.
     proposal.close(SAVED)
