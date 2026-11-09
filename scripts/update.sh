@@ -99,7 +99,13 @@ on_error() {
         stop_services || warn "Could not stop all services; inspect systemd."
         warn "ROLLBACK FAILED — manual recovery needed."
         warn "Database backup: ${BACKUP_PATH:-none}"
-        warn "Restore it with:"
+        if [ "$BACKUP_VALID" -eq 1 ]; then
+            [ "$DB_CHANGED" -eq 1 ] || warn "The migration never ran; the live database should still match this backup."
+            warn "Restore it with (services stay stopped; copy the live DB first if it holds writes you need):"
+            warn "  test \"\$(sudo -u $RUN_AS sqlite3 '$BACKUP_PATH' 'PRAGMA integrity_check;')\" = ok && sudo -u $RUN_AS sqlite3 '$DB_PATH' \".restore '$BACKUP_PATH'\" && test \"\$(sudo -u $RUN_AS sqlite3 '$DB_PATH' 'PRAGMA integrity_check;')\" = ok && echo restored"
+        else
+            warn "No verified backup was taken, so the update never migrated the database; do not restore that file."
+        fi
         warn "Keep $SERVICE and $WEB_SERVICE stopped until code, dependencies and DB are restored."
         warn "Previous commit: $OLD_COMMIT"
     fi
