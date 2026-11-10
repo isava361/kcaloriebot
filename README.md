@@ -560,7 +560,9 @@ work as usual.
 `Записать` logs every food (and the weight) at the time the photo was sent and
 replaces the proposal with one summary: what was saved, today's progress, and
 for each entry a button that opens it for editing plus an `Убрать` (undo)
-button. Pending proposals are kept in memory only, for up to 24 hours (at most
+button. `Убрать` deletes that one entry and keeps the summary with the rest; it
+works for 15 minutes, like `Undo` on a receipt, and survives a restart. Pending
+proposals are kept in memory only, for up to 24 hours (at most
 20 at a time, holding at most 100 MB of photos); after a restart or once
 expired, their buttons and replies answer that the photo (or description)
 should be sent again.

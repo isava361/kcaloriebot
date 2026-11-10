@@ -56,6 +56,7 @@ from .photo_proposals import (
     missing_weight_alert,
     proposal_keyboard,
     proposal_text,
+    saved_items,
     saved_keyboard,
     saved_text,
 )
@@ -2445,6 +2446,10 @@ TEXT_REPLY_IGNORED_TEXT = (
 PHOTO_CORRECTION_FAILED_TEXT = (
     "Не удалось учесть исправление — попробуйте ещё раз. Предложение не изменилось."
 )
+PHOTO_REMOVE_EXPIRED_TEXT = (
+    "Убрать отсюда можно в течение 15 минут. Откройте запись кнопкой слева — "
+    "там её можно удалить."
+)
 PHOTO_BUSY_TEXT = "Пересчитываю с учётом исправления — подождите."
 PHOTO_ALBUM_FULL_TEXT = (
     "Это фото не поместилось в общий запрос альбома — отправьте его отдельно."
@@ -2993,7 +2998,7 @@ async def _handle_photo_correction(
 async def handle_photo_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Save («Записать») or discard («Отмена») a photo proposal."""
+    """Save («Записать») or discard («Отмена») a proposal, or remove a saved item."""
     query = update.callback_query
     if query is None or not await _require_private(update):
         return
@@ -3002,6 +3007,9 @@ async def handle_photo_callback(
         await _answer(query)
         return
     user_id, chat_id = _identity(update)
+    if action is not None and action.kind in {"photo_drop", "photo_unweigh"}:
+        await _remove_saved_item(query, _db(context), user_id, action)
+        return
     proposal = (
         _photo_store(context.application).get(action.record_id, user_id, chat_id)
         if action is not None
@@ -3058,13 +3066,64 @@ async def handle_photo_callback(
         if analysis.weight_kg is not None
         else None
     )
+    await _show_saved(query, database, user_id, entries, weight, database.now_epoch())
+
+
+async def _show_saved(
+    query: Any,
+    database: Database,
+    user_id: int,
+    entries: list[FoodEntry],
+    weight: Optional[WeightRecord],
+    issued_at: int,
+) -> None:
+    """Show what a confirmed proposal put in the diary, with today's progress."""
     progress = [await _today_progress(database, user_id)] if entries else []
     if weight is not None:
         progress.append(await _weight_summary(database, user_id) or "")
     await _edit(
         query,
         saved_text(entries, weight, "\n".join(line for line in progress if line)),
-        reply_markup=saved_keyboard(entries, weight, database.now_epoch()),
+        reply_markup=saved_keyboard(entries, weight, issued_at),
+    )
+
+
+async def _remove_saved_item(
+    query: Any, database: Database, user_id: int, action: CallbackAction
+) -> None:
+    """«Убрать» in a saved summary: delete one item, keep the rest in view."""
+    assert action.record_id is not None
+    if action.kind == "photo_drop":
+        if confirmation_expired(action, database.now_epoch()):
+            # Same window as Undo on a receipt; later the entry is deleted
+            # from its own card, where the deletion is confirmed.
+            await _answer(query, PHOTO_REMOVE_EXPIRED_TEXT, show_alert=True)
+            return
+        delete = database.delete_entry
+    else:
+        delete = database.delete_weight
+    try:
+        await _call(delete, user_id, action.record_id)
+    except NotFound:
+        # A repeated tap, or it was deleted elsewhere: it is gone either way.
+        pass
+    await _answer(query)
+    entry_ids, weight_id, issued_at = saved_items(query.message)
+    entries = [
+        entry
+        for entry_id in entry_ids
+        if (entry := await _call(database.get_entry, user_id, entry_id)) is not None
+    ]
+    weight = (
+        await _call(database.get_weight, user_id, weight_id)
+        if weight_id is not None
+        else None
+    )
+    if not entries and weight is None:
+        await _edit(query, "Всё убрано — в дневнике от этой записи ничего не осталось.")
+        return
+    await _show_saved(
+        query, database, user_id, entries, weight, issued_at or database.now_epoch()
     )
 
 

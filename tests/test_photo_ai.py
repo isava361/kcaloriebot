@@ -27,7 +27,6 @@ from kcaloriebot.bot import (
     TEXT_RESTART_TEXT,
     TEXT_TOO_LONG_TEXT,
     _stop_photo_tasks,
-    handle_callback,
     handle_photo,
     handle_photo_callback,
     handle_text,
@@ -448,11 +447,78 @@ class HandlePhotoTests(unittest.IsolatedAsyncioTestCase):
         callbacks = keyboard_callbacks(markup)
         for entry in entries:
             self.assertIn(f"entry:view:{entry.entry_id}:0", callbacks)
-        undo = next(data for data in callbacks if data.startswith("entry:undo:"))
+        drops = [data for data in callbacks if data.startswith("photo:drop:")]
+        self.assertEqual(2, len(drops))
 
-        # The summary reuses the diary's undo action.
-        await handle_callback(tap(undo, SentMessage(summary, markup)), self.context)
-        self.assertEqual(1, len(self.entries()))
+        # «Убрать» deletes one entry and keeps the summary with the other one.
+        shown = SentMessage(summary, markup)
+        removed_id = int(drops[0].split(":")[2])
+        drop = tap(drops[0], shown)
+        await handle_photo_callback(drop, self.context)
+        (kept,) = self.entries()
+        self.assertNotEqual(removed_id, kept.entry_id)
+        text, kept_markup = drop.callback_query.edits[-1]
+        self.assertIn("Записано в дневник — 220 ккал:", text)
+        self.assertIn(f"• {kept.name} — ", text)
+        self.assertEqual(1, text.count("• "))
+        self.assertIn("Today:", text)
+        self.assertEqual(
+            [f"entry:view:{kept.entry_id}:0", drops[1]],
+            keyboard_callbacks(kept_markup),
+        )
+
+        # A repeated tap on the stale button changes nothing; a restart (no
+        # proposal in memory) does not matter, the buttons carry the list.
+        self.context.application.bot_data.pop("photo_proposals")
+        again = tap(drops[0], shown)
+        await handle_photo_callback(again, self.context)
+        self.assertEqual([kept], self.entries())
+        self.assertEqual(
+            kept_markup.to_dict(), again.callback_query.edits[-1][1].to_dict()
+        )
+
+        # Removing the last one leaves a plain note, no dead buttons.
+        last = tap(drops[1], SentMessage(text, kept_markup))
+        await handle_photo_callback(last, self.context)
+        self.assertEqual([], self.entries())
+        self.assertEqual(
+            [("Всё убрано — в дневнике от этой записи ничего не осталось.", None)],
+            last.callback_query.edits,
+        )
+
+    async def test_remove_from_summary_expires_like_undo_and_handles_weight(
+        self,
+    ) -> None:
+        self.analyzer.result = PhotoAnalysis(
+            (FoodGuess("Гречка", 200, 110, 4, 1, 21),), 81.4, ""
+        )
+        update, proposal = await self.propose()
+        save = tap(f"photo:save:{update.effective_message.message_id}", proposal)
+        await handle_photo_callback(save, self.context)
+        summary, markup = save.callback_query.edits[-1]
+        (entry,) = self.entries()
+        record = self.database.latest_weight(ADMIN_USER_ID)
+
+        # The scale reading goes, the food stays listed.
+        unweigh = tap(f"photo:unweigh:{record.weight_id}", SentMessage(summary, markup))
+        await handle_photo_callback(unweigh, self.context)
+        self.assertIsNone(self.database.latest_weight(ADMIN_USER_ID))
+        text, rest = unweigh.callback_query.edits[-1]
+        self.assertNotIn("Вес записан", text)
+        self.assertIn("• Гречка", text)
+        self.assertNotIn(f"photo:unweigh:{record.weight_id}", keyboard_callbacks(rest))
+
+        # Past the undo window the entry is not deleted from here.
+        stale = tap(
+            f"photo:drop:{entry.entry_id}:{self.database.now_epoch() - 901}",
+            SentMessage(text, rest),
+        )
+        await handle_photo_callback(stale, self.context)
+        self.assertEqual([entry], self.entries())
+        self.assertEqual([], stale.callback_query.edits)
+        (((alert,), options),) = stale.callback_query.answers
+        self.assertIn("15 минут", alert)
+        self.assertEqual({"show_alert": True}, options)
 
     async def test_cancel_logs_nothing(self) -> None:
         update, proposal = await self.propose()
@@ -624,7 +690,7 @@ class HandlePhotoTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(81.4, record.weight_kg)
         summary, markup = save.callback_query.edits[-1]
         self.assertIn("Вес записан: 81.4 кг", summary)
-        self.assertIn(f"weight:undo:{record.weight_id}", keyboard_callbacks(markup))
+        self.assertIn(f"photo:unweigh:{record.weight_id}", keyboard_callbacks(markup))
 
     async def test_analysis_failure_is_reported_from_the_background_task(
         self,

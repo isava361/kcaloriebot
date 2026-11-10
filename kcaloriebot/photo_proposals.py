@@ -156,7 +156,9 @@ def has_proposal_buttons(message: Any) -> bool:
     markup = getattr(message, "reply_markup", None)
     rows = getattr(markup, "inline_keyboard", None) or ()
     return any(
-        str(getattr(button, "callback_data", "") or "").startswith("photo:")
+        str(getattr(button, "callback_data", "") or "").startswith(
+            ("photo:save:", "photo:cancel:")
+        )
         for row in rows
         for button in row
     )
@@ -303,7 +305,12 @@ def saved_text(
 def saved_keyboard(
     entries: Iterable[FoodEntry], weight: Optional[WeightRecord], issued_at: int
 ) -> InlineKeyboardMarkup:
-    """Open (to edit) or undo each saved item with the existing diary callbacks."""
+    """Open each saved item (to edit it) or remove it.
+
+    «Убрать» deletes one item and keeps the summary with the rest; the rows
+    themselves record what the summary holds (see saved_items), so this keeps
+    working after a restart has dropped the in-memory proposal.
+    """
     rows = [
         [
             InlineKeyboardButton(
@@ -312,7 +319,7 @@ def saved_keyboard(
             ),
             InlineKeyboardButton(
                 "Убрать",
-                callback_data=f"entry:undo:{entry.entry_id}:{issued_at}",
+                callback_data=f"photo:drop:{entry.entry_id}:{issued_at}",
             ),
         ]
         for entry in entries
@@ -325,8 +332,31 @@ def saved_keyboard(
                     callback_data=f"weight:view:{weight.weight_id}",
                 ),
                 InlineKeyboardButton(
-                    "Убрать", callback_data=f"weight:undo:{weight.weight_id}"
+                    "Убрать", callback_data=f"photo:unweigh:{weight.weight_id}"
                 ),
             ]
         )
     return InlineKeyboardMarkup(rows)
+
+
+def saved_items(message: Any) -> tuple[list[int], Optional[int], Optional[int]]:
+    """What a saved summary lists, read back from its «Убрать» buttons.
+
+    Returns the entry ids in order, the weight id, and the time the summary
+    was issued (None when it lists no entries).
+    """
+    markup = getattr(message, "reply_markup", None)
+    entry_ids: list[int] = []
+    weight_id: Optional[int] = None
+    issued_at: Optional[int] = None
+    for row in getattr(markup, "inline_keyboard", None) or ():
+        for button in row:
+            parts = str(getattr(button, "callback_data", "") or "").split(":")
+            if parts[:2] == ["photo", "drop"] and len(parts) == 4:
+                if parts[2].isdigit() and parts[3].isdigit():
+                    entry_ids.append(int(parts[2]))
+                    issued_at = int(parts[3])
+            elif parts[:2] == ["photo", "unweigh"] and len(parts) == 3:
+                if parts[2].isdigit():
+                    weight_id = int(parts[2])
+    return entry_ids, weight_id, issued_at
