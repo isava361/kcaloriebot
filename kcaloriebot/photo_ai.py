@@ -1,4 +1,8 @@
-"""Recognize food (and body-weight scale readings) in photos with Claude."""
+"""Recognize food (and body-weight scale readings) in photos with Claude.
+
+The same request handles a meal the owner describes in a text message: it is
+sent with no images, as the description to record.
+"""
 
 from __future__ import annotations
 
@@ -47,8 +51,10 @@ RECORD_TOOL_NAME = "record_foods"
 # come out too low more often than too high. The model reports its honest best
 # estimate and a plausible range; the bot logs this share of the way from the
 # best estimate up to the top of the range (0 = the best estimate, 1 = the top).
-# Only weights judged by eye are adjusted; a weight from a package, the owner
-# or a saved food, and every nutrition value, are logged as reported.
+# Only estimated weights are adjusted: judged by eye from a photo, or a typical
+# portion assumed for food the owner named without a weight, which errs low
+# for the same reason. A weight from a package, the owner or a saved food, and
+# every nutrition value, are logged as reported.
 EYE_ESTIMATE_UPWARD_SHARE = 0.5
 # A range topping out above this multiple of the best estimate says the model
 # had no real idea; the excess is ignored rather than inflating the entry.
@@ -96,13 +102,14 @@ MAX_QUESTION_CHARS = 300
 
 SYSTEM_PROMPT = """\
 You help the owner of a personal calorie diary log what he eats. He sends one \
-or more photos, sometimes with a caption; photos sent together show the same \
-meal, for example a dish and the label of its package. You record what they \
-show by calling the record_foods tool exactly once.
+or more photos, sometimes with a caption, or describes in a message what he \
+ate. Photos sent together show the same meal, for example a dish and the \
+label of its package. You record what he ate by calling the record_foods \
+tool exactly once.
 
 The bot shows your record to the owner as a proposal. He checks it, may reply \
 with a correction or an answer to your question, and only then saves it to \
-the diary. So the record should be your honest best reading of the photos, \
+the diary. So the record should be your honest best reading of what he sent, \
 and it should make clear which numbers he can trust and which are guesses \
 worth checking.
 
@@ -113,44 +120,49 @@ short and in Russian, e.g. "Гречка отварная", "Куриная гр
 Nutrition is per 100 g of the food as eaten, including the cooking oil, \
 butter and sauce it was made or served with; convert per-serving or per-item \
 figures to per 100 g. If a body-weight scale display is in a photo, put the \
-reading in weight_kg, otherwise 0. If there is nothing to log, record an \
-empty foods list.
+reading in weight_kg, otherwise 0. If there is nothing to log (a message \
+that names no food or drink, such as a thank-you or a question), record an \
+empty foods list and say why in a few words in comment.
 
 Sources. For every item, say where its nutrition and its weight came from; \
-the owner uses this to decide what to double-check, and the bot treats eye \
-estimates differently. nutrition_source is "label" (a nutrition table in a \
-photo), "manufacturer" (the maker's or restaurant's published figures, \
-including what web_search found), "owner" (the caption or his reply), \
-"saved" (one of his own foods listed in the message) or "estimate" (typical \
-values you know). grams_source is "package" (net weight printed on the \
-package), "owner", "saved" (a clear number of servings of a saved food), \
-"estimate" (judged by eye) or "unknown". The \
-owner's words come first, then a visible label, then his saved foods, then \
-manufacturer data, then your own estimate. When a photo or the caption \
-clearly shows one of his saved foods, use its listed values exactly and put \
-its number in saved_food; otherwise saved_food is 0. A saved food listed per \
+the owner uses this to decide what to double-check, and the bot treats \
+estimated weights differently. nutrition_source is "label" (a nutrition \
+table in a photo), "manufacturer" (the maker's or restaurant's published \
+figures, including what web_search found), "owner" (figures he wrote in the \
+caption, his message or a reply), "saved" (one of his own foods listed in \
+the message) or "estimate" (typical values you know). grams_source is \
+"package" (net weight printed on the package), "owner" (a weight he wrote), \
+"saved" (a clear number of servings of a saved food), "estimate" (judged by \
+eye from a photo, or a typical portion you assume for food he named without \
+a weight) or "unknown". A count he gives ("два куска хлеба") is his, but the \
+weight of one piece is your estimate. The owner's words come first, then a \
+visible label, then his saved foods, then manufacturer data, then your own \
+estimate. When his photos or words clearly show one of his saved foods, use \
+its listed values exactly and put its number in saved_food; otherwise \
+saved_food is 0. A saved food listed per \
 serving with no serving weight still needs grams and per-100 g values: \
 estimate the weight of one serving and convert, so the calories per serving \
 stay as listed. Label and manufacturer figures are exact; do not adjust them \
 or call them approximate.
 
 Weight. When you judge the weight by eye from plates, cutlery, hands and \
-packaging, give your honest best estimate in grams and the plausible range \
-around it in grams_low and grams_high; do not skew the estimate up or down, \
-the bot does its own adjustment. For any other grams_source, set grams_low \
+packaging, or assume a typical portion ("тарелка борща", "круассан"), give \
+your honest best estimate in grams and the plausible range around it in \
+grams_low and grams_high; do not skew the estimate up or down, the bot does \
+its own adjustment. For any other grams_source, set grams_low \
 and grams_high equal to grams. When the nutrition is known but nothing shows \
 how much was eaten (only a label in frame, say), set grams_source to \
 "unknown" and the three weight fields to 0 instead of inventing a weight; the \
 bot will ask the owner.
 
-Questions. If something you cannot see would change the calories a lot \
-(whether food was fried in oil, whether a multi-serving package was eaten \
-whole or only partly, what a dish is made of), ask the owner about it in \
-question: one short question in Russian. Still record your best guess for \
-it, so he can save without answering. Ask at most one question, and leave \
-question empty when the remaining uncertainty is minor. A single-serving \
-package (a bar, a yogurt, a can of a drink) is eaten whole unless the caption \
-says otherwise.
+Questions. If something neither the photos nor his words show would change \
+the calories a lot (whether food was fried in oil, whether a multi-serving \
+package was eaten whole or only partly, what a dish is made of), ask the \
+owner about it in question: one short question in Russian. Still record your \
+best guess for it, so he can save without answering. Ask at most one \
+question, and leave question empty when the remaining uncertainty is minor. \
+A single-serving package (a bar, a yogurt, a can of a drink) is eaten whole \
+unless he says otherwise.
 
 Searching. Use web_search only for a specific branded or packaged product, or \
 a dish from a named restaurant or chain, whose nutrition you do not know and \
@@ -160,7 +172,7 @@ those.
 
 comment: one or two short Russian sentences on what you recorded and where \
 the main numbers come from ("по этикетке", "по данным производителя", \
-"оценка по фото"). Do not repeat the question there.
+"оценка по фото", "типичная порция"). Do not repeat the question there.
 """
 
 _FOOD_PROPERTIES: dict[str, Any] = {
@@ -218,7 +230,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": RECORD_TOOL_NAME,
-        "description": "Record the foods (and scale reading) found in the photos.",
+        "description": "Record the foods he ate (and a scale reading in a photo).",
         "strict": True,
         "input_schema": RECORD_SCHEMA,
     },
@@ -423,8 +435,8 @@ def owner_foods_from(
 def owner_foods_text(foods: Sequence[OwnerFood]) -> str:
     lines = [
         "The owner's saved and recently logged foods, with his own nutrition "
-        "figures. Use them when a photo or the caption clearly shows one, and "
-        "put its number in saved_food:"
+        "figures. Use one when his photos or words clearly show it, and put "
+        "its number in saved_food:"
     ]
     lines.extend(owner_food_line(number, food) for number, food in enumerate(foods, 1))
     return "\n".join(lines)
@@ -583,7 +595,7 @@ def _previous_food(food: FoodGuess) -> str:
 
 def correction_text(previous: PhotoAnalysis, corrections: Sequence[str]) -> str:
     """Ask for the previous answer again with the owner's replies applied."""
-    lines = ["Your previous answer for these photos:"]
+    lines = ["Your previous answer:"]
     # Eye estimates are shown as reported, before the bot's adjustment, so a
     # second round does not adjust them twice.
     lines.extend(_previous_food(food) for food in previous.foods)
@@ -596,8 +608,8 @@ def correction_text(previous: PhotoAnalysis, corrections: Sequence[str]) -> str:
     lines.append("The owner replied (corrections, or answers to your question):")
     lines.extend(f"- {correction}" for correction in corrections)
     lines.append(
-        "Record the corrected result. Trust his replies over the caption and "
-        "your visual estimate (a weight or nutrition he states has source "
+        "Record the corrected result. Trust his replies over what he sent first "
+        "and over your own estimates (a weight or nutrition he states has source "
         '"owner"), keep everything they do not mention as before, and ask a new '
         "question only if something that matters is still unclear."
     )
@@ -632,6 +644,11 @@ class PhotoAnalyzer:
         previous: Optional[PhotoAnalysis] = None,
         corrections: Sequence[str] = (),
     ) -> PhotoAnalysis:
+        """Analyze photos with an optional caption, or, with no images, the
+        owner's text description of a meal (passed as ``caption``)."""
+        words = caption.strip() if caption else ""
+        if not images and not words:
+            raise ValueError("Nothing to analyze: no images and no description")
         content: list[dict[str, Any]] = []
         # The owner's foods change rarely, so they go before the images.
         if owner_foods:
@@ -640,14 +657,13 @@ class PhotoAnalyzer:
             if len(images) > 1:
                 content.append({"type": "text", "text": f"Image {number}:"})
             content.append(_image_block(image))
-        content.append(
-            {
-                "type": "text",
-                "text": f"Caption: {caption.strip()}"
-                if caption and caption.strip()
-                else "No caption.",
-            }
-        )
+        if not images:
+            request = f"No photos. The owner's message: {words}"
+        elif words:
+            request = f"Caption: {words}"
+        else:
+            request = "No caption."
+        content.append({"type": "text", "text": request})
         if previous is not None and corrections:
             content.append(
                 {"type": "text", "text": correction_text(previous, corrections)}

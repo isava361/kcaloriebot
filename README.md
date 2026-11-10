@@ -338,7 +338,9 @@ serving weight in grams, for example `oatmeal 370 60` or
 optional and may fix the value order; without units the first number is
 calories and the second is grams. Optional macro tokens add protein, fat, and
 carbs per 100g: `bread 250 150 p8 f3 c47` (or `б`/`ж`/`у`). The `/add` command
-accepts the same format.
+accepts the same format. The bot owner can also describe a meal in plain words
+when photo recognition is configured; see
+[Logging food from a text description](#logging-food-from-a-text-description).
 
 Every saved entry replies with a receipt: the food, amount, calories, macros,
 the entry time, and today's progress, together with inline `Undo` (deletes the
@@ -418,8 +420,46 @@ replaces the proposal with one summary: what was saved, today's progress, and
 for each entry a button that opens it for editing plus an `Убрать` (undo)
 button. Pending proposals are kept in memory only, for up to 24 hours (at most
 20 at a time, holding at most 100 MB of photos); after a restart or once
-expired, their buttons and replies answer that the photo should be sent again.
+expired, their buttons and replies answer that the photo (or description)
+should be sent again.
 A restart also interrupts running analyses, and the bot says so in the chat.
+
+### Logging food from a text description
+
+With the same setup, the owner can simply write what he ate — «съел борщ и два
+куска хлеба», «кофе с молоком и круассан», «творог 5% 200 г» — and gets the
+same kind of proposal as for a photo: the bot answers «Считаю калории…», Claude
+reads the message (with the owner's saved and recent foods, and web search for
+branded products) and the bot replies to it with one proposal and the
+`Записать` / `Отмена` buttons. Corrections and answers work the same way, by
+replying to the proposal or to the original message; Claude then reads the
+same description again with all replies so far. `Записать` logs the entries
+at the time the message was sent; a time named in the text («на завтрак»,
+«вчера вечером») is not used yet.
+
+What the owner states (a weight, his own calories) is taken as given. A
+portion he did not weigh («тарелка борща», «два куска хлеба») is Claude's
+estimate of a typical portion, with a plausible range, shown as «на глаз» and
+adjusted upwards like a weight judged by eye from a photo: assumed portions err
+low for the same reason.
+
+A message goes to Claude only when nothing else claims it: menu buttons,
+commands, an active input prompt, replies to a proposal and valid quick-add
+messages such as `oatmeal 370 60` keep working exactly as before (quick-add is
+still logged instantly, and its error messages are still shown). The bot also
+does not send:
+
+- menu labels in another letter case (`diary`, `settings`), or text with
+  fewer than three letters (`ок`, `+`, `1`) — these get the usual hint;
+- a reply that finds no open proposal (to his own message after its proposal
+  expired, or to a receipt): replies are corrections, and sent alone it would
+  log a fragment as a meal, so the bot asks for a separate message instead;
+- a message over 500 characters, which is more likely an accidental paste.
+
+Anything else costs one Claude request. When it describes no food («спасибо»),
+Claude records nothing and the bot answers briefly without a proposal. Text
+from other users, or with no key configured, is handled exactly as before and
+is never sent anywhere.
 
 ### Favorites and servings
 

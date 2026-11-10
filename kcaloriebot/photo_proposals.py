@@ -1,7 +1,8 @@
-"""Photo recognition results waiting for the owner to confirm them.
+"""Recognition results (from photos or a text description) waiting for the
+owner to confirm them.
 
 Proposals live only in memory: the feature has a single user, and a proposal
-lost on restart is answered with a request to send the photo again.
+lost on restart is answered with a request to send the photo or text again.
 """
 
 from __future__ import annotations
@@ -42,12 +43,13 @@ CORRECTION_HINT = (
 
 @dataclass
 class PhotoProposal:
-    # The owner's photo message ID (the first one of an album): unique in the
-    # chat and never reused, so a button left over from before a restart
-    # cannot hit a newer proposal.
+    # The owner's photo message ID (the first one of an album), or his text
+    # message ID for a description: unique in the chat and never reused, so a
+    # button left over from before a restart cannot hit a newer proposal.
     key: int
     user_id: int
     chat_id: int
+    # No images for a text description; ``caption`` is then the description.
     images: tuple[PhotoImage, ...]
     caption: Optional[str]
     eaten_at_utc: int
@@ -55,7 +57,8 @@ class PhotoProposal:
     # The owner's foods the analysis was given; corrections reuse the same
     # list so its numbering stays valid.
     owner_foods: tuple[OwnerFood, ...] = ()
-    # Every photo of an album, so a reply to any of them finds the proposal.
+    # The owner's messages it answers (every photo of an album), so a reply to
+    # any of them finds the proposal.
     photo_ids: frozenset[int] = frozenset()
     # The bot message currently showing this proposal.
     message: Any = None
@@ -65,6 +68,9 @@ class PhotoProposal:
     state: str = OPEN
     # A correction is being analyzed; saving now would save the old numbers.
     busy: bool = False
+    # Proposed from a text description rather than photos; it changes only
+    # the wording of the bot's messages.
+    from_text: bool = False
 
     def show_in(self, message: Any) -> None:
         self.message = message
