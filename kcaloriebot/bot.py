@@ -5,7 +5,7 @@ import html
 import logging
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Callable, Optional, TypeVar
+from typing import Any, Awaitable, Callable, Optional, TypeVar
 from urllib.parse import urljoin
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, WebAppInfo
@@ -198,7 +198,8 @@ READ_ONLY_CALLBACKS = frozenset(
         "export",
     }
 )
-# The only Telegram account allowed to run /users and log food from photos.
+# The only Telegram account allowed to run /users and have Claude recognize
+# food in photos and text descriptions.
 ADMIN_USER_ID = 193117018
 
 
@@ -861,7 +862,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await turn.message.reply_text("Select an option:", reply_markup=MAIN_KEYBOARD)
     elif text == "Reminders":
         await _show_reminder_settings(database, turn.user_id, turn.message)
-    elif not await _log_quick_add(turn, text):
+    elif not await _log_quick_add(turn, text) and not await _propose_from_words(
+        turn, context, text
+    ):
         await turn.message.reply_text(
             "Choose an option from the keyboard, or log a food in one message, "
             "for example: oatmeal 370 60.",
@@ -2415,9 +2418,29 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 PHOTO_FAILED_TEXT = (
     "Не удалось распознать фото. Попробуйте ещё раз или введите вручную."
 )
-PHOTO_EXPIRED_TEXT = "Предложение устарело — отправьте фото ещё раз."
+# After a restart the bot no longer knows whether a proposal came from a photo.
+PHOTO_EXPIRED_TEXT = "Предложение устарело — отправьте фото или описание ещё раз."
 PHOTO_RESTART_TEXT = (
     "Бот перезапускается, фото не успело распознаться — отправьте его ещё раз."
+)
+TEXT_FAILED_TEXT = (
+    "Не удалось разобрать описание. Попробуйте ещё раз или введите вручную."
+)
+TEXT_RESTART_TEXT = (
+    "Бот перезапускается, описание не успело обработаться — отправьте его ещё раз."
+)
+# A description longer than this is far more likely an accidental paste than
+# a meal, and is not sent to Claude.
+MAX_DESCRIPTION_CHARS = 500
+TEXT_TOO_LONG_TEXT = (
+    f"Слишком длинное описание — опишите еду короче, до {MAX_DESCRIPTION_CHARS} "
+    "символов."
+)
+# «ок», «+», «?» or a stray character is not worth a request.
+MIN_DESCRIPTION_LETTERS = 3
+TEXT_REPLY_IGNORED_TEXT = (
+    "Открытого предложения для этого ответа нет. Чтобы записать еду, опишите её "
+    "отдельным сообщением, не ответом."
 )
 PHOTO_CORRECTION_FAILED_TEXT = (
     "Не удалось учесть исправление — попробуйте ещё раз. Предложение не изменилось."
@@ -2457,6 +2480,49 @@ _REPLY_KEYBOARD_LABELS = frozenset(
     for row in markup.keyboard
     for button in row
 )
+# Menu words in any letter case (with the older labels handle_text still
+# accepts) are never a meal description, so a slip such as «diary» gets the
+# usual hint instead of a request to Claude.
+_MENU_WORDS = frozenset(
+    label.casefold()
+    for label in (
+        *_REPLY_KEYBOARD_LABELS,
+        "Per Serving",
+        "Food Today",
+        "Statistics",
+        "My Favorites",
+        "Search favorites",
+        "Update Timezone",
+    )
+)
+
+
+@dataclass(frozen=True)
+class _Wording:
+    """What the background steps say, for a photo or for a text description."""
+
+    failed: str
+    restart: str
+    nothing: str
+    already_saved: str
+
+
+_PHOTO_WORDING = _Wording(
+    failed=PHOTO_FAILED_TEXT,
+    restart=PHOTO_RESTART_TEXT,
+    nothing="На фото не нашлось, что записать.",
+    already_saved="Это фото уже записано.",
+)
+_TEXT_WORDING = _Wording(
+    failed=TEXT_FAILED_TEXT,
+    restart=TEXT_RESTART_TEXT,
+    nothing="В сообщении не нашлось еды — ничего не записано.",
+    already_saved="Это уже записано.",
+)
+
+
+def _wording(proposal: PhotoProposal) -> _Wording:
+    return _TEXT_WORDING if proposal.from_text else _PHOTO_WORDING
 
 
 def _photo_store(application: Any) -> PhotoProposalStore:
@@ -2636,6 +2702,10 @@ async def _show_proposal(
     proposal.show_in(shown)
 
 
+# (images, caption or description, the owner's message IDs it answers)
+_ProposalInputs = tuple[tuple[PhotoImage, ...], Optional[str], frozenset[int]]
+
+
 async def _propose_from_photo(
     store: PhotoProposalStore,
     analyzer: PhotoAnalyzer,
@@ -2651,31 +2721,90 @@ async def _propose_from_photo(
 
     For an album, ``parts`` keeps growing until _collect_album returns.
     """
-    message = parts[0].message
+
+    async def inputs() -> _ProposalInputs:
+        if album is not None:
+            await _collect_album(album)
+        ordered = sorted(parts, key=lambda part: part.message.message_id)
+        return (
+            await _download_images(ordered),
+            _album_caption(ordered),
+            frozenset(part.message.message_id for part in ordered),
+        )
+
+    await _propose(
+        store,
+        analyzer,
+        database,
+        parts[0].message,
+        status,
+        user_id,
+        chat_id,
+        event_epoch,
+        inputs,
+    )
+
+
+async def _propose_from_text(
+    store: PhotoProposalStore,
+    analyzer: PhotoAnalyzer,
+    database: Database,
+    message: Any,
+    text: str,
+    status: Any,
+    user_id: int,
+    chat_id: int,
+    event_epoch: int,
+) -> None:
+    """Background task: analyze the owner's description of a meal."""
+
+    async def inputs() -> _ProposalInputs:
+        return (), text, frozenset({message.message_id})
+
+    await _propose(
+        store,
+        analyzer,
+        database,
+        message,
+        status,
+        user_id,
+        chat_id,
+        event_epoch,
+        inputs,
+        from_text=True,
+    )
+
+
+async def _propose(
+    store: PhotoProposalStore,
+    analyzer: PhotoAnalyzer,
+    database: Database,
+    message: Any,
+    status: Any,
+    user_id: int,
+    chat_id: int,
+    event_epoch: int,
+    inputs: Callable[[], Awaitable[_ProposalInputs]],
+    from_text: bool = False,
+) -> None:
+    """Gather the inputs, analyze them and show one proposal, or say why not."""
+    wording = _TEXT_WORDING if from_text else _PHOTO_WORDING
     try:
         try:
-            if album is not None:
-                await _collect_album(album)
-            parts = sorted(parts, key=lambda part: part.message.message_id)
-            images = await _download_images(parts)
-            caption = _album_caption(parts)
+            images, caption, message_ids = await inputs()
             owner_foods = await _owner_foods(database, user_id)
             analysis = await analyzer.analyze(images, caption, owner_foods=owner_foods)
         except (TelegramError, PhotoUnavailable):
-            logger.warning("Photo analysis failed user_id=%s", user_id, exc_info=True)
-            await _photo_report(status, message, PHOTO_FAILED_TEXT)
+            logger.warning("Food analysis failed user_id=%s", user_id, exc_info=True)
+            await _photo_report(status, message, wording.failed)
             return
         if not analysis.foods and analysis.weight_kg is None:
             await _photo_post(
-                status,
-                message,
-                analysis.comment or "На фото не нашлось, что записать.",
-                MAIN_KEYBOARD,
+                status, message, analysis.comment or wording.nothing, MAIN_KEYBOARD
             )
             return
-        photo_ids = frozenset(part.message.message_id for part in parts)
         proposal = PhotoProposal(
-            key=min(photo_ids),
+            key=min(message_ids),
             user_id=user_id,
             chat_id=chat_id,
             images=images,
@@ -2683,15 +2812,68 @@ async def _propose_from_photo(
             eaten_at_utc=event_epoch,
             analysis=analysis,
             owner_foods=owner_foods,
-            photo_ids=photo_ids,
+            photo_ids=message_ids,
+            from_text=from_text,
         )
         await _show_proposal(store, proposal, status, message)
     except asyncio.CancelledError:
-        await _photo_report(status, message, PHOTO_RESTART_TEXT)
+        await _photo_report(status, message, wording.restart)
         raise
     except Exception:
-        logger.exception("Photo proposal failed user_id=%s", user_id)
-        await _photo_report(status, message, PHOTO_FAILED_TEXT)
+        logger.exception("Food proposal failed user_id=%s", user_id)
+        await _photo_report(status, message, wording.failed)
+
+
+async def _propose_from_words(
+    turn: Turn, context: ContextTypes.DEFAULT_TYPE, text: str
+) -> bool:
+    """Admin-only: propose diary entries for a meal described in a message.
+
+    handle_text calls this last, for text that no menu button, input session,
+    proposal reply or quick-add claimed; returns True when the text was handled.
+    """
+    analyzer: Optional[PhotoAnalyzer] = context.application.bot_data.get(
+        "photo_analyzer"
+    )
+    if (
+        analyzer is None
+        or turn.user_id != ADMIN_USER_ID
+        or text.casefold() in _MENU_WORDS
+        or sum(char.isalpha() for char in text) < MIN_DESCRIPTION_LETTERS
+    ):
+        return False
+    message = turn.message
+    if getattr(message, "reply_to_message", None) is not None:
+        # Replies are corrections; one that found no open proposal (expired,
+        # or answering a receipt) would log a fragment as a meal of its own.
+        await message.reply_text(TEXT_REPLY_IGNORED_TEXT, reply_markup=MAIN_KEYBOARD)
+        return True
+    if len(text) > MAX_DESCRIPTION_CHARS:
+        await message.reply_text(TEXT_TOO_LONG_TEXT, reply_markup=MAIN_KEYBOARD)
+        return True
+    status = await message.reply_text("Считаю калории…")
+    message_date = getattr(message, "date", None)
+    event_epoch = (
+        int(message_date.timestamp())
+        if message_date is not None
+        else turn.database.now_epoch()
+    )
+    _start_photo_task(
+        context.application,
+        _propose_from_text(
+            _photo_store(context.application),
+            analyzer,
+            turn.database,
+            message,
+            text,
+            status,
+            turn.user_id,
+            turn.chat_id,
+            event_epoch,
+        ),
+        name=f"text-{message.message_id}",
+    )
+    return True
 
 
 async def _revise_photo_proposal(
@@ -2737,18 +2919,18 @@ async def _revise_photo_proposal(
             proposal.analysis = analysis
             await _show_proposal(store, proposal, status, anchor)
     except asyncio.CancelledError:
-        await _photo_report(status, anchor, PHOTO_RESTART_TEXT)
+        await _photo_report(status, anchor, _wording(proposal).restart)
         raise
     except Exception:
         proposal.busy = False
         logger.exception("Photo correction failed user_id=%s", proposal.user_id)
-        await _photo_report(status, anchor, PHOTO_FAILED_TEXT)
+        await _photo_report(status, anchor, _wording(proposal).failed)
 
 
 async def _handle_photo_correction(
     turn: Turn, context: ContextTypes.DEFAULT_TYPE, text: str
 ) -> bool:
-    """Treat the owner's text reply to a photo proposal as a correction.
+    """Treat the owner's text reply to a proposal as a correction.
 
     Only an explicit reply to a proposal counts, so quick-add, menu buttons and
     active input sessions keep working; returns True when the text was handled.
@@ -2771,7 +2953,7 @@ async def _handle_photo_correction(
         return True
     if proposal.state != OPEN:
         await turn.message.reply_text(
-            "Это фото уже записано."
+            _wording(proposal).already_saved
             if proposal.state == SAVED
             else "Это предложение уже отменено.",
             reply_markup=MAIN_KEYBOARD,

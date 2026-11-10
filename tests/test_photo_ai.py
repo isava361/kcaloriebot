@@ -16,16 +16,22 @@ from telegram.error import BadRequest
 from kcaloriebot.bot import (
     ADMIN_USER_ID,
     MAIN_KEYBOARD,
+    MAX_DESCRIPTION_CHARS,
     PHOTO_ALBUM_FULL_TEXT,
     PHOTO_CORRECTION_FAILED_TEXT,
     PHOTO_EXPIRED_TEXT,
     PHOTO_FAILED_TEXT,
     PHOTO_RESTART_TEXT,
+    TEXT_FAILED_TEXT,
+    TEXT_REPLY_IGNORED_TEXT,
+    TEXT_RESTART_TEXT,
+    TEXT_TOO_LONG_TEXT,
     _stop_photo_tasks,
     handle_callback,
     handle_photo,
     handle_photo_callback,
     handle_text,
+    unknown_command,
 )
 from kcaloriebot.config import ConfigError, load_settings
 from kcaloriebot.database import Database
@@ -35,6 +41,8 @@ from kcaloriebot.domain import (
     FavoriteFood,
     FoodEntry,
     NutritionTotals,
+    ValidationError,
+    parse_quick_add,
 )
 from kcaloriebot.photo_ai import (
     EYE_ESTIMATE_UPWARD_SHARE,
@@ -916,6 +924,298 @@ class HandlePhotoTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({}, self.context.application.bot_data["photo_albums"])
 
 
+MEAL = "съел борщ и два куска хлеба"
+TEXT_HINT = (
+    "Choose an option from the keyboard, or log a food in one message, "
+    "for example: oatmeal 370 60."
+)
+
+
+def described(
+    text: str = MEAL, user_id: int = ADMIN_USER_ID, reply_to: Any = None
+) -> Any:
+    update = make_update(user_id=user_id)
+    message = ChatMessage(text)
+    message.date = datetime(2026, 10, 17, 12, 0, tzinfo=timezone.utc)
+    message.reply_to_message = reply_to
+    update.effective_message = message
+    return update
+
+
+class HandleDescriptionTests(unittest.IsolatedAsyncioTestCase):
+    """A meal the owner describes in words goes through the photo proposal."""
+
+    setUp = HandlePhotoTests.setUp
+    tearDown = HandlePhotoTests.tearDown
+    entries = HandlePhotoTests.entries
+    settle = HandlePhotoTests.settle
+
+    async def describe(self, text: str = MEAL) -> tuple[Any, SentMessage]:
+        update = described(text)
+        await handle_text(update, self.context)
+        await self.settle()
+        return update, update.effective_message.sent[-1]
+
+    async def assert_not_sent(self, update: Any, reply: Any) -> None:
+        await handle_text(update, self.context)
+        await self.settle()
+        self.assertEqual([], self.analyzer.calls)
+        self.assertEqual(reply, update.effective_message.replies[-1])
+
+    async def test_description_is_proposed_in_background_without_logging(
+        self,
+    ) -> None:
+        self.database.save_favorite(
+            ADMIN_USER_ID, "Хлеб бородинский", UNIT_100G, 210, 7, 1.5, 41
+        )
+        self.analyzer.gate.clear()
+        update = described()
+
+        await handle_text(update, self.context)
+
+        message = update.effective_message
+        self.assertEqual([("Считаю калории…", None)], message.replies)
+        status = message.sent[0]
+        self.analyzer.gate.set()
+        await self.settle()
+
+        # No images: the message itself is the description.
+        self.assertEqual([((), MEAL)], self.analyzer.calls)
+        self.assertEqual(
+            (OwnerFood("Хлеб бородинский", 210.0, 7.0, 1.5, 41.0),),
+            self.analyzer.revisions[0]["owner_foods"],
+        )
+        self.assertEqual([], self.entries())
+        self.assertEqual([False, True], message.quoted)
+        self.assertTrue(status.deleted)
+        text, markup = message.replies[-1]
+        self.assertIn("• Гречка — 200 г · 220 ккал", text)
+        self.assertIn("Итого: 440 ккал\n", text)
+        key = message.message_id
+        self.assertEqual(
+            [f"photo:save:{key}", f"photo:cancel:{key}"], keyboard_callbacks(markup)
+        )
+
+    async def test_save_logs_once_at_the_message_time(self) -> None:
+        update, proposal = await self.describe()
+        key = update.effective_message.message_id
+        first = tap(f"photo:save:{key}", proposal)
+        second = tap(f"photo:save:{key}", proposal)
+
+        await asyncio.gather(
+            handle_photo_callback(first, self.context),
+            handle_photo_callback(second, self.context),
+        )
+
+        self.assertEqual(
+            [("Гречка", 220.0, 1792238400), ("Котлета", 220.0, 1792238400)],
+            sorted(
+                (entry.name, entry.nutrition.calories, entry.eaten_at_utc)
+                for entry in self.entries()
+            ),
+        )
+        self.assertEqual([(("Уже записано.",), {})], second.callback_query.answers)
+        late = described("хлеба было три куска", reply_to=proposal)
+        await handle_text(late, self.context)
+        self.assertEqual(
+            [("Это уже записано.", MAIN_KEYBOARD)], late.effective_message.replies
+        )
+        self.assertEqual(1, len(self.analyzer.calls))
+
+    async def test_reply_correction_reruns_the_same_text_without_images(
+        self,
+    ) -> None:
+        update, proposal = await self.describe()
+        old_analysis = self.analyzer.result
+        self.analyzer.result = PhotoAnalysis(
+            (FoodGuess("Борщ", 300.0, 50.0, None, None, None),), None, ""
+        )
+        correction = described("хлеба не было", reply_to=proposal)
+
+        await handle_text(correction, self.context)
+        await self.settle()
+
+        self.assertEqual([((), MEAL)] * 2, self.analyzer.calls)
+        self.assertEqual(
+            {
+                "owner_foods": (),
+                "previous": old_analysis,
+                "corrections": ("хлеба не было",),
+            },
+            self.analyzer.revisions[-1],
+        )
+        self.assertEqual(
+            ("Исправление принято — новое предложение ниже.", None),
+            proposal.edits[-1],
+        )
+        # A reply to the owner's own message works as well.
+        second = described("борща 400 г", reply_to=update.effective_message)
+        await handle_text(second, self.context)
+        await self.settle()
+        self.assertEqual(
+            ("хлеба не было", "борща 400 г"),
+            self.analyzer.revisions[-1]["corrections"],
+        )
+        self.assertEqual([((), MEAL)] * 3, self.analyzer.calls)
+        key = update.effective_message.message_id
+        replacement = second.effective_message.sent[-1]
+        await handle_photo_callback(tap(f"photo:save:{key}", replacement), self.context)
+        self.assertEqual(
+            [("Борщ", 150.0)],
+            [(entry.name, entry.nutrition.calories) for entry in self.entries()],
+        )
+
+    async def test_weight_without_calories_reaches_claude_and_blocks_until_known(
+        self,
+    ) -> None:
+        self.analyzer.result = PhotoAnalysis(
+            (FoodGuess("Творог 5%", None, 121.0, 17.0, 5.0, 1.8),), None, ""
+        )
+        update, proposal = await self.describe("творог 5% 200 г")
+
+        self.assertEqual([((), "творог 5% 200 г")], self.analyzer.calls)
+        save = tap(f"photo:save:{update.effective_message.message_id}", proposal)
+        await handle_photo_callback(save, self.context)
+        self.assertEqual([], self.entries())
+        self.assertIn("Не указан вес", save.callback_query.answers[0][0][0])
+
+    async def test_quick_add_stays_instant_and_never_reaches_claude(self) -> None:
+        quick = described("oatmeal 370 60")
+        await handle_text(quick, self.context)
+
+        self.assertEqual(["oatmeal"], [entry.name for entry in self.entries()])
+        self.assertEqual([], self.analyzer.calls)
+        self.assertNotIn("Считаю", quick.effective_message.replies[0][0])
+        for text in ("bread 99999 150", "суп 300 г 200 г"):
+            with self.subTest(text=text):
+                with self.assertRaises(ValidationError) as error:
+                    parse_quick_add(text)
+                await self.assert_not_sent(
+                    described(text), (str(error.exception), MAIN_KEYBOARD)
+                )
+        self.assertEqual(1, len(self.entries()))
+
+    async def test_menu_words_commands_and_sessions_never_reach_claude(self) -> None:
+        # Buttons outside their input, or typed in another letter case.
+        for text in ("diary", "SETTINGS", "Skip", "per serving", "main menu"):
+            with self.subTest(text=text):
+                await self.assert_not_sent(described(text), (TEXT_HINT, MAIN_KEYBOARD))
+        await self.assert_not_sent(
+            described("Main menu"), ("Select an option:", MAIN_KEYBOARD)
+        )
+        command = described("/борщ")
+        await unknown_command(command, self.context)
+        self.assertIn("Unknown command", command.effective_message.replies[-1][0])
+
+        # Inside an input session the text is that session's answer.
+        await handle_text(described("Add food"), self.context)
+        name = described("борщ со сметаной")
+        await handle_text(name, self.context)
+        await self.settle()
+        self.assertEqual([], self.analyzer.calls)
+        self.assertIn("calories", name.effective_message.replies[-1][0])
+        session = self.database.get_session(ADMIN_USER_ID, 10)
+        self.assertEqual("борщ со сметаной", session.draft_name)
+
+    async def test_stray_text_is_not_sent(self) -> None:
+        for text in ("ок", "+", "?", "1", "😀😀😀", "ok!!"):
+            with self.subTest(text=text):
+                await self.assert_not_sent(described(text), (TEXT_HINT, MAIN_KEYBOARD))
+        await self.assert_not_sent(
+            described("а" * (MAX_DESCRIPTION_CHARS + 1)),
+            (TEXT_TOO_LONG_TEXT, MAIN_KEYBOARD),
+        )
+        # A reply that is not to an open proposal is not a new meal either.
+        await self.assert_not_sent(
+            described(MEAL, reply_to=FakeMessage("Saved: oatmeal")),
+            (TEXT_REPLY_IGNORED_TEXT, MAIN_KEYBOARD),
+        )
+        # Three letters are enough for a real meal.
+        await self.describe("чай")
+        self.assertEqual([((), "чай")], self.analyzer.calls)
+
+    async def test_others_and_no_analyzer_keep_todays_behaviour(self) -> None:
+        self.database.ensure_user(7, 1)
+        self.database.set_timezone(7, "Europe/Moscow", 1)
+        await self.assert_not_sent(described(user_id=7), (TEXT_HINT, MAIN_KEYBOARD))
+        self.assertEqual([], self.entries(7))
+
+        del self.context.application.bot_data["photo_analyzer"]
+        await self.assert_not_sent(described(), (TEXT_HINT, MAIN_KEYBOARD))
+        self.assertNotIn("photo_tasks", self.context.application.bot_data)
+
+    async def test_nothing_to_log_is_answered_without_a_proposal(self) -> None:
+        for comment, reply in (
+            ("Это не описание еды.", "Это не описание еды."),
+            ("", "В сообщении не нашлось еды — ничего не записано."),
+        ):
+            with self.subTest(comment=comment):
+                self.analyzer.result = PhotoAnalysis((), None, comment)
+                update, _ = await self.describe("спасибо")
+
+                self.assertEqual(
+                    (reply, MAIN_KEYBOARD), update.effective_message.replies[-1]
+                )
+                self.assertEqual([], self.entries())
+        store = self.context.application.bot_data["photo_proposals"]
+        self.assertEqual({}, store._items)
+
+    async def test_analysis_failure_is_reported(self) -> None:
+        for error, level in (
+            (PhotoUnavailable("down"), "WARNING"),
+            (RuntimeError("bug"), "ERROR"),
+        ):
+            with self.subTest(error=error):
+                self.analyzer.result = error
+                update = described()
+
+                with self.assertLogs("kcaloriebot.bot", level):
+                    await handle_text(update, self.context)
+                    await self.settle()
+
+                self.assertEqual([], self.entries())
+                self.assertEqual(
+                    (TEXT_FAILED_TEXT, MAIN_KEYBOARD),
+                    update.effective_message.replies[-1],
+                )
+                self.assertTrue(update.effective_message.sent[0].deleted)
+
+    async def test_shutdown_interrupts_the_analysis_and_tells_the_owner(
+        self,
+    ) -> None:
+        self.analyzer.gate.clear()
+        update = described()
+        await handle_text(update, self.context)
+        await asyncio.sleep(0)
+
+        await _stop_photo_tasks(self.context.application)
+
+        self.assertEqual(
+            (TEXT_RESTART_TEXT, MAIN_KEYBOARD), update.effective_message.replies[-1]
+        )
+        self.assertEqual([], self.entries())
+
+    async def test_expired_description_proposal(self) -> None:
+        now = [1000.0]
+        self.context.application.bot_data["photo_proposals"] = PhotoProposalStore(
+            clock=lambda: now[0]
+        )
+        update, proposal = await self.describe()
+        now[0] += PROPOSAL_TTL_SECONDS + 1
+
+        expired = tap(f"photo:save:{update.effective_message.message_id}", proposal)
+        await handle_photo_callback(expired, self.context)
+        reply = described("хлеба не было", reply_to=proposal)
+        await handle_text(reply, self.context)
+
+        self.assertEqual([(PHOTO_EXPIRED_TEXT, None)], expired.callback_query.edits)
+        self.assertEqual(
+            [(PHOTO_EXPIRED_TEXT, MAIN_KEYBOARD)], reply.effective_message.replies
+        )
+        self.assertEqual(1, len(self.analyzer.calls))
+        self.assertEqual([], self.entries())
+
+
 def food_item(**overrides: Any) -> dict[str, Any]:
     item = {
         "name": "Гречка",
@@ -1285,6 +1585,55 @@ class AnalyzerRequestTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("Caption: обед", content[5]["text"])
         # The owner's numbers replace the model's copy of them.
         self.assertEqual(121.0, analysis.foods[0].calories_per_100g)
+
+    async def test_text_description_is_sent_without_images(self) -> None:
+        client, messages = fake_client(
+            response("tool_use", record_block(EMPTY_RECORD)),
+            response("tool_use", record_block(EMPTY_RECORD)),
+        )
+        analyzer = PhotoAnalyzer(client, "claude-test", "low")
+
+        await analyzer.analyze(
+            (), "  кофе с молоком и круассан ", owner_foods=OWNER_FOODS
+        )
+
+        kwargs = messages.calls[0]
+        content = kwargs["messages"][0]["content"]
+        self.assertEqual(["text", "text"], [block["type"] for block in content])
+        self.assertIn("1. Творог 5%: per 100 g: 121 kcal", content[0]["text"])
+        self.assertEqual(
+            "No photos. The owner's message: кофе с молоком и круассан",
+            content[1]["text"],
+        )
+        # One prompt covers both kinds of request; web search stays available.
+        self.assertIn("or describes in a message what he ate", kwargs["system"])
+        self.assertIn("a typical portion you assume", kwargs["system"])
+        self.assertEqual("web_search", kwargs["tools"][0]["name"])
+
+        previous = PhotoAnalysis(
+            (FoodGuess("Круассан", 60.0, 400.0, None, None, None),), None, ""
+        )
+        await analyzer.analyze(
+            (),
+            "кофе с молоком и круассан",
+            previous=previous,
+            corrections=("круассан с шоколадом",),
+        )
+        content = messages.calls[1]["messages"][0]["content"]
+        self.assertEqual(["text", "text"], [block["type"] for block in content])
+        self.assertTrue(content[1]["text"].startswith("Your previous answer:\n"))
+        self.assertIn("- круассан с шоколадом", content[1]["text"])
+        self.assertNotIn("photo", content[1]["text"])
+
+    async def test_nothing_to_analyze_is_a_programming_error(self) -> None:
+        client, messages = fake_client()
+        for caption in (None, "", "   "):
+            with self.subTest(caption=caption):
+                with self.assertRaises(ValueError):
+                    await PhotoAnalyzer(client, "claude-test", "low").analyze(
+                        (), caption
+                    )
+        self.assertEqual([], messages.calls)
 
 
 class ProposalTextTests(unittest.TestCase):
