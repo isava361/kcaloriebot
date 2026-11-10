@@ -34,10 +34,30 @@ from .export import food_csv, weight_csv
 from .health import HealthStore
 from .photo_ai import (
     MAX_IMAGE_BYTES,
+    MAX_IMAGES_PER_REQUEST,
+    MAX_OWNER_FAVORITES,
+    MAX_OWNER_RECENT,
+    MAX_REQUEST_IMAGE_BYTES,
     SUPPORTED_MEDIA_TYPES,
+    OwnerFood,
     PhotoAnalyzer,
+    PhotoImage,
     PhotoUnavailable,
     build_analyzer,
+    owner_foods_from,
+)
+from .photo_proposals import (
+    CANCELLED,
+    OPEN,
+    SAVED,
+    PhotoProposal,
+    PhotoProposalStore,
+    has_proposal_buttons,
+    missing_weight_alert,
+    proposal_keyboard,
+    proposal_text,
+    saved_keyboard,
+    saved_text,
 )
 from .domain import (
     EARLIEST_DIARY_DATE,
@@ -153,6 +173,7 @@ __all__ = [
     "unknown_command",
     "handle_non_text",
     "handle_photo",
+    "handle_photo_callback",
     "handle_error",
     "build_application",
 ]
@@ -698,6 +719,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     text = turn.message.text.strip()
     database = turn.database
+    if await _handle_photo_correction(turn, context, text):
+        return
 
     if text == "Cancel":
         if (
@@ -2347,37 +2370,496 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             "Фото больше 5 МБ — отправьте его сжатым.", reply_markup=MAIN_KEYBOARD
         )
         return
-    await message.reply_text("Распознаю фото…")
+    part = _PhotoPart(message, attachment, media_type)
+    group = getattr(message, "media_group_id", None)
+    albums = _photo_albums(context.application)
+    album_key = (turn.chat_id, str(group))
+    album = albums.get(album_key) if group is not None else None
+    if album is not None:
+        await _join_album(album, part)
+        return
+    if group is not None:
+        # Register before the first await so the rest of the album joins it.
+        album = _PendingAlbum([part], attachment.file_size or 0, asyncio.Event())
+        albums[album_key] = album
     try:
-        telegram_file = await attachment.get_file()
-        image = bytes(await telegram_file.download_as_bytearray())
-        analysis = await analyzer.analyze(image, media_type, message.caption)
-    except (TelegramError, PhotoUnavailable):
-        logger.warning("Photo analysis failed user_id=%s", turn.user_id, exc_info=True)
-        await message.reply_text(
-            "Не удалось распознать фото. Попробуйте ещё раз или введите вручную.",
-            reply_markup=MAIN_KEYBOARD,
-        )
-        return
-    if not analysis.foods and analysis.weight_kg is None:
-        await message.reply_text(
-            analysis.comment or "На фото не нашлось, что записать.",
-            reply_markup=MAIN_KEYBOARD,
-        )
-        return
-    if analysis.comment:
-        await message.reply_text(analysis.comment)
+        status = await message.reply_text("Распознаю фото…")
+    except BaseException:
+        if album is not None:
+            albums.pop(album_key, None)
+        raise
     message_date = getattr(message, "date", None)
     event_epoch = (
         int(message_date.timestamp())
         if message_date is not None
         else database.now_epoch()
     )
-    for food in analysis.foods:
-        entry = await _call(
-            database.add_entry,
+    # The Claude call takes up to minutes; run it off the single update lane.
+    _start_photo_task(
+        context.application,
+        _propose_from_photo(
+            _photo_store(context.application),
+            analyzer,
+            database,
+            [part] if album is None else album.parts,
+            status,
             turn.user_id,
+            turn.chat_id,
             event_epoch,
+            None if album is None else (albums, album_key, album),
+        ),
+        name=f"photo-{message.message_id}",
+    )
+
+
+PHOTO_FAILED_TEXT = (
+    "Не удалось распознать фото. Попробуйте ещё раз или введите вручную."
+)
+PHOTO_EXPIRED_TEXT = "Предложение устарело — отправьте фото ещё раз."
+PHOTO_RESTART_TEXT = (
+    "Бот перезапускается, фото не успело распознаться — отправьте его ещё раз."
+)
+PHOTO_CORRECTION_FAILED_TEXT = (
+    "Не удалось учесть исправление — попробуйте ещё раз. Предложение не изменилось."
+)
+PHOTO_BUSY_TEXT = "Пересчитываю с учётом исправления — подождите."
+PHOTO_ALBUM_FULL_TEXT = (
+    "Это фото не поместилось в общий запрос альбома — отправьте его отдельно."
+)
+# How long a restart waits for interrupted analyses to tell the owner.
+PHOTO_SHUTDOWN_GRACE_SECONDS = 10.0
+# Telegram delivers an album as separate messages sharing a media_group_id,
+# with no marker for the last one. A client sends them in one burst, so the
+# album counts as complete once no new photo arrived for ALBUM_QUIET_SECONDS;
+# the analysis starts after ALBUM_MAX_WAIT_SECONDS at the latest. A photo
+# outside an album is analyzed at once.
+ALBUM_QUIET_SECONDS = 1.5
+ALBUM_MAX_WAIT_SECONDS = 6.0
+# Text sent by reply-keyboard buttons is never a correction, even when the
+# owner taps a button while replying to a proposal.
+_REPLY_KEYBOARD_LABELS = frozenset(
+    button.text
+    for markup in (
+        MAIN_KEYBOARD,
+        STATS_KEYBOARD,
+        SETTINGS_KEYBOARD,
+        CANCEL_KEYBOARD,
+        SKIP_KEYBOARD,
+        FAVORITE_DECISION_KEYBOARD,
+        GOAL_KEYBOARD,
+        REPEAT_KEYBOARD,
+        MANUAL_ENTRY_KEYBOARD,
+        SERVINGS_KEYBOARD,
+        FAVORITE_SERVINGS_MANUAL_KEYBOARD,
+        TIMEZONE_CHANGE_KEYBOARD,
+        REMINDER_TIME_KEYBOARD,
+    )
+    for row in markup.keyboard
+    for button in row
+)
+
+
+def _photo_store(application: Any) -> PhotoProposalStore:
+    return application.bot_data.setdefault("photo_proposals", PhotoProposalStore())
+
+
+@dataclass
+class _PhotoPart:
+    message: Any
+    attachment: Any
+    media_type: str
+
+
+@dataclass
+class _PendingAlbum:
+    """Photos of one album, collected while more of them may still arrive."""
+
+    parts: list[_PhotoPart]
+    total_bytes: int
+    arrived: asyncio.Event
+
+
+_AlbumSlot = tuple[dict[tuple[int, str], _PendingAlbum], tuple[int, str], _PendingAlbum]
+
+
+def _photo_albums(application: Any) -> dict[tuple[int, str], _PendingAlbum]:
+    return application.bot_data.setdefault("photo_albums", {})
+
+
+async def _join_album(album: _PendingAlbum, part: _PhotoPart) -> None:
+    size = part.attachment.file_size or 0
+    if (
+        len(album.parts) >= MAX_IMAGES_PER_REQUEST
+        or album.total_bytes + size > MAX_REQUEST_IMAGE_BYTES
+    ):
+        await part.message.reply_text(PHOTO_ALBUM_FULL_TEXT, reply_markup=MAIN_KEYBOARD)
+        return
+    album.parts.append(part)
+    album.total_bytes += size
+    album.arrived.set()
+
+
+async def _collect_album(slot: _AlbumSlot) -> None:
+    """Wait until the album stops growing, then close it to newcomers."""
+    albums, key, album = slot
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + ALBUM_MAX_WAIT_SECONDS
+    try:
+        while (remaining := deadline - loop.time()) > 0:
+            album.arrived.clear()
+            try:
+                await asyncio.wait_for(
+                    album.arrived.wait(), min(ALBUM_QUIET_SECONDS, remaining)
+                )
+            except asyncio.TimeoutError:
+                break
+    finally:
+        # A photo of this album arriving later starts its own analysis.
+        if albums.get(key) is album:
+            del albums[key]
+
+
+async def _owner_foods(database: Database, user_id: int) -> tuple[OwnerFood, ...]:
+    """The owner's favorites and recent foods; a failure only loses the hint."""
+    try:
+        favorites = await _call(
+            database.page_favorites, user_id, 0, MAX_OWNER_FAVORITES
+        )
+        recent = await _call(database.recent_entry_templates, user_id, MAX_OWNER_RECENT)
+    except Exception:
+        logger.warning("Owner foods could not be loaded", exc_info=True)
+        return ()
+    return owner_foods_from(favorites.items, recent)
+
+
+def _album_caption(parts: list[_PhotoPart]) -> Optional[str]:
+    """The caption, which Telegram attaches to any one photo of an album."""
+    captions = [
+        caption.strip()
+        for part in parts
+        if isinstance(caption := getattr(part.message, "caption", None), str)
+        and caption.strip()
+    ]
+    return "\n".join(captions) or None
+
+
+async def _download_images(parts: list[_PhotoPart]) -> tuple[PhotoImage, ...]:
+    images: list[PhotoImage] = []
+    total = 0
+    for part in parts:
+        telegram_file = await part.attachment.get_file()
+        data = bytes(await telegram_file.download_as_bytearray())
+        if images and total + len(data) > MAX_REQUEST_IMAGE_BYTES:
+            logger.warning("Album photo skipped: the request would be too large")
+            continue
+        total += len(data)
+        images.append(PhotoImage(data, part.media_type))
+    return tuple(images)
+
+
+def _start_photo_task(application: Any, coroutine: Any, name: str) -> asyncio.Task:
+    """Run a photo analysis in the background and keep a reference to it.
+
+    Not Application.create_task: Application.stop() awaits those, so a restart
+    would wait for the whole Claude call and then post a proposal whose buttons
+    die with the process. These tasks are cancelled by _stop_photo_tasks.
+    """
+    tasks: set[asyncio.Task] = application.bot_data.setdefault("photo_tasks", set())
+    task = asyncio.create_task(coroutine, name=name)
+    tasks.add(task)
+    task.add_done_callback(lambda done: _photo_task_done(tasks, done))
+    return task
+
+
+def _photo_task_done(tasks: set[asyncio.Task], task: asyncio.Task) -> None:
+    tasks.discard(task)
+    # The tasks report their own failures; this is the last line of defence.
+    if not task.cancelled() and task.exception() is not None:
+        logger.error(
+            "Photo task %s crashed", task.get_name(), exc_info=task.exception()
+        )
+
+
+async def _stop_photo_tasks(application: Application) -> None:
+    """post_stop hook: interrupt running analyses so they tell the owner."""
+    tasks = list(application.bot_data.get("photo_tasks", ()))
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.wait(tasks, timeout=PHOTO_SHUTDOWN_GRACE_SECONDS)
+
+
+async def _photo_post(
+    status: Any, anchor: Any, text: str, reply_markup: Any = None
+) -> Any:
+    """Post a background result and remove the «working on it» status message.
+
+    A new message (quoting the photo or correction it answers) notifies the
+    owner, unlike an edit, and keeps several photos in flight apart.
+    """
+    sent = await anchor.reply_text(
+        text,
+        reply_markup=reply_markup,
+        do_quote=True,
+        allow_sending_without_reply=True,
+    )
+    try:
+        await status.delete()
+    except TelegramError:
+        logger.warning("Photo status message could not be deleted", exc_info=True)
+    return sent
+
+
+async def _photo_report(status: Any, anchor: Any, text: str) -> None:
+    """Tell the owner about a failed background step; never raises."""
+    try:
+        await _photo_post(status, anchor, text, MAIN_KEYBOARD)
+    except Exception:
+        logger.exception("Photo failure could not be reported")
+
+
+async def _show_proposal(
+    store: PhotoProposalStore,
+    proposal: PhotoProposal,
+    status: Any,
+    anchor: Any,
+    prefix: str = "",
+) -> None:
+    # Store first: the owner may tap the buttons as soon as they appear.
+    store.add(proposal)
+    shown = await _photo_post(
+        status,
+        anchor,
+        proposal_text(proposal.analysis, prefix),
+        proposal_keyboard(proposal.key),
+    )
+    proposal.show_in(shown)
+
+
+async def _propose_from_photo(
+    store: PhotoProposalStore,
+    analyzer: PhotoAnalyzer,
+    database: Database,
+    parts: list[_PhotoPart],
+    status: Any,
+    user_id: int,
+    chat_id: int,
+    event_epoch: int,
+    album: Optional[_AlbumSlot] = None,
+) -> None:
+    """Background task: analyze a photo or an album and show the result.
+
+    For an album, ``parts`` keeps growing until _collect_album returns.
+    """
+    message = parts[0].message
+    try:
+        try:
+            if album is not None:
+                await _collect_album(album)
+            parts = sorted(parts, key=lambda part: part.message.message_id)
+            images = await _download_images(parts)
+            caption = _album_caption(parts)
+            owner_foods = await _owner_foods(database, user_id)
+            analysis = await analyzer.analyze(images, caption, owner_foods=owner_foods)
+        except (TelegramError, PhotoUnavailable):
+            logger.warning("Photo analysis failed user_id=%s", user_id, exc_info=True)
+            await _photo_report(status, message, PHOTO_FAILED_TEXT)
+            return
+        if not analysis.foods and analysis.weight_kg is None:
+            await _photo_post(
+                status,
+                message,
+                analysis.comment or "На фото не нашлось, что записать.",
+                MAIN_KEYBOARD,
+            )
+            return
+        photo_ids = frozenset(part.message.message_id for part in parts)
+        proposal = PhotoProposal(
+            key=min(photo_ids),
+            user_id=user_id,
+            chat_id=chat_id,
+            images=images,
+            caption=caption,
+            eaten_at_utc=event_epoch,
+            analysis=analysis,
+            owner_foods=owner_foods,
+            photo_ids=photo_ids,
+        )
+        await _show_proposal(store, proposal, status, message)
+    except asyncio.CancelledError:
+        await _photo_report(status, message, PHOTO_RESTART_TEXT)
+        raise
+    except Exception:
+        logger.exception("Photo proposal failed user_id=%s", user_id)
+        await _photo_report(status, message, PHOTO_FAILED_TEXT)
+
+
+async def _revise_photo_proposal(
+    store: PhotoProposalStore,
+    analyzer: PhotoAnalyzer,
+    proposal: PhotoProposal,
+    status: Any,
+    anchor: Any,
+) -> None:
+    """Background task: re-run the analysis with the owner's corrections."""
+    try:
+        try:
+            analysis = await analyzer.analyze(
+                proposal.images,
+                proposal.caption,
+                owner_foods=proposal.owner_foods,
+                previous=proposal.analysis,
+                corrections=tuple(proposal.corrections),
+            )
+        except Exception:
+            logger.warning(
+                "Photo correction failed user_id=%s", proposal.user_id, exc_info=True
+            )
+            proposal.corrections.pop()
+            analysis = None
+        proposal.busy = False
+        if not store.is_current(proposal):
+            await _photo_post(status, anchor, PHOTO_EXPIRED_TEXT, MAIN_KEYBOARD)
+        elif analysis is None:
+            await _show_proposal(
+                store, proposal, status, anchor, PHOTO_CORRECTION_FAILED_TEXT
+            )
+        elif not analysis.foods and analysis.weight_kg is None:
+            proposal.close(CANCELLED)
+            await _photo_post(
+                status,
+                anchor,
+                (analysis.comment or "После исправления записывать нечего.")
+                + "\n\nНичего не записано.",
+                MAIN_KEYBOARD,
+            )
+        else:
+            proposal.analysis = analysis
+            await _show_proposal(store, proposal, status, anchor)
+    except asyncio.CancelledError:
+        await _photo_report(status, anchor, PHOTO_RESTART_TEXT)
+        raise
+    except Exception:
+        proposal.busy = False
+        logger.exception("Photo correction failed user_id=%s", proposal.user_id)
+        await _photo_report(status, anchor, PHOTO_FAILED_TEXT)
+
+
+async def _handle_photo_correction(
+    turn: Turn, context: ContextTypes.DEFAULT_TYPE, text: str
+) -> bool:
+    """Treat the owner's text reply to a photo proposal as a correction.
+
+    Only an explicit reply to a proposal counts, so quick-add, menu buttons and
+    active input sessions keep working; returns True when the text was handled.
+    """
+    reply_to = getattr(turn.message, "reply_to_message", None)
+    if (
+        reply_to is None
+        or turn.user_id != ADMIN_USER_ID
+        or context.application.bot_data.get("photo_analyzer") is None
+        or not text
+        or text in _REPLY_KEYBOARD_LABELS
+    ):
+        return False
+    store = _photo_store(context.application)
+    proposal = store.find_by_message(turn.user_id, turn.chat_id, reply_to.message_id)
+    if proposal is None:
+        if not has_proposal_buttons(reply_to):
+            return False
+        await turn.message.reply_text(PHOTO_EXPIRED_TEXT, reply_markup=MAIN_KEYBOARD)
+        return True
+    if proposal.state != OPEN:
+        await turn.message.reply_text(
+            "Это фото уже записано."
+            if proposal.state == SAVED
+            else "Это предложение уже отменено.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return True
+    if proposal.busy:
+        await turn.message.reply_text(PHOTO_BUSY_TEXT)
+        return True
+    proposal.busy = True
+    try:
+        status = await turn.message.reply_text("Пересчитываю с учётом исправления…")
+    except BaseException:
+        proposal.busy = False
+        raise
+    proposal.corrections.append(text)
+    previous = proposal.message
+    if previous is not None:
+        # Take the buttons off the old version so it cannot be saved by mistake.
+        try:
+            await previous.edit_text("Исправление принято — новое предложение ниже.")
+        except TelegramError:
+            logger.warning("Old photo proposal could not be edited", exc_info=True)
+    _start_photo_task(
+        context.application,
+        _revise_photo_proposal(
+            store,
+            context.application.bot_data["photo_analyzer"],
+            proposal,
+            status,
+            turn.message,
+        ),
+        name=f"photo-{proposal.key}-correction",
+    )
+    return True
+
+
+async def handle_photo_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Save («Записать») or discard («Отмена») a photo proposal."""
+    query = update.callback_query
+    if query is None or not await _require_private(update):
+        return
+    action = parse_callback(query.data or "")
+    if query.message is None or not query.message.is_accessible:
+        await _answer(query)
+        return
+    user_id, chat_id = _identity(update)
+    proposal = (
+        _photo_store(context.application).get(action.record_id, user_id, chat_id)
+        if action is not None
+        and action.kind in {"photo_save", "photo_cancel"}
+        and action.record_id is not None
+        else None
+    )
+    if proposal is None:
+        await _answer(query)
+        await _edit(query, PHOTO_EXPIRED_TEXT)
+        return
+    if proposal.state != OPEN:
+        await _answer(
+            query,
+            "Уже записано." if proposal.state == SAVED else "Предложение уже отменено.",
+        )
+        return
+    if proposal.busy:
+        await _answer(query, PHOTO_BUSY_TEXT)
+        return
+    if action.kind == "photo_cancel":
+        proposal.close(CANCELLED)
+        await _answer(query)
+        await _edit(query, "Отменено — ничего не записано.")
+        return
+    missing = proposal.analysis.missing_weight
+    if missing:
+        # Saving the rest would quietly leave out a food the owner ate.
+        await _answer(query, missing_weight_alert(missing), show_alert=True)
+        return
+    # Close before the first await so a double tap cannot log twice.
+    proposal.close(SAVED)
+    await _answer(query)
+    database = _db(context)
+    analysis = proposal.analysis
+    entries = [
+        await _call(
+            database.add_entry,
+            user_id,
+            proposal.eaten_at_utc,
             food.name,
             food.calories_per_100g,
             food.grams,
@@ -2385,12 +2867,23 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             food.fat_per_100g,
             food.carbs_per_100g,
         )
-        await _send_receipt(database, turn.user_id, message, entry)
-    if analysis.weight_kg is not None:
-        record = await _call(
-            database.add_weight, turn.user_id, event_epoch, analysis.weight_kg
+        for food in analysis.foods
+    ]
+    weight = (
+        await _call(
+            database.add_weight, user_id, proposal.eaten_at_utc, analysis.weight_kg
         )
-        await _send_weight_receipt(database, turn.user_id, message, record)
+        if analysis.weight_kg is not None
+        else None
+    )
+    progress = [await _today_progress(database, user_id)] if entries else []
+    if weight is not None:
+        progress.append(await _weight_summary(database, user_id) or "")
+    await _edit(
+        query,
+        saved_text(entries, weight, "\n".join(line for line in progress if line)),
+        reply_markup=saved_keyboard(entries, weight, database.now_epoch()),
+    )
 
 
 async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2856,6 +3349,14 @@ async def _handle_notify_action(
     )
 
 
+async def _stop_background_work(application: Application) -> None:
+    """post_stop hook: the bot can still send, so interrupted work can say so."""
+    try:
+        await _stop_photo_tasks(application)
+    finally:
+        await stop_notifier(application)
+
+
 def build_application(
     settings: Settings, database: Optional[Database] = None
 ) -> Application:
@@ -2870,7 +3371,7 @@ def build_application(
         .pool_timeout(10.0)
         .concurrent_updates(False)
         .post_init(start_notifier)
-        .post_stop(stop_notifier)
+        .post_stop(_stop_background_work)
         .build()
     )
     application.bot_data["database"] = store
@@ -2904,6 +3405,9 @@ def build_application(
         CallbackQueryHandler(
             health_callback, pattern=r"^health:(connect|status|rotate|rotate:yes)$"
         )
+    )
+    application.add_handler(
+        CallbackQueryHandler(handle_photo_callback, pattern=r"^photo:")
     )
     application.add_handler(CallbackQueryHandler(handle_callback))
     application.add_handler(

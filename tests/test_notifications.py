@@ -12,7 +12,7 @@ from telegram.error import Forbidden, NetworkError, RetryAfter, TimedOut
 
 from kcaloriebot.database import Database
 from kcaloriebot.domain import DayStats, Goals, WeightRecord
-from kcaloriebot.bot import build_application
+from kcaloriebot.bot import _stop_background_work, build_application
 from kcaloriebot.config import Settings
 from kcaloriebot.notifications import (
     Notifier,
@@ -377,7 +377,20 @@ class LifecycleTests(NotifierTestCase):
         )
         application = build_application(settings, self.database)
         self.assertIs(start_notifier, application.post_init)
-        self.assertIs(stop_notifier, application.post_stop)
+        self.assertIs(_stop_background_work, application.post_stop)
+
+    async def test_shutdown_stops_photo_tasks_and_the_notifier(self) -> None:
+        application = SimpleNamespace(
+            bot_data={"database": self.database}, bot=self.bot
+        )
+        await start_notifier(application)
+        notifier_task = application.bot_data["notifier_task"]
+        photo_task = asyncio.create_task(asyncio.sleep(60))
+        application.bot_data["photo_tasks"] = {photo_task}
+        await _stop_background_work(application)
+        self.assertTrue(photo_task.cancelled())
+        self.assertTrue(notifier_task.cancelled())
+        self.assertNotIn("notifier_task", application.bot_data)
 
 
 if __name__ == "__main__":
