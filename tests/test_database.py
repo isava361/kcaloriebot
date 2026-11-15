@@ -3,13 +3,23 @@ from __future__ import annotations
 import sqlite3
 import math
 import tempfile
+import threading
 import unittest
+from contextlib import closing
 from dataclasses import replace
 from datetime import date
 from pathlib import Path
+from unittest import mock
 
+from kcaloriebot import database as database_module
 from kcaloriebot.database import Database, SCHEMA_VERSION
-from kcaloriebot.domain import NotFound, SessionState, StateConflict, ValidationError
+from kcaloriebot.domain import (
+    Goals,
+    NotFound,
+    SessionState,
+    StateConflict,
+    ValidationError,
+)
 
 
 # The exact schema shipped as user_version 3, frozen for migration tests.
@@ -548,6 +558,105 @@ class DailyGoalTests(DatabaseTestCase):
             self.database.set_daily_goal(999, 2000.0, 2)
 
 
+class GoalsTests(DatabaseTestCase):
+    def test_goals_roundtrip_and_calorie_goal_compatibility(self) -> None:
+        self.assertEqual(Goals(), self.database.get_goals(1))
+        self.database.set_goals(1, Goals(2000.0, 150.0, None, 200.0), 2)
+        self.assertEqual(Goals(2000.0, 150.0, None, 200.0), self.database.get_goals(1))
+        self.assertEqual(2000.0, self.database.get_daily_goal(1))
+        # The calorie-only setter leaves macro goals alone.
+        self.database.set_daily_goal(1, 1800.0, 3)
+        self.assertEqual(Goals(1800.0, 150.0, None, 200.0), self.database.get_goals(1))
+
+    def test_goal_session_merges_changes_and_remove_clears_all(self) -> None:
+        self.database.set_goals(1, Goals(2000.0, 150.0, 70.0, None), 2)
+        session = self.database.start_session(
+            1, 10, SessionState.WAIT_GOAL, now_utc=1_700_000_100
+        )
+        goals = self.database.complete_goals_session(
+            session, {"calories": 1800.0, "fat": None}, 1_700_000_101
+        )
+        self.assertEqual(Goals(1800.0, 150.0, None, None), goals)
+        self.assertEqual(goals, self.database.get_goals(1))
+        self.assertIsNone(self.database.get_session(1, 10))
+
+        session = self.database.start_session(
+            1, 10, SessionState.WAIT_GOAL, now_utc=1_700_000_102
+        )
+        self.assertEqual(
+            Goals(), self.database.complete_goals_session(session, None, 1_700_000_103)
+        )
+        self.assertEqual(Goals(), self.database.get_goals(1))
+
+    def test_goal_session_requires_the_current_session(self) -> None:
+        session = self.database.start_session(
+            1, 10, SessionState.WAIT_GOAL, now_utc=1_700_000_100
+        )
+        self.database.clear_session(1, 10)
+        with self.assertRaises(StateConflict):
+            self.database.complete_goals_session(session, {"protein": 120.0})
+        self.assertEqual(Goals(), self.database.get_goals(1))
+
+    def test_invalid_macro_goals_are_rejected_before_storage(self) -> None:
+        for goals in (Goals(protein=0.0), Goals(fat=2001.0), Goals(carbs=math.nan)):
+            with self.subTest(goals=goals):
+                with self.assertRaises(ValidationError):
+                    self.database.set_goals(1, goals, 2)
+        self.assertEqual(Goals(), self.database.get_goals(1))
+        with self.assertRaises(sqlite3.IntegrityError):
+            with self.database._connect() as connection:
+                connection.execute(
+                    "UPDATE users SET protein_goal = -1 WHERE user_id = 1"
+                )
+
+
+class NotificationSettingsTests(DatabaseTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.database.set_timezone(1, "Europe/Moscow", 1)
+
+    def test_defaults_are_off(self) -> None:
+        settings = self.database.get_notification_settings(1)
+        self.assertIsNone(settings.reminder_minute)
+        self.assertFalse(settings.weekly_summary)
+        self.assertEqual([], self.database.notification_candidates())
+
+    def test_reminder_session_sets_time_and_is_atomic(self) -> None:
+        session = self.database.start_session(
+            1, 10, SessionState.WAIT_REMINDER_TIME, now_utc=1_700_000_100
+        )
+        settings = self.database.complete_reminder_session(session, 21 * 60, 1)
+        self.assertEqual(21 * 60, settings.reminder_minute)
+        self.assertEqual(
+            21 * 60, self.database.get_notification_settings(1).reminder_minute
+        )
+        self.assertIsNone(self.database.get_session(1, 10))
+        self.assertEqual(
+            [1], [c.user_id for c in self.database.notification_candidates()]
+        )
+        with self.assertRaises(ValidationError):
+            self.database.set_reminder(1, 24 * 60, 2)
+
+    def test_users_without_timezone_are_not_candidates(self) -> None:
+        self.database.set_reminder(2, 21 * 60, 2)
+        self.assertEqual(
+            [], [c.user_id for c in self.database.notification_candidates()]
+        )
+
+    def test_unreadable_stored_day_counts_as_never_sent(self) -> None:
+        with self.database._connect() as connection:
+            connection.execute("UPDATE users SET reminder_sent_day = 'garbage'")
+        self.assertIsNone(self.database.get_notification_settings(1).reminder_sent_day)
+
+    def test_weight_range_returns_first_and_last(self) -> None:
+        self.assertEqual((None, None), self.database.weight_range(1, 0, 10_000))
+        first = self.database.add_weight(1, 100, 80.0)
+        self.database.add_weight(1, 200, 79.5)
+        last = self.database.add_weight(1, 300, 79.0)
+        self.database.add_weight(1, 20_000, 70.0)
+        self.assertEqual((first, last), self.database.weight_range(1, 0, 10_000))
+
+
 class QuickEntryTests(DatabaseTestCase):
     def test_add_entry_scales_and_stores(self) -> None:
         entry = self.database.add_entry(
@@ -921,6 +1030,84 @@ class SchemaTests(DatabaseTestCase):
                 0,
             )
 
+    def test_v10_database_gains_goal_and_notification_columns(self) -> None:
+        v10_path = Path(self.temporary_directory.name) / "version-ten.db"
+
+        class StopAtV10(Exception):
+            pass
+
+        def stop(connection: sqlite3.Connection) -> None:
+            raise StopAtV10
+
+        # Build an exact v10 database by running the real chain up to v10.
+        with mock.patch.object(database_module, "_upgrade_v10_to_v11", stop):
+            with self.assertRaises(StopAtV10):
+                Database(v10_path).initialize()
+        with sqlite3.connect(v10_path) as connection:
+            self.assertEqual(
+                10, connection.execute("PRAGMA user_version").fetchone()[0]
+            )
+            connection.execute(
+                "INSERT INTO users(user_id, timezone, daily_calorie_goal, "
+                "created_at_utc, updated_at_utc) VALUES (1, 'Europe/Moscow', 2000, 1, 1)"
+            )
+            connection.execute(
+                "INSERT INTO food_entries(user_id, eaten_at_utc, name, grams, calories) "
+                "VALUES (1, 1700000100, 'Rice', 40, 100)"
+            )
+        connection.close()
+
+        migrated = Database(v10_path)
+        migrated.initialize()
+        with sqlite3.connect(v10_path) as connection:
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+            integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(users)")}
+        connection.close()
+        self.assertEqual(SCHEMA_VERSION, version)
+        self.assertEqual("ok", integrity)
+        self.assertLessEqual(
+            {
+                "protein_goal",
+                "fat_goal",
+                "carbs_goal",
+                "reminder_minute",
+                "reminder_sent_day",
+                "weekly_summary",
+                "summary_sent_week",
+            },
+            columns,
+        )
+        self.assertEqual(Goals(calories=2000.0), migrated.get_goals(1))
+        settings = migrated.get_notification_settings(1)
+        self.assertIsNone(settings.reminder_minute)
+        self.assertFalse(settings.weekly_summary)
+        self.assertEqual("Rice", migrated.page_entries(1, 0, 2**40).items[0].name)
+        migrated.set_goals(1, Goals(2000.0, 150.0, 70.0, 250.0), 2)
+        migrated.set_reminder(1, 21 * 60, 2)
+        with self.assertRaises(sqlite3.IntegrityError):
+            with migrated._connect() as connection:
+                connection.execute("UPDATE users SET reminder_minute = 1440")
+        with self.assertRaises(sqlite3.IntegrityError):
+            with migrated._connect() as connection:
+                connection.execute("UPDATE users SET weekly_summary = 2")
+
+        # Re-running the step over an already migrated table is a no-op.
+        with sqlite3.connect(v10_path) as connection:
+            connection.execute("PRAGMA user_version = 10")
+        connection.close()
+        migrated.initialize()
+        self.assertEqual(Goals(2000.0, 150.0, 70.0, 250.0), migrated.get_goals(1))
+        self.assertEqual(21 * 60, migrated.get_notification_settings(1).reminder_minute)
+
+    def test_fresh_database_has_the_goal_columns(self) -> None:
+        self.database.set_goals(1, Goals(protein=100.0), 2)
+        self.assertEqual(Goals(protein=100.0), self.database.get_goals(1))
+        with sqlite3.connect(self.path) as connection:
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+        connection.close()
+        self.assertEqual(SCHEMA_VERSION, version)
+
     def test_unversioned_legacy_schema_is_rejected(self) -> None:
         legacy_path = Path(self.temporary_directory.name) / "legacy.db"
         with sqlite3.connect(legacy_path) as connection:
@@ -930,6 +1117,251 @@ class SchemaTests(DatabaseTestCase):
 
         with self.assertRaisesRegex(RuntimeError, "legacy schema"):
             Database(legacy_path).initialize()
+
+    def _initialize_concurrently(self, path: Path, workers: int = 6) -> list[str]:
+        """Start like the bot and the Mini App server do: all at once."""
+        barrier = threading.Barrier(workers)
+        errors: list[str] = []
+
+        def start() -> None:
+            barrier.wait()
+            try:
+                Database(path).initialize()
+            except Exception as exc:  # collected for the assertion message
+                errors.append(repr(exc))
+
+        threads = [threading.Thread(target=start) for _ in range(workers)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        return errors
+
+    def test_concurrent_initialize_of_a_fresh_database(self) -> None:
+        for attempt in range(10):
+            path = Path(self.temporary_directory.name) / f"fresh-{attempt}.db"
+            self.assertEqual(self._initialize_concurrently(path), [])
+            with closing(sqlite3.connect(path)) as connection, connection:
+                self.assertEqual(
+                    connection.execute("PRAGMA user_version").fetchone()[0],
+                    SCHEMA_VERSION,
+                )
+                self.assertEqual(
+                    connection.execute("PRAGMA journal_mode").fetchone()[0], "wal"
+                )
+
+    def test_concurrent_initialize_migrates_an_old_database_once(self) -> None:
+        for attempt in range(5):
+            path = Path(self.temporary_directory.name) / f"old-{attempt}.db"
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.executescript(V3_SCHEMA)
+                connection.execute(
+                    "INSERT INTO users(user_id, created_at_utc, updated_at_utc) VALUES (1, 1, 1)"
+                )
+                connection.execute(
+                    """
+                    INSERT INTO favorite_foods(
+                        favorite_id, user_id, name, name_key, calories_per_100g,
+                        created_at_utc, updated_at_utc
+                    ) VALUES (3, 1, 'Rice', 'rice', 250.0, 1, 1)
+                    """
+                )
+            self.assertEqual(self._initialize_concurrently(path), [])
+            migrated = Database(path)
+            self.assertEqual("Rice", migrated.get_favorite(1, 3).name)
+            with closing(sqlite3.connect(path)) as connection, connection:
+                self.assertEqual(
+                    connection.execute("PRAGMA user_version").fetchone()[0],
+                    SCHEMA_VERSION,
+                )
+                self.assertEqual(
+                    connection.execute("PRAGMA foreign_key_check").fetchall(), []
+                )
+
+    def test_failed_v4_foreign_key_check_leaves_version_three(self) -> None:
+        path = Path(self.temporary_directory.name) / "dangling.db"
+        with closing(sqlite3.connect(path)) as connection, connection:
+            connection.executescript(V3_SCHEMA)
+            connection.execute(
+                "INSERT INTO users(user_id, created_at_utc, updated_at_utc) VALUES (1, 1, 1)"
+            )
+            # Foreign keys are off in this raw connection: a dangling reference.
+            connection.execute(
+                """
+                INSERT INTO sessions(user_id, chat_id, state, selected_favorite_id,
+                    updated_at_utc)
+                VALUES (1, 10, 'wait_favorite_grams', 404, 1)
+                """
+            )
+
+        for _ in range(2):  # the failure is not accepted on the next start
+            with self.assertRaisesRegex(RuntimeError, "foreign key violations"):
+                Database(path).initialize()
+            with closing(sqlite3.connect(path)) as connection, connection:
+                self.assertEqual(
+                    connection.execute("PRAGMA user_version").fetchone()[0], 3
+                )
+                tables = {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table'"
+                    )
+                }
+                self.assertNotIn("weights", tables)
+                self.assertFalse(any(name.endswith("_v4") for name in tables))
+
+    def _downgrade_to_v9(self) -> sqlite3.Connection:
+        """The live database as v9 had it: no unique favorite names."""
+        connection = sqlite3.connect(self.path)
+        connection.executescript(
+            "DROP INDEX favorites_user_name_key_idx; PRAGMA user_version = 9;"
+        )
+        return connection
+
+    def test_v10_upgrade_resolves_duplicate_favorites_without_losing_data(
+        self,
+    ) -> None:
+        insert = """
+            INSERT INTO favorite_foods(
+                favorite_id, user_id, name, name_key, unit, serving_grams,
+                calories_per_100g, protein_per_100g, fat_per_100g, carbs_per_100g,
+                created_at_utc, updated_at_utc
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1)
+        """
+        connection = self._downgrade_to_v9()
+        try:
+            connection.executemany(
+                insert,
+                [
+                    # A double tap: the same values twice.
+                    (1, 1, "Rice", "rice", "100g", None, 250, 10, 20, 30),
+                    (2, 1, "rice", "rice", "100g", None, 250, 10, 20, 30),
+                    # The same name with different values, and a taken suffix.
+                    (3, 1, "Oats", "oats", "100g", None, 370, None, None, None),
+                    (4, 1, "OATS", "oats", "100g", None, 380, None, None, None),
+                    (5, 1, "Oats (2)", "oats (2)", "100g", None, 1, None, None, None),
+                    # The recipe's favorite wins over a newer plain namesake.
+                    (6, 1, "Plov", "plov", "100g", None, 140, None, None, None),
+                    (7, 1, "plov", "plov", "100g", None, 140, None, None, None),
+                    (8, 1, "Bar", "bar", "serving", 50, 200, None, None, None),
+                    # Another owner's namesake is not a duplicate.
+                    (9, 2, "Rice", "rice", "100g", None, 1, None, None, None),
+                ],
+            )
+            connection.execute(
+                """
+                INSERT INTO recipes(recipe_id, user_id, name, name_key, favorite_id,
+                    created_at_utc, updated_at_utc)
+                VALUES (1, 1, 'Plov', 'plov', 6, 1, 1)
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO sessions(user_id, chat_id, state, selected_favorite_id,
+                    revision, updated_at_utc)
+                VALUES (1, 10, 'wait_favorite_grams', 1, 4, 1),
+                       (1, 11, 'wait_favorite_grams', 7, 0, 1)
+                """
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        self.database.initialize()
+
+        def names(user_id: int) -> dict[int, str]:
+            return {
+                item.favorite_id: item.name
+                for item in self.database.page_favorites(user_id, 0, 50).items
+            }
+
+        self.assertEqual(
+            names(1),
+            {
+                2: "rice",
+                3: "Oats (3)",
+                4: "OATS",
+                5: "Oats (2)",
+                6: "Plov",
+                8: "Bar",
+            },
+        )
+        self.assertEqual(names(2), {9: "Rice"})
+        self.assertEqual(370, self.database.get_favorite(1, 3).calories_per_100g)
+        # Workflows that had picked a merged duplicate now hold the survivor,
+        # under a new revision so a stale handler cannot write the old id back.
+        rice_session = self.database.get_session(1, 10)
+        self.assertEqual(2, rice_session.selected_favorite_id)
+        self.assertEqual(5, rice_session.revision)
+        self.assertEqual(6, self.database.get_session(1, 11).selected_favorite_id)
+        with closing(sqlite3.connect(self.path)) as connection, connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT favorite_id FROM recipes WHERE recipe_id = 1"
+                ).fetchone()[0],
+                6,
+            )
+            self.assertEqual(
+                connection.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION
+            )
+            self.assertEqual(
+                connection.execute("PRAGMA foreign_key_check").fetchall(), []
+            )
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    insert, (10, 1, "RICE", "rice", "100g", None, 1) + (None,) * 3
+                )
+
+    def test_concurrent_saves_of_a_new_name_create_one_favorite(self) -> None:
+        workers = 8
+        barrier = threading.Barrier(workers)
+        results: list[tuple[int, bool]] = []
+        errors: list[str] = []
+
+        def save(index: int) -> None:
+            barrier.wait()
+            try:
+                favorite, created = self.database.save_favorite(
+                    1,
+                    "Rice" if index % 2 else "rice",
+                    "100g",
+                    250.0 + index,
+                    10,
+                    20,
+                    30,
+                )
+                results.append((favorite.favorite_id, created))
+            except Exception as exc:  # collected for the assertion message
+                errors.append(repr(exc))
+
+        threads = [threading.Thread(target=save, args=(i,)) for i in range(workers)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len({favorite_id for favorite_id, _ in results}), 1)
+        self.assertEqual([created for _, created in results].count(True), 1)
+        self.assertEqual(len(self.database.page_favorites(1, 0, 50).items), 1)
+
+    def test_every_favorite_save_path_updates_an_existing_name(self) -> None:
+        first = self.database.add_favorite(1, "Rice", 250.0, 10.0, 20.0, 30.0, 1)
+        again = self.database.add_favorite(1, "RICE", 200.0, None, None, None, 2)
+        self.assertEqual(first.favorite_id, again.favorite_id)
+        self.assertEqual(200.0, again.calories_per_100g)
+        self.database.start_session(
+            1,
+            10,
+            SessionState.WAIT_SAVE_FAVORITE,
+            now_utc=3,
+            draft_name="rice",
+            calories_per_100g=180.0,
+        )
+        saved = self.database.save_session_as_favorite(1, 10, 4)
+        self.assertEqual(first.favorite_id, saved.favorite_id)
+        self.assertEqual(180.0, saved.calories_per_100g)
+        self.assertEqual(1, len(self.database.page_favorites(1, 0, 50).items))
 
 
 if __name__ == "__main__":

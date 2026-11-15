@@ -18,11 +18,35 @@ const {chromium, webkit} = require(process.env.PLAYWRIGHT_MODULE_PATH || path.re
         isVersionAtLeast:()=>true, ready(){},expand(){},disableVerticalSwipes(){},setHeaderColor(){},setBackgroundColor(){},
         onEvent(name,fn){events[name]=fn}, emit(name){events[name]?.()},
         BackButton:{show(){},hide(){},onClick(fn){this.click=fn}},MainButton:main,
-        enableClosingConfirmation(){this.dirty=true},disableClosingConfirmation(){this.dirty=false},showConfirm(text,fn){fn(true)}
+        enableClosingConfirmation(){this.dirty=true},disableClosingConfirmation(){this.dirty=false},showConfirm(text,fn){fn(true)},
+        close(){this.closed=true}
       }};`
     }));
+    // A first load that fails every retry offers its own «Повторить».
+    let diaryFailures = 3;
+    await page.route('**/api/diary?*', route => diaryFailures-- > 0 ? route.fulfill({status:502, body:'Bad Gateway'}) : route.continue());
     await page.goto(process.argv[2]);
+    await page.locator('#notice').getByRole('button', {name:'Повторить', exact:true}).click();
     await page.locator('#app').waitFor({state:'visible'});
+    await page.unroute('**/api/diary?*');
+    // Back from the background after midnight, a diary left on «today» follows
+    // the clock, and what the bot changed meanwhile shows up.
+    const today = await page.locator('#day').inputValue();
+    const dayBefore = date => { const value = new Date(`${date}T12:00:00Z`); value.setUTCDate(value.getUTCDate() - 1); return value.toISOString().slice(0, 10); };
+    await page.evaluate(day => { state.day = state.today = day; document.getElementById('day').value = day; renderDayLabel(); }, dayBefore(today));
+    assert.match(await page.locator('#day-label').textContent(), /^Сегодня/);
+    // Even before the refresh lands, a new entry defaults to now, not to that day's noon.
+    assert.equal(await page.evaluate(() => defaultTime().slice(0, 10)), today);
+    const setGoal = goal => page.evaluate(async goal => {
+      const response = await fetch('/api/profile', {method:'PUT', body:JSON.stringify({goal}),
+        headers:{Authorization:`tma ${Telegram.WebApp.initData}`, 'Content-Type':'application/json'}});
+      if (!response.ok) throw new Error(await response.text());
+    }, goal);
+    await setGoal(2000);
+    await page.evaluate(() => Telegram.WebApp.emit('activated'));
+    await page.waitForFunction(day => document.getElementById('day').value === day, today);
+    await page.waitForFunction(() => document.getElementById('energy-label').textContent === 'ОСТАЛОСЬ');
+    await setGoal(null);
     assert.equal(await page.locator('html').getAttribute('data-theme'), 'dark');
     // Anything under 16px makes mobile WebViews zoom into the field on focus.
     assert.deepEqual(await page.evaluate(() => [...document.querySelectorAll('input,select,textarea')]
@@ -78,6 +102,20 @@ const {chromium, webkit} = require(process.env.PLAYWRIGHT_MODULE_PATH || path.re
     await page.waitForFunction(() => document.getElementById('calories').textContent === '0');
     await page.getByRole('button', {name:'Отменить',exact:true}).click();
     await page.waitForFunction(() => document.getElementById('calories').textContent === '370');
+    // Changed in the bot meanwhile: deleting the stale card conflicts and redraws the diary.
+    await page.evaluate(async day => {
+      const auth = {Authorization:`tma ${Telegram.WebApp.initData}`};
+      const entry = (await (await fetch(`/api/diary?day=${day}`, {headers:auth})).json()).entries.items[0];
+      const response = await fetch(`/api/entries/${entry.entry_id}`, {method:'PATCH',
+        headers:{...auth, 'Content-Type':'application/json', 'Idempotency-Key':crypto.randomUUID()},
+        body:JSON.stringify({name:entry.name, eaten_at:`${day}T12:01`, calories:entry.values.calories, grams:entry.nutrition.grams,
+          protein:entry.values.protein, fat:entry.values.fat, carbs:entry.values.carbs, version:entry.version})});
+      if (!response.ok) throw new Error(await response.text());
+    }, day);
+    await page.getByRole('button', {name:'Удалить',exact:true}).click();
+    await page.locator('.message-toast').filter({hasText:'Запись изменилась'}).waitFor();
+    await page.waitForFunction(() => document.querySelector('#entries .entry-meta').textContent.startsWith('12:01'));
+    assert.equal(await page.locator('#entries .entry').count(), 1);
     await page.locator('#recent-button').click();
     await page.locator('#recent-list button').click();
     assert.equal(await page.locator('#food-form [name=grams]').inputValue(), '100');
@@ -210,8 +248,23 @@ const {chromium, webkit} = require(process.env.PLAYWRIGHT_MODULE_PATH || path.re
     await page.locator('#weight-form [name=weight_kg]').fill('79');
     await page.evaluate(() => Telegram.WebApp.MainButton.click());
     await page.waitForFunction(() => document.getElementById('weight-list').textContent.includes('79 кг'));
-    await page.locator('#weight-list').getByRole('button',{name:'Удалить',exact:true}).click();
-    await page.waitForFunction(() => !document.querySelector('#weight-list .entry'));
+    // The chart scales to the range shown: 80 and 79 kg must not look alike.
+    await page.locator('#weight-form [name=measured_at]').fill(`${dayBefore(day)}T08:00`);
+    await page.locator('#weight-form [name=weight_kg]').fill('80');
+    await page.evaluate(() => Telegram.WebApp.MainButton.click());
+    await page.waitForFunction(() => document.querySelectorAll('#weight-list .entry').length === 2);
+    const weightBars = await page.locator('#weight-chart progress').evaluateAll(bars => bars.map(bar => [bar.getAttribute('aria-label'), bar.value / bar.max]));
+    assert.equal(weightBars.length, 2);
+    assert.ok(weightBars[0][0].endsWith(': 80 кг') && weightBars[0][1] > 0.7, JSON.stringify(weightBars));
+    assert.ok(weightBars[1][0].endsWith(': 79 кг') && weightBars[1][1] < 0.3, JSON.stringify(weightBars));
+    assert.match(await page.locator('#weight-chart').textContent(), /Шкала полосок: 78,5–80,5 кг/);
+    // One measurement, or a flat series, sits mid-scale.
+    assert.deepEqual(await page.evaluate(() => [weightScale([80]), weightScale([80, 80]), weightScale([79.2, 80])]),
+      [{from:79.5, to:80.5}, {from:79.5, to:80.5}, {from:78.7, to:80.5}]);
+    for (const remaining of [1, 0]) {
+      await page.locator('#weight-list').getByRole('button',{name:'Удалить',exact:true}).first().click();
+      await page.waitForFunction(count => document.querySelectorAll('#weight-list .entry').length === count, remaining);
+    }
     await page.locator('#weights-dialog .close').click();
     // Inline favorites: reversed fragments, explicit selection, preserved date
     // and quantity, then a serving-based favorite restored from a draft.
@@ -428,7 +481,25 @@ const {chromium, webkit} = require(process.env.PLAYWRIGHT_MODULE_PATH || path.re
     await page.locator('#recipes .empty').waitFor();
     assert.equal(await page.evaluate(async () => (await (await fetch('/api/favorites?q=плов', {headers:{Authorization:`tma ${Telegram.WebApp.initData}`}})).json()).items.length), 0);
     await page.locator('#recipes-dialog .close').click();
+    // An hour after launch Telegram's signature has expired. Back from the
+    // background the app says so at once, and the unsaved form stays a draft.
+    await page.locator('#recipes-dialog').waitFor({state:'hidden'});
+    await page.locator('#add-button').click();
+    await page.locator('#food-form [name=name]').fill('Сырники');
+    await page.locator('#food-form [name=calories]').fill('220');
+    await page.route('**/api/**', route => route.fulfill({status:401, contentType:'application/json',
+      body:JSON.stringify({error:'Откройте приложение заново из Telegram.'})}));
+    await page.evaluate(() => Telegram.WebApp.emit('activated'));
+    await page.locator('#expired').waitFor({state:'visible'});
+    assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('kcalorie-drafts-123'))['food-form'].values.name), 'Сырники');
+    await page.evaluate(() => Telegram.WebApp.MainButton.click());
+    await page.waitForFunction(() => document.querySelector('#food-form .form-error').textContent.includes('Сессия истекла'));
+    await page.locator('#food-dialog .close').click();
+    await page.locator('#food-dialog').waitFor({state:'hidden'});
+    await page.locator('#drafts').getByText('Еда', {exact:false}).waitFor();
+    await page.locator('#expired-close').click();
+    assert.ok(await page.evaluate(() => Telegram.WebApp.closed));
     assert.deepEqual(errors, []);
-    console.log('Mobile flow, retry, draft, edit, undo, recipes and Telegram theme: OK');
+    console.log('Mobile flow, retry, resume, draft, edit, undo, recipes, weight chart, expiry and Telegram theme: OK');
   } finally { await browser.close(); }
 })().catch(error => {console.error(error);process.exitCode=1});

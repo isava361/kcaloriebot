@@ -63,6 +63,8 @@ class CallbackParsingTests(unittest.TestCase):
                 "entry_field", record_id=7, nutrient="carbs"
             ),
             "fav:serving:11": CallbackAction("favorite_to_serving", record_id=11),
+            "photo:save:812": CallbackAction("photo_save", record_id=812),
+            "photo:cancel:812": CallbackAction("photo_cancel", record_id=812),
         }
         for data, expected in cases.items():
             with self.subTest(data=data):
@@ -140,6 +142,23 @@ class CallbackParsingTests(unittest.TestCase):
             with self.subTest(data=data):
                 self.assertIsNone(parse_callback(data))
 
+    def test_reminder_callbacks(self) -> None:
+        for data in (
+            "menu:reminders",
+            "notify:reminder:time",
+            "notify:reminder:off",
+            "notify:weekly:on",
+            "notify:weekly:off",
+        ):
+            with self.subTest(data=data):
+                self.assertLess(len(data.encode()), 64)
+                self.assertEqual(
+                    CallbackAction(data.replace(":", "_")), parse_callback(data)
+                )
+        for data in ("notify:weekly", "notify:reminder:on", "notify:weekly:on|0|"):
+            with self.subTest(data=data):
+                self.assertIsNone(parse_callback(data))
+
     def test_unknown_or_malformed_actions_are_rejected(self) -> None:
         for data in (
             "",
@@ -159,6 +178,10 @@ class CallbackParsingTests(unittest.TestCase):
             "stats:month:26-06:0",
             "stats:month:2026-06:5",
             "stats:week:2026-06:0",
+            "photo:save:0",
+            "photo:save",
+            "photo:edit:1",
+            "photo:save:1|0|",
         ):
             with self.subTest(data=data):
                 self.assertIsNone(parse_callback(data))

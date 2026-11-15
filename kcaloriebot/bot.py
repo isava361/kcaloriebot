@@ -5,7 +5,7 @@ import html
 import logging
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Callable, Optional, TypeVar
+from typing import Any, Awaitable, Callable, Optional, TypeVar
 from urllib.parse import urljoin
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, WebAppInfo
@@ -30,13 +30,35 @@ from .callbacks import (
 )
 from .config import Settings
 from .database import Database
+from .export import food_csv, weight_csv
 from .health import HealthStore
 from .photo_ai import (
     MAX_IMAGE_BYTES,
+    MAX_IMAGES_PER_REQUEST,
+    MAX_OWNER_FAVORITES,
+    MAX_OWNER_RECENT,
+    MAX_REQUEST_IMAGE_BYTES,
     SUPPORTED_MEDIA_TYPES,
+    OwnerFood,
     PhotoAnalyzer,
+    PhotoImage,
     PhotoUnavailable,
     build_analyzer,
+    owner_foods_from,
+)
+from .photo_proposals import (
+    CANCELLED,
+    OPEN,
+    SAVED,
+    PhotoProposal,
+    PhotoProposalStore,
+    has_proposal_buttons,
+    missing_weight_alert,
+    proposal_keyboard,
+    proposal_text,
+    saved_items,
+    saved_keyboard,
+    saved_text,
 )
 from .domain import (
     EARLIEST_DIARY_DATE,
@@ -45,26 +67,30 @@ from .domain import (
     UNIT_100G,
     UNIT_SERVING,
     NotFound,
+    NotificationSettings,
     Period,
     Session,
     SessionState,
     StateConflict,
     ValidationError,
+    WEEKLY_SUMMARY_MINUTE,
     canonical_timezone,
     day_bounds,
     local_date,
+    minute_text,
     month_bounds,
     normalize_food_name,
     normalize_search_query,
     parse_calories,
     parse_calories_per_serving,
-    parse_daily_goal,
     parse_entry_time,
+    parse_goals,
     parse_grams,
     parse_macro,
     parse_macro_per_serving,
     parse_nutrient_value,
     parse_quick_add,
+    parse_reminder_time,
     parse_servings,
     parse_weight,
     period_bounds,
@@ -109,6 +135,7 @@ from .render import (
     day_navigation_row,
     day_stats_block,
     entry_button_text,
+    export_row,
     entry_details,
     favorite_button_text,
     favorite_details,
@@ -117,7 +144,14 @@ from .render import (
     session_prompt,
     stats_day_rows,
     stats_totals_text,
+    goals_summary,
+    reminder_settings_rows,
+    reminder_settings_text,
+    today_progress_text,
+    REMINDER_TIME_KEYBOARD,
+    REMINDER_TIME_PROMPT,
 )
+from .notifications import start_notifier, stop_notifier
 
 
 __all__ = [
@@ -140,6 +174,7 @@ __all__ = [
     "unknown_command",
     "handle_non_text",
     "handle_photo",
+    "handle_photo_callback",
     "handle_error",
     "build_application",
 ]
@@ -161,9 +196,11 @@ READ_ONLY_CALLBACKS = frozenset(
         "stats_page",
         "stats_day",
         "weight_view",
+        "export",
     }
 )
-# The only Telegram account allowed to run /users and log food from photos.
+# The only Telegram account allowed to run /users and have Claude recognize
+# food in photos and text descriptions.
 ADMIN_USER_ID = 193117018
 
 
@@ -494,20 +531,14 @@ async def _log_quick_add(turn: Turn, text: str) -> bool:
 
 
 async def _today_progress(database: Database, user_id: int) -> str:
-    """One-line calorie total for the user's local today, with goal if set."""
+    """Calorie total for the user's local today, with goal progress if set."""
     timezone_name = await _call(database.get_timezone, user_id)
     if timezone_name is None:
         return ""
     bounds = period_bounds(Period.TODAY, timezone_name)
     stats = await _call(database.stats, user_id, bounds.start_utc, bounds.end_utc)
-    goal = await _call(database.get_daily_goal, user_id)
-    total = stats.calories
-    if goal is None:
-        return f"Today: {total:.0f} kcal."
-    remaining = goal - total
-    if remaining >= 0:
-        return f"Today: {total:.0f} / {goal:.0f} kcal ({remaining:.0f} left)."
-    return f"Today: {total:.0f} / {goal:.0f} kcal ({-remaining:.0f} over)."
+    goals = await _call(database.get_goals, user_id)
+    return today_progress_text(stats, goals)
 
 
 async def _send_receipt(
@@ -521,8 +552,9 @@ async def _send_receipt(
     progress = await _today_progress(database, user_id)
     text = (
         f"Added {entry.name or 'food'} · {amount_text(entry.nutrition)}\n"
-        f"{entry.nutrition.calories:.0f} kcal\n{progress}\n"
-        f"{macro_text(entry.nutrition.protein, entry.nutrition.fat, entry.nutrition.carbs)}"
+        f"{entry.nutrition.calories:.0f} kcal\n"
+        f"{macro_text(entry.nutrition.protein, entry.nutrition.fat, entry.nutrition.carbs)}\n"
+        f"{progress}"
     )
     rows = [
         [
@@ -689,6 +721,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     text = turn.message.text.strip()
     database = turn.database
+    if await _handle_photo_correction(turn, context, text):
+        return
 
     if text == "Cancel":
         if (
@@ -775,11 +809,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
     elif text == "Settings":
         await turn.message.reply_text(
-            "Settings — daily goal, timezone and Apple Health:",
+            "Settings — goals, reminders, timezone, Apple Health and data export:",
             reply_markup=SETTINGS_KEYBOARD,
         )
     elif text == "Apple Health":
         await _health_action(update, context, [])
+    elif text == "Export data":
+        await _send_export(turn, timezone_name)
     elif text == "Week Stats":
         await _show_daily_stats(update, context, Period.WEEK, 0)
     elif text == "Month Stats":
@@ -799,12 +835,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     elif text.casefold() == "recent foods":
         await _show_recent(update, context)
     elif text.casefold() == "daily goal":
-        goal = await _call(database.get_daily_goal, turn.user_id)
-        prompt = (
-            f"Your daily goal is {goal:.0f} kcal. {GOAL_PROMPT}"
-            if goal is not None
-            else GOAL_PROMPT
-        )
+        goals = await _call(database.get_goals, turn.user_id)
+        current = goals_summary(goals)
+        prompt = f"Your goals: {current}. {GOAL_PROMPT}" if current else GOAL_PROMPT
         await _start_with_prompt(
             database,
             turn.user_id,
@@ -828,7 +861,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
     elif text in {"Back", "Main menu"}:
         await turn.message.reply_text("Select an option:", reply_markup=MAIN_KEYBOARD)
-    elif not await _log_quick_add(turn, text):
+    elif text == "Reminders":
+        await _show_reminder_settings(database, turn.user_id, turn.message)
+    elif not await _log_quick_add(turn, text) and not await _propose_from_words(
+        turn, context, text
+    ):
         await turn.message.reply_text(
             "Choose an option from the keyboard, or log a food in one message, "
             "for example: oatmeal 370 60.",
@@ -1122,13 +1159,20 @@ async def _handle_session_text(
                 database, session.user_id, message, entry, restore_keyboard=True
             )
         elif session.state == SessionState.WAIT_GOAL:
-            goal = None if text == "Remove" else parse_daily_goal(text)
-            await _call(database.complete_goal_session, session, goal, now)
+            changes = None if text == "Remove" else parse_goals(text)
+            goals = await _call(database.complete_goals_session, session, changes, now)
+            summary = goals_summary(goals)
             await message.reply_text(
-                "Daily goal removed."
-                if goal is None
-                else f"Daily goal set to {goal:.0f} kcal.",
+                f"Goals set: {summary}." if summary else "Goals removed.",
                 reply_markup=MAIN_KEYBOARD,
+            )
+        elif session.state == SessionState.WAIT_REMINDER_TIME:
+            minute = None if text == "Off" else parse_reminder_time(text)
+            settings = await _call(
+                database.complete_reminder_session, session, minute, now
+            )
+            await message.reply_text(
+                _reminder_confirmation(settings, now), reply_markup=MAIN_KEYBOARD
             )
         elif session.state == SessionState.WAIT_ENTRY_GRAMS:
             amount = _parse_entry_amount(session, text)
@@ -1389,8 +1433,10 @@ async def _day_totals_text(
         title = "Yesterday's totals"
     else:
         title = f"Totals for {day.isoformat()}"
-    goal = await _call(database.get_daily_goal, user_id) if day == today else None
-    return stats_totals_text(title, stats, goal)
+    goals = await _call(database.get_goals, user_id) if day == today else None
+    return stats_totals_text(
+        title, stats, None if goals is None else goals.calories, goals
+    )
 
 
 async def _show_daily_stats(
@@ -1453,6 +1499,9 @@ async def _show_daily_stats(
         navigation = navigation_row(page, prefix, STATS_PAGE_SIZE)
         if navigation:
             rows.append(navigation)
+        rows.append(
+            export_row("week" if shown_month is None else f"month:{shown_month:%Y-%m}")
+        )
     if shown_month is not None:
         months = month_navigation_row(shown_month.year, shown_month.month, today)
         if months:
@@ -1530,6 +1579,7 @@ async def _show_entries(
         navigation = navigation_row(page, list_prefix)
         if navigation:
             rows.append(navigation)
+        rows.append(export_row(f"day:{shown_day.isoformat()}"))
     day_navigation = day_navigation_row(shown_day, today, oldest)
     if day_navigation:
         rows.append(day_navigation)
@@ -1723,11 +1773,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.message.reply_text(
                 "Progress — food statistics and weight:"
                 if action.kind == "menu_progress"
-                else "Settings — daily goal, timezone and Apple Health:",
+                else "Settings — goals, reminders, timezone, Apple Health and data export:",
                 reply_markup=STATS_KEYBOARD
                 if action.kind == "menu_progress"
                 else SETTINGS_KEYBOARD,
             )
+        elif action.kind == "menu_reminders" or action.kind.startswith("notify_"):
+            await _handle_notify_action(query, database, user_id, chat_id, action.kind)
         elif (
             action.kind in {"weight_edit", "weight_undo", "weight_view"}
             and action.record_id is not None
@@ -1809,6 +1861,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     days=1
                 )
                 await _show_entries(update, context, 0, edit=True, day=yesterday)
+        elif action.kind == "export":
+            await _send_period_export(database, user_id, query.message, action)
         elif action.kind == "favorite_list":
             await _show_favorites(update, context, action.offset, edit=True)
         elif action.kind == "entry_view" and action.record_id is not None:
@@ -2320,64 +2374,763 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             "Фото больше 5 МБ — отправьте его сжатым.", reply_markup=MAIN_KEYBOARD
         )
         return
-    await message.reply_text("Распознаю фото…")
+    part = _PhotoPart(message, attachment, media_type)
+    group = getattr(message, "media_group_id", None)
+    albums = _photo_albums(context.application)
+    album_key = (turn.chat_id, str(group))
+    album = albums.get(album_key) if group is not None else None
+    if album is not None:
+        await _join_album(album, part)
+        return
+    if group is not None:
+        # Register before the first await so the rest of the album joins it.
+        album = _PendingAlbum([part], attachment.file_size or 0, asyncio.Event())
+        albums[album_key] = album
     try:
-        telegram_file = await attachment.get_file()
-        image = bytes(await telegram_file.download_as_bytearray())
-        analysis = await analyzer.analyze(image, media_type, message.caption)
-    except (TelegramError, PhotoUnavailable):
-        logger.warning("Photo analysis failed user_id=%s", turn.user_id, exc_info=True)
-        await message.reply_text(
-            "Не удалось распознать фото. Попробуйте ещё раз или введите вручную.",
-            reply_markup=MAIN_KEYBOARD,
-        )
-        return
-    if not analysis.foods and analysis.weight_kg is None:
-        await message.reply_text(
-            analysis.comment or "На фото не нашлось, что записать.",
-            reply_markup=MAIN_KEYBOARD,
-        )
-        return
-    if analysis.comment:
-        await message.reply_text(analysis.comment)
+        status = await message.reply_text("Распознаю фото…")
+    except BaseException:
+        if album is not None:
+            albums.pop(album_key, None)
+        raise
     message_date = getattr(message, "date", None)
     event_epoch = (
         int(message_date.timestamp())
         if message_date is not None
         else database.now_epoch()
     )
-    for food in analysis.foods:
-        if food.servings is not None:
-            entry = await _call(
-                database.add_serving_entry,
-                turn.user_id,
-                event_epoch,
-                food.name,
-                food.calories,
-                food.servings,
-                food.protein,
-                food.fat,
-                food.carbs,
-                food.grams,
+    # The Claude call takes up to minutes; run it off the single update lane.
+    _start_photo_task(
+        context.application,
+        _propose_from_photo(
+            _photo_store(context.application),
+            analyzer,
+            database,
+            [part] if album is None else album.parts,
+            status,
+            turn.user_id,
+            turn.chat_id,
+            event_epoch,
+            None if album is None else (albums, album_key, album),
+        ),
+        name=f"photo-{message.message_id}",
+    )
+
+
+PHOTO_FAILED_TEXT = (
+    "Не удалось распознать фото. Попробуйте ещё раз или введите вручную."
+)
+# After a restart the bot no longer knows whether a proposal came from a photo.
+PHOTO_EXPIRED_TEXT = "Предложение устарело — отправьте фото или описание ещё раз."
+PHOTO_RESTART_TEXT = (
+    "Бот перезапускается, фото не успело распознаться — отправьте его ещё раз."
+)
+TEXT_FAILED_TEXT = (
+    "Не удалось разобрать описание. Попробуйте ещё раз или введите вручную."
+)
+TEXT_RESTART_TEXT = (
+    "Бот перезапускается, описание не успело обработаться — отправьте его ещё раз."
+)
+# A description longer than this is far more likely an accidental paste than
+# a meal, and is not sent to Claude.
+MAX_DESCRIPTION_CHARS = 500
+TEXT_TOO_LONG_TEXT = (
+    f"Слишком длинное описание — опишите еду короче, до {MAX_DESCRIPTION_CHARS} "
+    "символов."
+)
+# «ок», «+», «?» or a stray character is not worth a request.
+MIN_DESCRIPTION_LETTERS = 3
+TEXT_REPLY_IGNORED_TEXT = (
+    "Открытого предложения для этого ответа нет. Чтобы записать еду, опишите её "
+    "отдельным сообщением, не ответом."
+)
+PHOTO_CORRECTION_FAILED_TEXT = (
+    "Не удалось учесть исправление — попробуйте ещё раз. Предложение не изменилось."
+)
+PHOTO_REMOVE_EXPIRED_TEXT = (
+    "Убрать отсюда можно в течение 15 минут. Откройте запись кнопкой слева — "
+    "там её можно удалить."
+)
+PHOTO_BUSY_TEXT = "Пересчитываю с учётом исправления — подождите."
+PHOTO_ALBUM_FULL_TEXT = (
+    "Это фото не поместилось в общий запрос альбома — отправьте его отдельно."
+)
+# How long a restart waits for interrupted analyses to tell the owner.
+PHOTO_SHUTDOWN_GRACE_SECONDS = 10.0
+# Telegram delivers an album as separate messages sharing a media_group_id,
+# with no marker for the last one. A client sends them in one burst, so the
+# album counts as complete once no new photo arrived for ALBUM_QUIET_SECONDS;
+# the analysis starts after ALBUM_MAX_WAIT_SECONDS at the latest. A photo
+# outside an album is analyzed at once.
+ALBUM_QUIET_SECONDS = 1.5
+ALBUM_MAX_WAIT_SECONDS = 6.0
+# Text sent by reply-keyboard buttons is never a correction, even when the
+# owner taps a button while replying to a proposal.
+_REPLY_KEYBOARD_LABELS = frozenset(
+    button.text
+    for markup in (
+        MAIN_KEYBOARD,
+        STATS_KEYBOARD,
+        SETTINGS_KEYBOARD,
+        CANCEL_KEYBOARD,
+        SKIP_KEYBOARD,
+        FAVORITE_DECISION_KEYBOARD,
+        GOAL_KEYBOARD,
+        REPEAT_KEYBOARD,
+        MANUAL_ENTRY_KEYBOARD,
+        SERVINGS_KEYBOARD,
+        FAVORITE_SERVINGS_MANUAL_KEYBOARD,
+        TIMEZONE_CHANGE_KEYBOARD,
+        REMINDER_TIME_KEYBOARD,
+    )
+    for row in markup.keyboard
+    for button in row
+)
+# Menu words in any letter case (with the older labels handle_text still
+# accepts) are never a meal description, so a slip such as «diary» gets the
+# usual hint instead of a request to Claude.
+_MENU_WORDS = frozenset(
+    label.casefold()
+    for label in (
+        *_REPLY_KEYBOARD_LABELS,
+        "Per Serving",
+        "Food Today",
+        "Statistics",
+        "My Favorites",
+        "Search favorites",
+        "Update Timezone",
+    )
+)
+
+
+@dataclass(frozen=True)
+class _Wording:
+    """What the background steps say, for a photo or for a text description."""
+
+    failed: str
+    restart: str
+    nothing: str
+    already_saved: str
+
+
+_PHOTO_WORDING = _Wording(
+    failed=PHOTO_FAILED_TEXT,
+    restart=PHOTO_RESTART_TEXT,
+    nothing="На фото не нашлось, что записать.",
+    already_saved="Это фото уже записано.",
+)
+_TEXT_WORDING = _Wording(
+    failed=TEXT_FAILED_TEXT,
+    restart=TEXT_RESTART_TEXT,
+    nothing="В сообщении не нашлось еды — ничего не записано.",
+    already_saved="Это уже записано.",
+)
+
+
+def _wording(proposal: PhotoProposal) -> _Wording:
+    return _TEXT_WORDING if proposal.from_text else _PHOTO_WORDING
+
+
+def _photo_store(application: Any) -> PhotoProposalStore:
+    return application.bot_data.setdefault("photo_proposals", PhotoProposalStore())
+
+
+@dataclass
+class _PhotoPart:
+    message: Any
+    attachment: Any
+    media_type: str
+
+
+@dataclass
+class _PendingAlbum:
+    """Photos of one album, collected while more of them may still arrive."""
+
+    parts: list[_PhotoPart]
+    total_bytes: int
+    arrived: asyncio.Event
+
+
+_AlbumSlot = tuple[dict[tuple[int, str], _PendingAlbum], tuple[int, str], _PendingAlbum]
+
+
+def _photo_albums(application: Any) -> dict[tuple[int, str], _PendingAlbum]:
+    return application.bot_data.setdefault("photo_albums", {})
+
+
+async def _join_album(album: _PendingAlbum, part: _PhotoPart) -> None:
+    size = part.attachment.file_size or 0
+    if (
+        len(album.parts) >= MAX_IMAGES_PER_REQUEST
+        or album.total_bytes + size > MAX_REQUEST_IMAGE_BYTES
+    ):
+        await part.message.reply_text(PHOTO_ALBUM_FULL_TEXT, reply_markup=MAIN_KEYBOARD)
+        return
+    album.parts.append(part)
+    album.total_bytes += size
+    album.arrived.set()
+
+
+async def _collect_album(slot: _AlbumSlot) -> None:
+    """Wait until the album stops growing, then close it to newcomers."""
+    albums, key, album = slot
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + ALBUM_MAX_WAIT_SECONDS
+    try:
+        while (remaining := deadline - loop.time()) > 0:
+            album.arrived.clear()
+            try:
+                await asyncio.wait_for(
+                    album.arrived.wait(), min(ALBUM_QUIET_SECONDS, remaining)
+                )
+            except asyncio.TimeoutError:
+                break
+    finally:
+        # A photo of this album arriving later starts its own analysis.
+        if albums.get(key) is album:
+            del albums[key]
+
+
+async def _owner_foods(database: Database, user_id: int) -> tuple[OwnerFood, ...]:
+    """The owner's favorites and recent foods; a failure only loses the hint."""
+    try:
+        favorites = await _call(
+            database.page_favorites, user_id, 0, MAX_OWNER_FAVORITES
+        )
+        recent = await _call(database.recent_entry_templates, user_id, MAX_OWNER_RECENT)
+    except Exception:
+        logger.warning("Owner foods could not be loaded", exc_info=True)
+        return ()
+    return owner_foods_from(favorites.items, recent)
+
+
+def _album_caption(parts: list[_PhotoPart]) -> Optional[str]:
+    """The caption, which Telegram attaches to any one photo of an album."""
+    captions = [
+        caption.strip()
+        for part in parts
+        if isinstance(caption := getattr(part.message, "caption", None), str)
+        and caption.strip()
+    ]
+    return "\n".join(captions) or None
+
+
+async def _download_images(parts: list[_PhotoPart]) -> tuple[PhotoImage, ...]:
+    images: list[PhotoImage] = []
+    total = 0
+    for part in parts:
+        telegram_file = await part.attachment.get_file()
+        data = bytes(await telegram_file.download_as_bytearray())
+        if images and total + len(data) > MAX_REQUEST_IMAGE_BYTES:
+            logger.warning("Album photo skipped: the request would be too large")
+            continue
+        total += len(data)
+        images.append(PhotoImage(data, part.media_type))
+    return tuple(images)
+
+
+def _start_photo_task(application: Any, coroutine: Any, name: str) -> asyncio.Task:
+    """Run a photo analysis in the background and keep a reference to it.
+
+    Not Application.create_task: Application.stop() awaits those, so a restart
+    would wait for the whole Claude call and then post a proposal whose buttons
+    die with the process. These tasks are cancelled by _stop_photo_tasks.
+    """
+    tasks: set[asyncio.Task] = application.bot_data.setdefault("photo_tasks", set())
+    task = asyncio.create_task(coroutine, name=name)
+    tasks.add(task)
+    task.add_done_callback(lambda done: _photo_task_done(tasks, done))
+    return task
+
+
+def _photo_task_done(tasks: set[asyncio.Task], task: asyncio.Task) -> None:
+    tasks.discard(task)
+    # The tasks report their own failures; this is the last line of defence.
+    if not task.cancelled() and task.exception() is not None:
+        logger.error(
+            "Photo task %s crashed", task.get_name(), exc_info=task.exception()
+        )
+
+
+async def _stop_photo_tasks(application: Application) -> None:
+    """post_stop hook: interrupt running analyses so they tell the owner."""
+    tasks = list(application.bot_data.get("photo_tasks", ()))
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.wait(tasks, timeout=PHOTO_SHUTDOWN_GRACE_SECONDS)
+
+
+async def _photo_post(
+    status: Any, anchor: Any, text: str, reply_markup: Any = None
+) -> Any:
+    """Post a background result and remove the «working on it» status message.
+
+    A new message (quoting the photo or correction it answers) notifies the
+    owner, unlike an edit, and keeps several photos in flight apart.
+    """
+    sent = await anchor.reply_text(
+        text,
+        reply_markup=reply_markup,
+        do_quote=True,
+        allow_sending_without_reply=True,
+    )
+    try:
+        await status.delete()
+    except TelegramError:
+        logger.warning("Photo status message could not be deleted", exc_info=True)
+    return sent
+
+
+async def _photo_report(status: Any, anchor: Any, text: str) -> None:
+    """Tell the owner about a failed background step; never raises."""
+    try:
+        await _photo_post(status, anchor, text, MAIN_KEYBOARD)
+    except Exception:
+        logger.exception("Photo failure could not be reported")
+
+
+async def _show_proposal(
+    store: PhotoProposalStore,
+    proposal: PhotoProposal,
+    status: Any,
+    anchor: Any,
+    prefix: str = "",
+) -> None:
+    # Store first: the owner may tap the buttons as soon as they appear.
+    store.add(proposal)
+    shown = await _photo_post(
+        status,
+        anchor,
+        proposal_text(proposal.analysis, prefix),
+        proposal_keyboard(proposal.key),
+    )
+    proposal.show_in(shown)
+
+
+# (images, caption or description, the owner's message IDs it answers)
+_ProposalInputs = tuple[tuple[PhotoImage, ...], Optional[str], frozenset[int]]
+
+
+async def _propose_from_photo(
+    store: PhotoProposalStore,
+    analyzer: PhotoAnalyzer,
+    database: Database,
+    parts: list[_PhotoPart],
+    status: Any,
+    user_id: int,
+    chat_id: int,
+    event_epoch: int,
+    album: Optional[_AlbumSlot] = None,
+) -> None:
+    """Background task: analyze a photo or an album and show the result.
+
+    For an album, ``parts`` keeps growing until _collect_album returns.
+    """
+
+    async def inputs() -> _ProposalInputs:
+        if album is not None:
+            await _collect_album(album)
+        ordered = sorted(parts, key=lambda part: part.message.message_id)
+        return (
+            await _download_images(ordered),
+            _album_caption(ordered),
+            frozenset(part.message.message_id for part in ordered),
+        )
+
+    await _propose(
+        store,
+        analyzer,
+        database,
+        parts[0].message,
+        status,
+        user_id,
+        chat_id,
+        event_epoch,
+        inputs,
+    )
+
+
+async def _propose_from_text(
+    store: PhotoProposalStore,
+    analyzer: PhotoAnalyzer,
+    database: Database,
+    message: Any,
+    text: str,
+    status: Any,
+    user_id: int,
+    chat_id: int,
+    event_epoch: int,
+) -> None:
+    """Background task: analyze the owner's description of a meal."""
+
+    async def inputs() -> _ProposalInputs:
+        return (), text, frozenset({message.message_id})
+
+    await _propose(
+        store,
+        analyzer,
+        database,
+        message,
+        status,
+        user_id,
+        chat_id,
+        event_epoch,
+        inputs,
+        from_text=True,
+    )
+
+
+async def _propose(
+    store: PhotoProposalStore,
+    analyzer: PhotoAnalyzer,
+    database: Database,
+    message: Any,
+    status: Any,
+    user_id: int,
+    chat_id: int,
+    event_epoch: int,
+    inputs: Callable[[], Awaitable[_ProposalInputs]],
+    from_text: bool = False,
+) -> None:
+    """Gather the inputs, analyze them and show one proposal, or say why not."""
+    wording = _TEXT_WORDING if from_text else _PHOTO_WORDING
+    try:
+        try:
+            images, caption, message_ids = await inputs()
+            owner_foods = await _owner_foods(database, user_id)
+            analysis = await analyzer.analyze(images, caption, owner_foods=owner_foods)
+        except (TelegramError, PhotoUnavailable):
+            logger.warning("Food analysis failed user_id=%s", user_id, exc_info=True)
+            await _photo_report(status, message, wording.failed)
+            return
+        if not analysis.foods and analysis.weight_kg is None:
+            await _photo_post(
+                status, message, analysis.comment or wording.nothing, MAIN_KEYBOARD
+            )
+            return
+        proposal = PhotoProposal(
+            key=min(message_ids),
+            user_id=user_id,
+            chat_id=chat_id,
+            images=images,
+            caption=caption,
+            eaten_at_utc=event_epoch,
+            analysis=analysis,
+            owner_foods=owner_foods,
+            photo_ids=message_ids,
+            from_text=from_text,
+        )
+        await _show_proposal(store, proposal, status, message)
+    except asyncio.CancelledError:
+        await _photo_report(status, message, wording.restart)
+        raise
+    except Exception:
+        logger.exception("Food proposal failed user_id=%s", user_id)
+        await _photo_report(status, message, wording.failed)
+
+
+async def _propose_from_words(
+    turn: Turn, context: ContextTypes.DEFAULT_TYPE, text: str
+) -> bool:
+    """Admin-only: propose diary entries for a meal described in a message.
+
+    handle_text calls this last, for text that no menu button, input session,
+    proposal reply or quick-add claimed; returns True when the text was handled.
+    """
+    analyzer: Optional[PhotoAnalyzer] = context.application.bot_data.get(
+        "photo_analyzer"
+    )
+    if (
+        analyzer is None
+        or turn.user_id != ADMIN_USER_ID
+        or text.casefold() in _MENU_WORDS
+        or sum(char.isalpha() for char in text) < MIN_DESCRIPTION_LETTERS
+    ):
+        return False
+    message = turn.message
+    if getattr(message, "reply_to_message", None) is not None:
+        # Replies are corrections; one that found no open proposal (expired,
+        # or answering a receipt) would log a fragment as a meal of its own.
+        await message.reply_text(TEXT_REPLY_IGNORED_TEXT, reply_markup=MAIN_KEYBOARD)
+        return True
+    if len(text) > MAX_DESCRIPTION_CHARS:
+        await message.reply_text(TEXT_TOO_LONG_TEXT, reply_markup=MAIN_KEYBOARD)
+        return True
+    status = await message.reply_text("Считаю калории…")
+    message_date = getattr(message, "date", None)
+    event_epoch = (
+        int(message_date.timestamp())
+        if message_date is not None
+        else turn.database.now_epoch()
+    )
+    _start_photo_task(
+        context.application,
+        _propose_from_text(
+            _photo_store(context.application),
+            analyzer,
+            turn.database,
+            message,
+            text,
+            status,
+            turn.user_id,
+            turn.chat_id,
+            event_epoch,
+        ),
+        name=f"text-{message.message_id}",
+    )
+    return True
+
+
+async def _revise_photo_proposal(
+    store: PhotoProposalStore,
+    analyzer: PhotoAnalyzer,
+    proposal: PhotoProposal,
+    status: Any,
+    anchor: Any,
+) -> None:
+    """Background task: re-run the analysis with the owner's corrections."""
+    try:
+        try:
+            analysis = await analyzer.analyze(
+                proposal.images,
+                proposal.caption,
+                owner_foods=proposal.owner_foods,
+                previous=proposal.analysis,
+                corrections=tuple(proposal.corrections),
+            )
+        except Exception:
+            logger.warning(
+                "Photo correction failed user_id=%s", proposal.user_id, exc_info=True
+            )
+            proposal.corrections.pop()
+            analysis = None
+        proposal.busy = False
+        if not store.is_current(proposal):
+            await _photo_post(status, anchor, PHOTO_EXPIRED_TEXT, MAIN_KEYBOARD)
+        elif analysis is None:
+            await _show_proposal(
+                store, proposal, status, anchor, PHOTO_CORRECTION_FAILED_TEXT
+            )
+        elif not analysis.foods and analysis.weight_kg is None:
+            proposal.close(CANCELLED)
+            await _photo_post(
+                status,
+                anchor,
+                (analysis.comment or "После исправления записывать нечего.")
+                + "\n\nНичего не записано.",
+                MAIN_KEYBOARD,
             )
         else:
-            entry = await _call(
-                database.add_entry,
-                turn.user_id,
-                event_epoch,
-                food.name,
-                food.calories,
-                food.grams,
-                food.protein,
-                food.fat,
-                food.carbs,
-            )
-        await _send_receipt(database, turn.user_id, message, entry)
-    if analysis.weight_kg is not None:
-        record = await _call(
-            database.add_weight, turn.user_id, event_epoch, analysis.weight_kg
+            proposal.analysis = analysis
+            await _show_proposal(store, proposal, status, anchor)
+    except asyncio.CancelledError:
+        await _photo_report(status, anchor, _wording(proposal).restart)
+        raise
+    except Exception:
+        proposal.busy = False
+        logger.exception("Photo correction failed user_id=%s", proposal.user_id)
+        await _photo_report(status, anchor, _wording(proposal).failed)
+
+
+async def _handle_photo_correction(
+    turn: Turn, context: ContextTypes.DEFAULT_TYPE, text: str
+) -> bool:
+    """Treat the owner's text reply to a proposal as a correction.
+
+    Only an explicit reply to a proposal counts, so quick-add, menu buttons and
+    active input sessions keep working; returns True when the text was handled.
+    """
+    reply_to = getattr(turn.message, "reply_to_message", None)
+    if (
+        reply_to is None
+        or turn.user_id != ADMIN_USER_ID
+        or context.application.bot_data.get("photo_analyzer") is None
+        or not text
+        or text in _REPLY_KEYBOARD_LABELS
+    ):
+        return False
+    store = _photo_store(context.application)
+    proposal = store.find_by_message(turn.user_id, turn.chat_id, reply_to.message_id)
+    if proposal is None:
+        if not has_proposal_buttons(reply_to):
+            return False
+        await turn.message.reply_text(PHOTO_EXPIRED_TEXT, reply_markup=MAIN_KEYBOARD)
+        return True
+    if proposal.state != OPEN:
+        await turn.message.reply_text(
+            _wording(proposal).already_saved
+            if proposal.state == SAVED
+            else "Это предложение уже отменено.",
+            reply_markup=MAIN_KEYBOARD,
         )
-        await _send_weight_receipt(database, turn.user_id, message, record)
+        return True
+    if proposal.busy:
+        await turn.message.reply_text(PHOTO_BUSY_TEXT)
+        return True
+    proposal.busy = True
+    try:
+        status = await turn.message.reply_text("Пересчитываю с учётом исправления…")
+    except BaseException:
+        proposal.busy = False
+        raise
+    proposal.corrections.append(text)
+    previous = proposal.message
+    if previous is not None:
+        # Take the buttons off the old version so it cannot be saved by mistake.
+        try:
+            await previous.edit_text("Исправление принято — новое предложение ниже.")
+        except TelegramError:
+            logger.warning("Old photo proposal could not be edited", exc_info=True)
+    _start_photo_task(
+        context.application,
+        _revise_photo_proposal(
+            store,
+            context.application.bot_data["photo_analyzer"],
+            proposal,
+            status,
+            turn.message,
+        ),
+        name=f"photo-{proposal.key}-correction",
+    )
+    return True
+
+
+async def handle_photo_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Save («Записать») or discard («Отмена») a proposal, or remove a saved item."""
+    query = update.callback_query
+    if query is None or not await _require_private(update):
+        return
+    action = parse_callback(query.data or "")
+    if query.message is None or not query.message.is_accessible:
+        await _answer(query)
+        return
+    user_id, chat_id = _identity(update)
+    if action is not None and action.kind in {"photo_drop", "photo_unweigh"}:
+        await _remove_saved_item(query, _db(context), user_id, action)
+        return
+    proposal = (
+        _photo_store(context.application).get(action.record_id, user_id, chat_id)
+        if action is not None
+        and action.kind in {"photo_save", "photo_cancel"}
+        and action.record_id is not None
+        else None
+    )
+    if proposal is None:
+        await _answer(query)
+        await _edit(query, PHOTO_EXPIRED_TEXT)
+        return
+    if proposal.state != OPEN:
+        await _answer(
+            query,
+            "Уже записано." if proposal.state == SAVED else "Предложение уже отменено.",
+        )
+        return
+    if proposal.busy:
+        await _answer(query, PHOTO_BUSY_TEXT)
+        return
+    if action.kind == "photo_cancel":
+        proposal.close(CANCELLED)
+        await _answer(query)
+        await _edit(query, "Отменено — ничего не записано.")
+        return
+    missing = proposal.analysis.missing_weight
+    if missing:
+        # Saving the rest would quietly leave out a food the owner ate.
+        await _answer(query, missing_weight_alert(missing), show_alert=True)
+        return
+    # Close before the first await so a double tap cannot log twice.
+    proposal.close(SAVED)
+    await _answer(query)
+    database = _db(context)
+    analysis = proposal.analysis
+    entries = [
+        await _call(
+            database.add_entry if food.servings is None else database.add_serving_entry,
+            user_id,
+            proposal.eaten_at_utc,
+            food.name,
+            food.calories_per_100g,
+            food.grams if food.servings is None else food.servings,
+            food.protein_per_100g,
+            food.fat_per_100g,
+            food.carbs_per_100g,
+            # A serving entry also takes the weight of one serving, when known.
+            *(
+                ()
+                if food.servings is None or food.grams is None
+                else (food.grams / food.servings,)
+            ),
+        )
+        for food in analysis.foods
+    ]
+    weight = (
+        await _call(
+            database.add_weight, user_id, proposal.eaten_at_utc, analysis.weight_kg
+        )
+        if analysis.weight_kg is not None
+        else None
+    )
+    await _show_saved(query, database, user_id, entries, weight, database.now_epoch())
+
+
+async def _show_saved(
+    query: Any,
+    database: Database,
+    user_id: int,
+    entries: list[FoodEntry],
+    weight: Optional[WeightRecord],
+    issued_at: int,
+) -> None:
+    """Show what a confirmed proposal put in the diary, with today's progress."""
+    progress = [await _today_progress(database, user_id)] if entries else []
+    if weight is not None:
+        progress.append(await _weight_summary(database, user_id) or "")
+    await _edit(
+        query,
+        saved_text(entries, weight, "\n".join(line for line in progress if line)),
+        reply_markup=saved_keyboard(entries, weight, issued_at),
+    )
+
+
+async def _remove_saved_item(
+    query: Any, database: Database, user_id: int, action: CallbackAction
+) -> None:
+    """«Убрать» in a saved summary: delete one item, keep the rest in view."""
+    assert action.record_id is not None
+    if action.kind == "photo_drop":
+        if confirmation_expired(action, database.now_epoch()):
+            # Same window as Undo on a receipt; later the entry is deleted
+            # from its own card, where the deletion is confirmed.
+            await _answer(query, PHOTO_REMOVE_EXPIRED_TEXT, show_alert=True)
+            return
+        delete = database.delete_entry
+    else:
+        delete = database.delete_weight
+    try:
+        await _call(delete, user_id, action.record_id)
+    except NotFound:
+        # A repeated tap, or it was deleted elsewhere: it is gone either way.
+        pass
+    await _answer(query)
+    entry_ids, weight_id, issued_at = saved_items(query.message)
+    entries = [
+        entry
+        for entry_id in entry_ids
+        if (entry := await _call(database.get_entry, user_id, entry_id)) is not None
+    ]
+    weight = (
+        await _call(database.get_weight, user_id, weight_id)
+        if weight_id is not None
+        else None
+    )
+    if not entries and weight is None:
+        await _edit(query, "Всё убрано — в дневнике от этой записи ничего не осталось.")
+        return
+    await _show_saved(
+        query, database, user_id, entries, weight, issued_at or database.now_epoch()
+    )
 
 
 async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2685,6 +3438,63 @@ async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
 
 
+async def _send_export(turn: Turn, timezone_name: str) -> None:
+    """Send the user's whole history, food and weight, as CSV files."""
+    database = turn.database
+    entries = await _call(database.export_entries, turn.user_id)
+    weights = await _call(database.all_weights, turn.user_id)
+    if not entries and not weights:
+        await turn.message.reply_text(
+            "There is nothing to export yet.", reply_markup=SETTINGS_KEYBOARD
+        )
+        return
+    stamp = local_date(database.now_epoch(), timezone_name).isoformat()
+    if entries:
+        await turn.message.reply_document(
+            document=food_csv(entries, timezone_name),
+            filename=f"food-all-{stamp}.csv",
+            caption=f"Food diary: {len(entries)} entries. Times are {timezone_name}.",
+        )
+    if weights:
+        await turn.message.reply_document(
+            document=weight_csv(weights, timezone_name),
+            filename=f"weight-all-{stamp}.csv",
+            caption=f"Weight: {len(weights)} measurements.",
+        )
+
+
+async def _send_period_export(
+    database: Database, user_id: int, message: Any, action: CallbackAction
+) -> None:
+    """Send the food entries of the day, week or month a screen was showing."""
+    timezone_name = await _call(database.get_timezone, user_id)
+    if timezone_name is None:
+        await message.reply_text("Set your timezone first with /updatetimezone.")
+        return
+    if action.period == "day" and action.day is not None:
+        bounds = day_bounds(action.day, timezone_name)
+        label = action.day.isoformat()
+    elif action.period == "month" and action.month is not None:
+        year_text, month_text = action.month.split("-")
+        bounds = month_bounds(int(year_text), int(month_text), timezone_name)
+        label = action.month
+    else:
+        bounds = period_bounds(Period.WEEK, timezone_name)
+        last_day = bounds.end_local_date - timedelta(days=1)
+        label = f"{bounds.start_local_date.isoformat()}_{last_day.isoformat()}"
+    entries = await _call(
+        database.export_entries, user_id, bounds.start_utc, bounds.end_utc
+    )
+    if not entries:
+        await message.reply_text("There are no food entries to export for that period.")
+        return
+    await message.reply_document(
+        document=food_csv(entries, timezone_name),
+        filename=f"food-{label}.csv",
+        caption=f"{len(entries)} entries. Times are {timezone_name}.",
+    )
+
+
 async def miniapp_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _require_private(update):
         return
@@ -2700,6 +3510,100 @@ async def miniapp_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     )
 
 
+def _reminder_confirmation(settings: NotificationSettings, now_utc: int) -> str:
+    if settings.reminder_minute is None:
+        return "Evening reminder turned off."
+    when = minute_text(settings.reminder_minute)
+    zone = settings.timezone or "UTC"
+    today = local_date(now_utc, zone)
+    starts = (
+        "tomorrow"
+        if settings.reminder_sent_day is not None
+        and settings.reminder_sent_day >= today
+        else "today"
+    )
+    return (
+        f"Evening reminder set for {when} ({zone}), starting {starts}. "
+        "It is sent only on days with nothing logged."
+    )
+
+
+async def _show_reminder_settings(
+    database: Database, user_id: int, message: Any, prefix: str = ""
+) -> None:
+    settings = await _call(database.get_notification_settings, user_id)
+    text = reminder_settings_text(settings)
+    await message.reply_text(
+        f"{prefix}\n\n{text}" if prefix else text,
+        reply_markup=InlineKeyboardMarkup(reminder_settings_rows(settings)),
+    )
+
+
+async def _handle_notify_action(
+    query: Any, database: Database, user_id: int, chat_id: int, kind: str
+) -> None:
+    """Reminder settings panel: show it, or apply one of its buttons."""
+    timezone_name = await _call(database.get_timezone, user_id)
+    if timezone_name is None:
+        await _edit(query, "Timezone setup is required.")
+        await _start_with_prompt(
+            database,
+            user_id,
+            chat_id,
+            SessionState.WAIT_TIMEZONE,
+            query.message,
+            TIMEZONE_ONBOARDING_PROMPT,
+            TIMEZONE_REQUIRED_MARKUP,
+        )
+        return
+    if kind == "menu_reminders":
+        await _show_reminder_settings(database, user_id, query.message)
+        return
+    if kind == "notify_reminder_time":
+        await _start_with_prompt(
+            database,
+            user_id,
+            chat_id,
+            SessionState.WAIT_REMINDER_TIME,
+            query.message,
+            REMINDER_TIME_PROMPT,
+            REMINDER_TIME_KEYBOARD,
+        )
+        return
+    now = database.now_epoch()
+    note = ""
+    if kind == "notify_reminder_off":
+        settings = await _call(database.set_reminder, user_id, None, now)
+        note = "Evening reminder turned off."
+    elif kind in {"notify_weekly_on", "notify_weekly_off"}:
+        enabled = kind == "notify_weekly_on"
+        settings = await _call(database.set_weekly_summary, user_id, enabled, now)
+        note = "Weekly summary turned off."
+        if enabled and settings.summary_sent_week is not None:
+            first = settings.summary_sent_week + timedelta(days=14)
+            note = (
+                "Weekly summary turned on. The first one arrives on "
+                f"{first:%a} {first.day} {first:%b} at "
+                f"{minute_text(WEEKLY_SUMMARY_MINUTE)}."
+            )
+    else:
+        await _edit(query, "This action is invalid or has expired.")
+        return
+    await _edit(
+        query,
+        f"{note}\n\n{reminder_settings_text(settings)}",
+        reply_markup=InlineKeyboardMarkup(reminder_settings_rows(settings)),
+    )
+
+
+async def _stop_background_work(application: Application) -> None:
+    """post_stop hook: the bot can still send, so interrupted work can say so."""
+    try:
+        await _stop_photo_tasks(application)
+    finally:
+        await stop_notifier(application)
+
+
 def build_application(
     settings: Settings, database: Optional[Database] = None
 ) -> Application:
@@ -2713,6 +3617,8 @@ def build_application(
         .write_timeout(30.0)
         .pool_timeout(10.0)
         .concurrent_updates(False)
+        .post_init(start_notifier)
+        .post_stop(_stop_background_work)
         .build()
     )
     application.bot_data["database"] = store
@@ -2746,6 +3652,9 @@ def build_application(
         CallbackQueryHandler(
             health_callback, pattern=r"^health:(connect|status|rotate|rotate:yes)$"
         )
+    )
+    application.add_handler(
+        CallbackQueryHandler(handle_photo_callback, pattern=r"^photo:")
     )
     application.add_handler(CallbackQueryHandler(handle_callback))
     application.add_handler(

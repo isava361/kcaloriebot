@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 from kcaloriebot.database import Database
@@ -94,6 +95,27 @@ class LegacyMigrationTests(unittest.TestCase):
         self.assertEqual("Rice", database.get_entry(1, 7).name)
         self.assertEqual("Rice", database.get_favorite(1, 9).name)
         self.assertIsNone(database.get_session(1, 1))
+
+    def test_duplicate_favorite_names_are_merged_or_kept_apart(self) -> None:
+        with closing(sqlite3.connect(self.source)) as connection, connection:
+            connection.executemany(
+                """
+                INSERT INTO favorite_foods(
+                    favorite_id, user_id, name, calories, protein, fat, carbs
+                ) VALUES (?, 1, ?, ?, 10, 20, 30)
+                """,
+                [(11, "rice", 250), (12, "Rice", 300)],
+            )
+
+        report = migrate_legacy_database(self.source, self.target)
+        database = Database(self.target)
+
+        # The newest keeps the name; 9 and 11 are one food, kept once apart.
+        self.assertEqual(2, report.favorites)
+        self.assertEqual(300, database.get_favorite(1, 12).calories_per_100g)
+        self.assertEqual("Rice", database.get_favorite(1, 12).name)
+        self.assertEqual("rice (2)", database.get_favorite(1, 11).name)
+        self.assertIsNone(database.get_favorite(1, 9))
 
     def test_migration_refuses_nonempty_target(self) -> None:
         database = Database(self.target)

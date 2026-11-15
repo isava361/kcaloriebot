@@ -28,8 +28,12 @@ from kcaloriebot.bot import (
     weight_command,
 )
 from kcaloriebot.database import Database
-from kcaloriebot.domain import SessionState
-from kcaloriebot.render import PER_SERVING_KEYBOARD
+from kcaloriebot.domain import Goals, SessionState
+from kcaloriebot.render import (
+    PER_SERVING_KEYBOARD,
+    REMINDER_TIME_KEYBOARD,
+    SETTINGS_KEYBOARD,
+)
 
 
 def keyboard_callbacks(markup: InlineKeyboardMarkup) -> list[str]:
@@ -51,11 +55,17 @@ class FakeMessage:
         self.date = date
         self.message_id = next(self._ids) if message_id is None else message_id
         self.replies: list[tuple[str, Any]] = []
+        self.documents: list[tuple[str, bytes, str | None]] = []
 
     async def reply_text(
         self, text: str, reply_markup: Any = None, **kwargs: Any
     ) -> None:
         self.replies.append((text, reply_markup))
+
+    async def reply_document(
+        self, document: bytes, filename: str, caption: str | None = None
+    ) -> None:
+        self.documents.append((filename, document, caption))
 
 
 class FailingMessage(FakeMessage):
@@ -142,6 +152,90 @@ class BotHandlerTests(unittest.IsolatedAsyncioTestCase):
         group = make_update("/app", chat_type=ChatType.GROUP)
         await miniapp_command(group, self.context)
         self.assertIsNone(group.effective_message.replies[-1][1])
+
+    async def test_export_sends_own_diary_as_csv_in_local_time(self) -> None:
+        self.database.ensure_user(1)
+        self.database.set_timezone(1, "Europe/Moscow")
+        empty = make_update("Export data")
+        await handle_text(empty, self.context)
+        self.assertIn("nothing to export", empty.effective_message.replies[-1][0])
+        self.assertEqual(empty.effective_message.documents, [])
+
+        # 2026-01-01 22:30 UTC is already 2 January in Moscow.
+        late = int(datetime(2026, 1, 1, 22, 30, tzinfo=timezone.utc).timestamp())
+        self.database.add_entry(1, late, "Борщ, домашний", 50, 300, 2, 1.5, None)
+        self.database.add_weight(1, late, 80.25)
+        self.database.ensure_user(2)
+        self.database.add_entry(2, late, "someone else", 100, 100)
+
+        update = make_update("Export data")
+        await handle_text(update, self.context)
+        food, weight = update.effective_message.documents
+        self.assertRegex(food[0], r"^food-all-\d{4}-\d\d-\d\d\.csv$")
+        self.assertEqual(
+            food[1].decode("utf-8-sig").splitlines(),
+            [
+                "date,time,name,grams,servings,calories,protein,fat,carbs",
+                '2026-01-02,01:30,"Борщ, домашний",300,,150,6,4.5,',
+            ],
+        )
+        self.assertTrue(food[1].startswith(b"\xef\xbb\xbf"))
+        self.assertEqual(
+            weight[1].decode("utf-8-sig").splitlines(),
+            ["date,time,weight_kg", "2026-01-02,01:30,80.25"],
+        )
+
+    async def test_diary_and_stats_screens_export_the_shown_period(self) -> None:
+        self.database.ensure_user(1)
+        self.database.set_timezone(1, "Europe/Moscow")
+        now = self.database.now_epoch()
+        self.database.add_entry(1, now, "today", 100, 100)
+        self.database.add_entry(1, now - 3 * 86400, "three days ago", 100, 100)
+        self.database.add_entry(1, now - 200 * 86400, "long ago", 100, 100)
+
+        async def names(callback: str) -> list[str]:
+            message = FakeMessage()
+            await handle_callback(
+                make_update(query=FakeQuery(callback, message)), self.context
+            )
+            (document,) = message.documents
+            lines = document[1].decode("utf-8-sig").splitlines()[1:]
+            return [line.split(",")[2] for line in lines]
+
+        diary = make_update("Diary")
+        await handle_text(diary, self.context)
+        (day_export,) = [
+            data
+            for data in keyboard_callbacks(diary.effective_message.replies[-1][1])
+            if data.startswith("export:")
+        ]
+        self.assertRegex(day_export, r"^export:day:\d{4}-\d\d-\d\d$")
+        self.assertEqual(await names(day_export), ["today"])
+
+        week = make_update("Week Stats")
+        await handle_text(week, self.context)
+        self.assertIn(
+            "export:week", keyboard_callbacks(week.effective_message.replies[-1][1])
+        )
+        self.assertEqual(await names("export:week"), ["three days ago", "today"])
+
+        month = make_update("Month Stats")
+        await handle_text(month, self.context)
+        (month_export,) = [
+            data
+            for data in keyboard_callbacks(month.effective_message.replies[-1][1])
+            if data.startswith("export:")
+        ]
+        self.assertRegex(month_export, r"^export:month:\d{4}-\d\d$")
+        self.assertIn("today", await names(month_export))
+        self.assertNotIn("long ago", await names(month_export))
+
+        empty = FakeMessage()
+        await handle_callback(
+            make_update(query=FakeQuery("export:day:2021-01-01", empty)), self.context
+        )
+        self.assertEqual(empty.documents, [])
+        self.assertIn("no food entries", empty.replies[-1][0])
 
     async def test_users_command_lists_users_only_for_admin(self) -> None:
         async def get_chat(user_id: int) -> SimpleNamespace:
@@ -1346,6 +1440,163 @@ class NewFeatureTests(unittest.IsolatedAsyncioTestCase):
             SessionState.WAIT_ENTRY_TIME, self.database.get_session(1, 10).state
         )
         self.assertIn("future", rejected.effective_message.replies[-1][0])
+
+
+class GoalsAndRemindersHandlerTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.database = Database(Path(self.temporary_directory.name) / "bot.db")
+        self.database.initialize()
+        self.database.ensure_user(1, 1)
+        self.database.set_timezone(1, "UTC", 1)
+        self.context = SimpleNamespace(
+            application=SimpleNamespace(bot_data={"database": self.database})
+        )
+
+    def tearDown(self) -> None:
+        self.temporary_directory.cleanup()
+
+    async def say(self, text: str) -> FakeMessage:
+        update = make_update(text)
+        await handle_text(update, self.context)
+        return update.effective_message
+
+    async def tap(self, data: str) -> FakeQuery:
+        query = FakeQuery(data, FakeMessage())
+        await handle_callback(make_update(query=query), self.context)
+        return query
+
+    async def test_goals_with_macros_in_one_message(self) -> None:
+        prompt = await self.say("Daily goal")
+        self.assertIn("2000 p150 f70 c200", prompt.replies[-1][0])
+        reply = await self.say("2000 p150 f70 c200")
+        self.assertEqual(Goals(2000.0, 150.0, 70.0, 200.0), self.database.get_goals(1))
+        self.assertEqual("Goals set: 2000 kcal p150 f70 c200.", reply.replies[0][0])
+        self.assertIs(MAIN_KEYBOARD, reply.replies[0][1])
+        self.assertIsNone(self.database.get_session(1, 10))
+
+        prompt = await self.say("Daily goal")
+        self.assertTrue(
+            prompt.replies[-1][0].startswith("Your goals: 2000 kcal p150 f70 c200.")
+        )
+
+    async def test_bare_number_still_sets_only_the_calorie_goal(self) -> None:
+        self.database.set_goals(1, Goals(2000.0, 150.0, None, None), 2)
+        await self.say("Daily goal")
+        await self.say("1800")
+        self.assertEqual(Goals(1800.0, 150.0, None, None), self.database.get_goals(1))
+        await self.say("Daily goal")
+        await self.say("p0 f60")
+        self.assertEqual(Goals(1800.0, None, 60.0, None), self.database.get_goals(1))
+
+    async def test_invalid_goal_message_keeps_the_prompt_open(self) -> None:
+        await self.say("Daily goal")
+        reply = await self.say("2000 x5")
+        self.assertIn("2000 p150 f70 c200", reply.replies[-1][0])
+        self.assertEqual(SessionState.WAIT_GOAL, self.database.get_session(1, 10).state)
+        self.assertEqual(Goals(), self.database.get_goals(1))
+        await self.say("Remove")
+        self.assertIsNone(self.database.get_session(1, 10))
+
+    async def test_remove_clears_every_goal(self) -> None:
+        self.database.set_goals(1, Goals(2000.0, 150.0, 70.0, 200.0), 2)
+        await self.say("Daily goal")
+        reply = await self.say("Remove")
+        self.assertEqual("Goals removed.", reply.replies[0][0])
+        self.assertEqual(Goals(), self.database.get_goals(1))
+
+    async def test_receipt_reports_partial_macro_progress_honestly(self) -> None:
+        self.database.set_goals(1, Goals(2000.0, 100.0, None, None), 2)
+        await self.say("Rice 250 40 p10 f20 c30")
+        reply = await self.say("Cake 400 100")
+        text = reply.replies[-1][0]
+        self.assertIn("Today: 500 / 2000 kcal (1500 left).", text)
+        self.assertIn("protein at least 4 / 100 g (known for 1/2 entries)", text)
+        self.assertNotIn("96 left", text)
+
+    async def test_receipt_reports_complete_macro_progress(self) -> None:
+        self.database.set_goals(1, Goals(protein=100.0), 2)
+        reply = await self.say("Rice 250 40 p10 f20 c30")
+        self.assertIn(
+            "Today's macros: protein 4 / 100 g (96 left).", reply.replies[-1][0]
+        )
+
+    async def test_diary_header_shows_macro_goals(self) -> None:
+        self.database.set_goals(1, Goals(2000.0, 100.0, None, None), 2)
+        now = self.database.now_epoch()
+        self.database.add_entry(1, now, "Rice", 250.0, 40.0, 10.0, 20.0, 30.0)
+        reply = await self.say("Diary")
+        self.assertIn("Protein: 4 g / 100 g goal (96 left)", reply.replies[-1][0])
+        self.assertIn("2000 goal (1900 left)", reply.replies[-1][0])
+
+    async def test_settings_offers_reminders(self) -> None:
+        reply = await self.say("Settings")
+        self.assertIs(SETTINGS_KEYBOARD, reply.replies[-1][1])
+        labels = [button.text for row in SETTINGS_KEYBOARD.keyboard for button in row]
+        self.assertIn("Reminders", labels)
+        panel = await self.say("Reminders")
+        text, markup = panel.replies[-1]
+        self.assertIn("Evening reminder: off.", text)
+        self.assertIn("Weekly summary: off.", text)
+        self.assertEqual(
+            ["notify:reminder:time", "notify:weekly:on"], keyboard_callbacks(markup)
+        )
+
+    async def test_reminder_time_flow_sets_and_turns_off(self) -> None:
+        query = await self.tap("notify:reminder:time")
+        self.assertEqual(
+            SessionState.WAIT_REMINDER_TIME, self.database.get_session(1, 10).state
+        )
+        self.assertIs(REMINDER_TIME_KEYBOARD, query.message.replies[-1][1])
+
+        reply = await self.say("21:30")
+        self.assertIn("Evening reminder set for 21:30 (UTC)", reply.replies[0][0])
+        self.assertIsNone(self.database.get_session(1, 10))
+        self.assertEqual(
+            21 * 60 + 30, self.database.get_notification_settings(1).reminder_minute
+        )
+
+        panel = await self.say("Reminders")
+        self.assertIn("on at 21:30 (UTC)", panel.replies[-1][0])
+        self.assertIn("notify:reminder:off", keyboard_callbacks(panel.replies[-1][1]))
+
+        query = await self.tap("notify:reminder:off")
+        self.assertIn("Evening reminder turned off.", query.edits[-1][0])
+        self.assertIsNone(self.database.get_notification_settings(1).reminder_minute)
+
+    async def test_reminder_time_rejects_invalid_and_off_disables(self) -> None:
+        self.database.set_reminder(1, 20 * 60, 2)
+        await self.tap("notify:reminder:time")
+        reply = await self.say("25:00")
+        self.assertIn("HH:MM", reply.replies[-1][0])
+        self.assertEqual(
+            SessionState.WAIT_REMINDER_TIME, self.database.get_session(1, 10).state
+        )
+        reply = await self.say("Off")
+        self.assertEqual("Evening reminder turned off.", reply.replies[0][0])
+        self.assertIsNone(self.database.get_notification_settings(1).reminder_minute)
+
+    async def test_weekly_summary_toggle(self) -> None:
+        query = await self.tap("notify:weekly:on")
+        text, markup = query.edits[-1]
+        self.assertIn("Weekly summary turned on. The first one arrives on Mon", text)
+        self.assertIn("Weekly summary: on", text)
+        self.assertIn("notify:weekly:off", keyboard_callbacks(markup))
+        self.assertTrue(self.database.get_notification_settings(1).weekly_summary)
+
+        query = await self.tap("notify:weekly:off")
+        self.assertIn("Weekly summary turned off.", query.edits[-1][0])
+        self.assertFalse(self.database.get_notification_settings(1).weekly_summary)
+
+    async def test_reminder_buttons_open_the_panel(self) -> None:
+        query = await self.tap("menu:reminders")
+        self.assertIn("Reminders", query.message.replies[-1][0])
+
+    async def test_reminder_buttons_wait_for_an_active_input(self) -> None:
+        await self.say("Daily goal")
+        query = await self.tap("notify:weekly:on")
+        self.assertIn("Finish the current input first", query.message.replies[-1][0])
+        self.assertFalse(self.database.get_notification_settings(1).weekly_summary)
 
 
 if __name__ == "__main__":

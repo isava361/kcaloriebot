@@ -331,6 +331,13 @@ button:focus-visible,input:focus-visible,select:focus-visible{
 .macros strong.unknown{
   color:var(--muted)
 }
+/* "≈ 95 / 150 г" with a macro goal must still fit three columns at 320px. */
+.macros strong{
+  overflow-wrap:anywhere
+}
+.macros strong.over{
+  color:var(--warn)
+}
 .dot{
   display:inline-block;
   width:7px;
@@ -542,6 +549,20 @@ input,select,textarea{
 #notice{
   padding:var(--s3) 0;
   line-height:1.6
+}
+/* Stays in view while scrolling: every action fails until the app is reopened. */
+#expired{
+  position:sticky;
+  top:var(--s2);
+  z-index:5;
+  border-color:var(--warn)
+}
+#expired p{
+  margin:0;
+  line-height:1.5
+}
+#expired button{
+  margin-top:var(--s3)
 }
 #favorites>button{
   display:block;

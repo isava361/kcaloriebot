@@ -164,6 +164,8 @@ keys, WAL mode, busy timeouts, numeric constraints, and deterministic indexes
 are enabled at startup. Databases from earlier versions are migrated to the
 current schema automatically on the first start; because the migration
 rebuilds tables, take the pre-update backup described below before upgrading.
+Each migration step re-checks the schema version under SQLite's write lock, so
+the bot and the Mini App server may start at the same time.
 
 ### 5. Verify the deployment
 
@@ -223,8 +225,11 @@ sudo kcaloriebot-update --force        # reinstall/restart even if HEAD is curre
 sudo kcaloriebot-update --no-rollback  # leave a failure in place to inspect
 ```
 
-Backups are retained in `/var/backups/kcaloriebot` without automatic pruning.
-Reinstall the script after an update that changes it. Defaults match the server
+The updater's snapshots (`before-*.db`, `failed-before-*.db`) are kept in
+`/var/backups/kcaloriebot` and are never pruned automatically, neither by the
+updater nor by the [scheduled backup](#scheduled-backups); delete old ones by
+hand once you no longer need them. Reinstall the script after an update that
+changes it. Defaults match the server
 documented in [miniapp.md](docs/miniapp.md#deploy-food-server); no preceding shell
 variable setup is needed. For other installations, override `KCALORIE_APP_DIR`,
 `KCALORIE_PYTHON`, `KCALORIE_DATABASE`, `KCALORIE_BACKUPS`, `KCALORIE_BOT_SERVICE`,
@@ -274,7 +279,134 @@ long-polling consumer, and a second process will produce polling conflict errors
 
 SQLite WAL mode can keep recent transactions outside the main `.db` file.
 Therefore, do not copy only `kcaloriebot.db` while the service is running. Use
-SQLite's online backup command instead:
+SQLite's online backup command instead, as both scripts below do.
+
+### Scheduled backups
+
+`scripts/backup.sh` takes a daily online backup while the bot and Mini App keep
+running. It writes the copy under a hidden temporary name, converts it to a
+single self-contained file (no `-wal`/`-shm` needed to open it), checks it with
+`PRAGMA integrity_check`, makes it mode `600`, and only then renames it to
+`scheduled-YYYYMMDDTHHMMSSZ.db` (UTC). Only after that does it prune.
+
+Install it outside the checkout, like the updater, and create the backup
+directory before the first run:
+
+```bash
+sudo install -m 755 /opt/kcaloriebot/app/scripts/backup.sh \
+  /usr/local/sbin/kcaloriebot-backup
+sudo install -d -m 750 -o kcaloriebot -g kcaloriebot /var/backups/kcaloriebot
+sudo kcaloriebot-backup   # one manual run; expect "Backup verified: ..."
+```
+
+Create `/etc/systemd/system/kcaloriebot-backup.service`:
+
+```ini
+[Unit]
+Description=KCalorieBot scheduled database backup
+After=kcalculatorbot.service kcaloriebot-web.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/kcaloriebot-backup
+# 75 = skipped on purpose (update running or bot stopped); not a failure.
+SuccessExitStatus=75
+UMask=0077
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/kcaloriebot /var/backups/kcaloriebot /run/lock
+```
+
+and `/etc/systemd/system/kcaloriebot-backup.timer`:
+
+```ini
+[Unit]
+Description=Daily KCalorieBot database backup
+
+[Timer]
+OnCalendar=*-*-* 04:00:00
+RandomizedDelaySec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now kcaloriebot-backup.timer
+systemctl list-timers kcaloriebot-backup.timer
+```
+
+The service has no `User=`: it must share the updater's lock
+`/run/lock/kcaloriebot-update.lock`, which belongs to root. The script itself
+drops to the `kcaloriebot` account (with `setpriv`, which also works under
+`NoNewPrivileges=`) for every SQLite connection and every file it creates,
+renames or deletes, so backups are owned like the updater's and no root-owned
+`-wal`/`-shm` files appear next to the live database. `ReadWritePaths=` must
+name directories that exist, hence the `install -d` above. `Persistent=true`
+runs a backup missed while the server was off soon after the next boot.
+Like the bot unit, these unit files live only in this README.
+
+Exit status 0 means a verified backup was written and retention applied. 75
+means the run was skipped on purpose and nothing was written or deleted; the
+reason is logged as a warning (`journalctl -u kcaloriebot-backup -p warning`):
+
+- An update or its rollback holds the updater lock. The backup does not wait,
+  because the database may be mid-migration or mid-restore. The next daily run
+  backs up the result.
+- `kcalculatorbot` is not running, or stopped/restarted during the backup.
+  A stopped bot means maintenance — a failed or `--no-rollback` update, or a
+  manual restore — so that state is not saved as a "good" daily backup.
+
+Any other status is a failure and marks the unit failed. If the new backup
+could not be written or failed verification, nothing is pruned. The script
+refuses empty, relative or unusual paths (anything other than
+`/`-separated `[A-Za-z0-9._@+-]` components, `.`/`..` included) and a
+backup directory that is a symlink.
+
+The backup holds the updater lock for its few seconds. An update started in
+exactly that window stops at its preflight with "Another update is already
+running" before touching anything; run it again.
+
+Retention keeps the newest scheduled backup of each of the 30 most recent UTC
+days that have one, and deletes the other `scheduled-*.db` files. Days without
+a backup do not count, so downtime or skipped runs never empty the directory.
+The backup just written is never deleted. If a newer-looking scheduled backup
+exists (clock moved backwards), nothing is pruned and the run fails. Pruning
+matches only regular files named exactly `scheduled-YYYYMMDDTHHMMSSZ.db`. It
+never touches the updater's `before-*`/`failed-before-*` snapshots, manual
+`kcaloriebot-*.db` backups, `deploy-*` directories, symlinks or anything else.
+
+Settings use the updater's variables where they mean the same thing:
+`KCALORIE_DATABASE`, `KCALORIE_BACKUPS`, `KCALORIE_RUN_AS`,
+`KCALORIE_BOT_SERVICE` and `KCALORIE_LOCK`, plus `KCALORIE_BACKUP_KEEP_DAYS`
+(default `30`). For the timer, set them in a drop-in
+(`sudo systemctl edit kcaloriebot-backup.service`):
+
+```ini
+[Service]
+Environment=KCALORIE_BACKUP_KEEP_DAYS=60
+```
+
+If you change `KCALORIE_DATABASE` or `KCALORIE_BACKUPS`, change
+`ReadWritePaths=` to match. Reinstall `kcaloriebot-backup` after an update that
+changes `scripts/backup.sh`. Isolated tests:
+`python -m unittest tests.test_backup_script`.
+
+Scheduled backups only protect against bad writes and mistakes, not against
+losing the server. Upload copies elsewhere with a drop-in on the same unit,
+for example `ExecStartPost=/usr/local/sbin/kcaloriebot-offsite`, where that
+command copies the whole `/var/backups/kcaloriebot` directory (for example
+`rclone copy`, not `sync`). `ExecStartPost=` also runs after a skipped run, so
+make it idempotent, and remember the unit's `ProtectSystem=`/`ReadWritePaths=`
+restrictions apply to it. Prefer a destination the server cannot delete from,
+so a compromised or broken server cannot erase the off-site history.
+
+### Manual backup
 
 ```bash
 sudo install -d -m 750 -o kcaloriebot -g kcaloriebot /var/backups/kcaloriebot
@@ -286,8 +418,15 @@ test "$(sudo -u kcaloriebot sqlite3 "$BACKUP_PATH" \
 sudo chmod 600 "$BACKUP_PATH"
 ```
 
-Store copies outside the server and define a retention policy. To restore a
-backup, stop the bot so it cannot write during the operation:
+Manual `kcaloriebot-*.db` backups are never pruned automatically; delete them
+yourself when no longer needed.
+
+### Restore
+
+The newest scheduled backup is
+`ls -1 /var/backups/kcaloriebot/scheduled-*.db | tail -n 1`. To restore a
+backup, stop the bot so it cannot write during the operation (stopping it also
+makes a scheduled backup that fires meanwhile skip):
 
 ```bash
 export RESTORE_PATH="/var/backups/kcaloriebot/backup-file.db"
@@ -341,7 +480,9 @@ serving weight in grams, for example `oatmeal 370 60` or
 optional and may fix the value order; without units the first number is
 calories and the second is grams. Optional macro tokens add protein, fat, and
 carbs per 100g: `bread 250 150 p8 f3 c47` (or `б`/`ж`/`у`). The `/add` command
-accepts the same format.
+accepts the same format. The bot owner can also describe a meal in plain words
+when photo recognition is configured; see
+[Logging food from a text description](#logging-food-from-a-text-description).
 
 Every saved entry replies with a receipt: the food, amount, calories, macros,
 the entry time, and today's progress, together with inline `Undo` (deletes the
@@ -364,14 +505,105 @@ When `ANTHROPIC_API_KEY` is set in `/etc/kcaloriebot.env` (plus
 `ANTHROPIC_WORKSPACE_ID` if the key is not scoped to a workspace), photos sent
 by the bot owner (`ADMIN_USER_ID` in `kcaloriebot/bot.py`) are analyzed by Claude
 (`claude-haiku-5-5` at effort `high` by default; override with `PHOTO_MODEL`
-and `PHOTO_EFFORT` — `low`, `medium`, `high`, `xhigh` or `max`). Every
-recognized food is logged with an estimated weight and per-100g nutrition,
-each with its own receipt and `Undo`/`Edit` buttons; a body-weight scale
-photo records a weight measurement. A caption such as
-`200 г` or `творог 5%` refines the estimate. For branded products or chain
-dishes without a visible label, Claude may run up to three web searches per
-photo ($10 per 1,000 searches on top of token costs). Photos from anyone else, or with
-no key configured, are not sent anywhere.
+and `PHOTO_EFFORT` — `low`, `medium`, `high`, `xhigh` or `max`). A caption
+such as `200 г` or `творог 5%` refines the estimate. For branded products or
+chain dishes without a visible label, Claude may run up to three web searches
+per photo ($10 per 1,000 searches on top of token costs). Photos from anyone
+else, or with no key configured, are not sent anywhere.
+
+Several photos sent as one Telegram album (say, the dish and its package
+label) are analyzed together as one request and answered with one proposal.
+Telegram delivers an album as separate messages, so the bot waits until no new
+photo of the album arrived for 1.5 seconds (6 seconds at most) before starting;
+a single photo starts at once. An album holds at most 10 photos and 20 MB.
+
+Each request also carries the owner's own foods — his 30 newest favorites and
+20 most recent distinct diary foods, about 4,000 characters at most — with
+their stored nutrition per 100 g (a serving favorite with a known serving
+weight is converted; one without is marked as per serving). When the photo or
+caption clearly shows one of them, Claude uses its numbers, and the bot logs
+the stored values exactly.
+
+The analysis runs in the background: the bot answers «Распознаю фото…» and
+keeps handling other messages and buttons meanwhile, and several photos can be
+in flight at once. When it finishes, the bot replies to the photo with one
+proposal — Claude's comment, the recognized foods with weight, calories and
+macros, the total, and a scale reading if there is one — and two buttons.
+Nothing is written to the diary until `Записать` is tapped; `Отмена` discards
+the proposal.
+
+Claude reports where each number came from: a label, the manufacturer (or a
+web search), the owner's caption or reply, one of his saved foods, or its own
+estimate. Items whose weight or calories were judged by eye are marked
+«на глаз» in the proposal, since those are the ones worth checking. For a
+weight judged by eye Claude gives its honest best estimate and a plausible
+range, and the bot logs a weight halfway from the estimate to the top of the
+range (`EYE_ESTIMATE_UPWARD_SHARE` in `kcaloriebot/photo_ai.py`): visual
+estimates tend to come out low, and the owner prefers to err high. Weights
+from a package, the owner or a saved food are never adjusted.
+
+If only a label is in frame and nothing shows how much was eaten, the proposal
+says the weight is missing and asks for it; `Записать` explains that the
+weight is needed and saves nothing until it is given (reply «120 г», or ask to
+remove the item). When one unseen detail would change the calories a lot —
+fried in oil or not, the whole multi-serving package or part of it — the
+proposal also asks one question; the numbers already reflect Claude's best
+guess, so it can be saved without answering.
+
+To fix the proposal before saving, or to answer its question, reply to it (or
+to the photo, or to any photo of the album) with text such as «гречки было
+150 г, курица без масла». Claude re-analyzes all the photos with all replies so
+far and posts a new proposal; the old one loses its buttons. Only replies to a
+proposal count as corrections, so quick-add, menu buttons and input prompts
+work as usual.
+
+`Записать` logs every food (and the weight) at the time the photo was sent and
+replaces the proposal with one summary: what was saved, today's progress, and
+for each entry a button that opens it for editing plus an `Убрать` (undo)
+button. `Убрать` deletes that one entry and keeps the summary with the rest; it
+works for 15 minutes, like `Undo` on a receipt, and survives a restart. Pending
+proposals are kept in memory only, for up to 24 hours (at most
+20 at a time, holding at most 100 MB of photos); after a restart or once
+expired, their buttons and replies answer that the photo (or description)
+should be sent again.
+A restart also interrupts running analyses, and the bot says so in the chat.
+
+### Logging food from a text description
+
+With the same setup, the owner can simply write what he ate — «съел борщ и два
+куска хлеба», «кофе с молоком и круассан», «творог 5% 200 г» — and gets the
+same kind of proposal as for a photo: the bot answers «Считаю калории…», Claude
+reads the message (with the owner's saved and recent foods, and web search for
+branded products) and the bot replies to it with one proposal and the
+`Записать` / `Отмена` buttons. Corrections and answers work the same way, by
+replying to the proposal or to the original message; Claude then reads the
+same description again with all replies so far. `Записать` logs the entries
+at the time the message was sent; a time named in the text («на завтрак»,
+«вчера вечером») is not used yet.
+
+What the owner states (a weight, his own calories) is taken as given. A
+portion he did not weigh («тарелка борща», «два куска хлеба») is Claude's
+estimate of a typical portion, with a plausible range, shown as «на глаз» and
+adjusted upwards like a weight judged by eye from a photo: assumed portions err
+low for the same reason.
+
+A message goes to Claude only when nothing else claims it: menu buttons,
+commands, an active input prompt, replies to a proposal and valid quick-add
+messages such as `oatmeal 370 60` keep working exactly as before (quick-add is
+still logged instantly, and its error messages are still shown). The bot also
+does not send:
+
+- menu labels in another letter case (`diary`, `settings`), or text with
+  fewer than three letters (`ок`, `+`, `1`) — these get the usual hint;
+- a reply that finds no open proposal (to his own message after its proposal
+  expired, or to a receipt): replies are corrections, and sent alone it would
+  log a fragment as a meal, so the bot asks for a separate message instead;
+- a message over 500 characters, which is more likely an accidental paste.
+
+Anything else costs one Claude request. When it describes no food («спасибо»),
+Claude records nothing and the bot answers briefly without a proposal. Text
+from other users, or with no key configured, is handled exactly as before and
+is never sent anywhere.
 
 ### Favorites and servings
 
@@ -383,10 +615,19 @@ values per serving.
 
 ### Goals, editing, and statistics
 
-`Daily Goal` stores a calorie target; every logged entry replies with today's
-total and the remaining budget, and `Food Today` shows today's totals with
-progress against the goal above the entry list. Choose `Remove` in the goal
-prompt to clear it.
+`Settings → Daily goal` stores a calorie target and, optionally, daily protein,
+fat, and carbs targets in grams, all in one message: `2000` sets only the
+calorie goal (as before), `2000 p150 f70 c200` (or `б`/`ж`/`у`, in any order)
+sets everything, and `p150` alone changes just the protein goal. Goals you leave
+out keep their value, `p0` removes one macro goal, and `Remove` clears all of
+them. The prompt shows the current goals in the same format so they are easy to
+copy and edit. Every logged entry replies with today's total and the remaining
+budget, plus a `Today's macros` line for each macro goal, and the diary's
+today header shows the same progress above the entry list. When some of today's
+entries have no value for a macro, its known total is only a lower bound: the
+bot then says "at least" (receipts) or "remaining unknown" (diary) instead of
+showing a misleading remaining amount. The Mini App's goal dialog edits the
+same four goals.
 
 The diary is browsable by day: `Food Today` has previous/next-day arrows and a
 `Today` shortcut, entry buttons show the local time of each entry, and every
@@ -399,12 +640,55 @@ own day) or `YYYY-MM-DD HH:MM` to move it to another day — the name, and calor
 fat, and carbs (per 100g for weighed entries, per serving for serving-based
 ones). Future timestamps and dates more than a year old are rejected.
 
+### Reminders and weekly summary
+
+Both are off by default and are configured under `Settings → Reminders`.
+
+- **Evening reminder**: choose a local time (`21:00`, `9.30`, or one of the
+  suggested buttons; `Off` turns it off). If nothing is in your diary for the
+  current local day by then, the bot sends one nudge with an `Add food` button.
+  It never fires twice for the same local day and is skipped on days that
+  already have an entry (weight measurements do not count). A time that has
+  already passed when you set it starts the next day.
+- **Weekly summary**: every Monday from 09:00 local time, a short recap of the
+  previous Monday–Sunday: days logged, average calories per logged day and the
+  difference from the calorie goal, average intake for each macro goal (marked
+  "at least" when some entries lack the macro), the highest and lowest day,
+  and the weight change between the week's first and last measurement. Weeks
+  with neither food nor weight are skipped. Turning it on mid-week schedules the
+  first summary for the next Monday.
+
+Times follow the profile timezone, including DST changes; changing the
+timezone does not repeat a reminder for a day that was already handled.
+Delivery state is stored in the database, so a restart neither repeats nor
+loses a notification: a reminder or summary that was due while the bot was down
+is sent once it is back, as long as its local day has not ended (reminder) or
+the next week's summary has not been released (summary). Each notification is marked as handled just before it is sent,
+which makes delivery at most once; it is retried on the next minute only when
+Telegram certainly did not receive it (flood control, or no connection). Users
+who blocked the bot are skipped without affecting anyone else.
+
 ### Weight tracking
 
 The `Weight` button or `/weight 82.5` records a body-weight measurement in
 kilograms. Replies show the latest measurement, the floating average over the
 last 7 local days, and the difference against the previous 7 days once enough
 history exists.
+
+### Exporting data
+
+The diary page of a day and the week and month statistics each have an
+`Export CSV` button that sends the food entries of exactly that day, week or
+month as a file. **Settings → Export data** sends the whole history instead:
+all food entries plus a second file with the weight measurements.
+
+Food files have one row per entry (`date`, `time`, `name`, `grams`,
+`servings`, `calories`, `protein`, `fat`, `carbs` — totals for that entry);
+the weight file has `date`, `time`, `weight_kg`. Dates and times are local to
+the profile timezone, unknown macronutrients are empty cells rather than zeros,
+and the files are comma-separated UTF-8 with a byte order mark. An Excel
+installation whose list separator is a semicolon (the Russian locale, for
+example) needs **Data → From Text/CSV** instead of a double click.
 
 The bot intentionally declines group-chat use because food history and inline
 button contents are personal data.
@@ -436,7 +720,8 @@ python -m ruff format --check .
 
 Tests cover validation, nutrient scaling, owner-scoped CRUD, durable sessions,
 transactions, paging, foreign keys, callback parsing, complete handler-level
-user workflows, retry behavior, and DST boundaries.
+user workflows, retry behavior, DST boundaries, and reminder/summary
+scheduling across timezones, DST, and restarts.
 
 ## Existing Go Database
 

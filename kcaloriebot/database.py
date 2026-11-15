@@ -13,7 +13,9 @@ from .domain import (
     DayStats,
     FavoriteFood,
     FoodEntry,
+    Goals,
     NotFound,
+    NotificationSettings,
     NutritionTotals,
     Page,
     Session,
@@ -25,21 +27,27 @@ from .domain import (
     canonical_timezone,
     check_calories_per_serving,
     check_daily_goal,
+    check_goals,
     check_macro,
     check_macro_per_serving,
     check_calories_per_100g,
     check_serving_grams,
     check_weight_kg,
+    day_bounds,
+    latest_summary_week,
     local_date,
     normalize_food_name,
     per_unit_from_totals,
+    reminder_due_day,
+    summary_due_week,
     scale_per_100,
     scale_per_serving,
+    stored_date,
     validate_macro_sum,
 )
 
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 11
 
 # The favorite_foods and sessions nutrition columns keep their historical
 # *_per_100g names; for unit = 'serving' rows they hold per-serving values.
@@ -146,10 +154,10 @@ CREATE INDEX weights_user_time_idx
     ON weights(user_id, measured_at_utc DESC, weight_id DESC);
 """
 
+# Migration scripts carry no BEGIN/COMMIT: Database.initialize runs each one
+# inside the write transaction in which it re-checked the schema version.
 SCHEMA = (
     """
-BEGIN;
-
 CREATE TABLE users (
     user_id INTEGER PRIMARY KEY,
     timezone TEXT NULL CHECK (timezone IS NULL OR length(timezone) BETWEEN 1 AND 128),
@@ -165,7 +173,6 @@ CREATE TABLE users (
     + _INDEXES_SQL
     + """
 PRAGMA user_version = 4;
-COMMIT;
 """
 )
 
@@ -173,8 +180,7 @@ COMMIT;
 # foreign keys off; new tables are created under a suffix, filled, and swapped
 # in so foreign-key clauses in other tables keep referencing the right names.
 _MIGRATE_V3_TO_V4 = (
-    "BEGIN;"
-    + _ENTRIES_DDL.format(name="food_entries_v4")
+    _ENTRIES_DDL.format(name="food_entries_v4")
     + """
 INSERT INTO food_entries_v4(
     entry_id, user_id, eaten_at_utc, name, grams, servings,
@@ -220,7 +226,6 @@ ALTER TABLE sessions_v4 RENAME TO sessions;
     + _INDEXES_SQL
     + """
 PRAGMA user_version = 4;
-COMMIT;
 """
 )
 
@@ -230,7 +235,6 @@ COMMIT;
 # deleting that favorite in the bot only unlinks it until the recipe is saved.
 # Ingredient values are per 100g, weighed raw.
 _MIGRATE_V8_TO_V9 = """
-BEGIN IMMEDIATE;
 CREATE TABLE IF NOT EXISTS recipes (
     recipe_id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
@@ -264,8 +268,77 @@ CREATE INDEX IF NOT EXISTS recipes_user_updated_idx
     ON recipes(user_id, updated_at_utc DESC, recipe_id DESC);
 CREATE INDEX IF NOT EXISTS recipes_favorite_idx ON recipes(favorite_id);
 PRAGMA user_version = 9;
-COMMIT;
 """
+
+# One favorite per name and owner, so saving a name twice (a double tap, the
+# bot and the Mini App at once) updates instead of duplicating. The v9 -> v10
+# migration first resolves existing duplicates; see
+# Database._enforce_unique_favorite_names.
+_FAVORITES_UNIQUE_NAME_SQL = """
+CREATE UNIQUE INDEX IF NOT EXISTS favorites_user_name_key_idx
+    ON favorite_foods(user_id, name_key)
+"""
+
+
+_FAVORITE_VALUE_COLUMNS = (
+    "unit",
+    "serving_grams",
+    "calories_per_100g",
+    "protein_per_100g",
+    "fat_per_100g",
+    "carbs_per_100g",
+)
+
+
+def _execute_script(connection: sqlite3.Connection, script: str) -> None:
+    """Run a multi-statement script inside the caller's transaction.
+
+    executescript() would COMMIT the open transaction first, releasing the
+    write lock under which the schema version was checked.
+    """
+    statement = ""
+    for line in script.splitlines(keepends=True):
+        statement += line
+        if sqlite3.complete_statement(statement):
+            connection.execute(statement)
+            statement = ""
+    if statement.strip():
+        raise ValueError("Incomplete SQL statement in a schema script")
+
+
+# --- v10 -> v11: macro goals, evening reminder and weekly summary -----------
+# Macro goals sit next to the calorie goal. reminder_minute is the local time
+# of day (minutes after midnight) of the evening reminder, NULL when off.
+# reminder_sent_day / summary_sent_week record the last local day / week
+# (ISO date of its Monday) that was handled, so "already sent" survives
+# restarts and is decided from the database rather than process memory.
+# Columns that already exist are skipped (like v7 -> v8), so re-running the
+# chain over a database whose user_version was lowered stays idempotent.
+_V11_USER_COLUMNS = {
+    "protein_goal": "REAL NULL CHECK (protein_goal IS NULL "
+    "OR (protein_goal > 0 AND protein_goal <= 2000))",
+    "fat_goal": "REAL NULL CHECK (fat_goal IS NULL "
+    "OR (fat_goal > 0 AND fat_goal <= 2000))",
+    "carbs_goal": "REAL NULL CHECK (carbs_goal IS NULL "
+    "OR (carbs_goal > 0 AND carbs_goal <= 2000))",
+    "reminder_minute": "INTEGER NULL CHECK (reminder_minute IS NULL "
+    "OR reminder_minute BETWEEN 0 AND 1439)",
+    "reminder_sent_day": "TEXT NULL",
+    "weekly_summary": "INTEGER NOT NULL DEFAULT 0 CHECK (weekly_summary IN (0, 1))",
+    "summary_sent_week": "TEXT NULL",
+}
+
+
+def _upgrade_v10_to_v11(connection: sqlite3.Connection) -> None:
+    """Runs inside the caller's write transaction, like every migration step."""
+    existing = {row[1] for row in connection.execute("PRAGMA table_info(users)")}
+    for column, definition in _V11_USER_COLUMNS.items():
+        if column not in existing:
+            connection.execute(f"ALTER TABLE users ADD COLUMN {column} {definition}")
+    connection.execute("PRAGMA user_version = 11")
+
+
+# --- end v10 -> v11 --------------------------------------------------------
 
 
 def name_filter(query: str, column: str) -> tuple[str, list[str]]:
@@ -293,45 +366,108 @@ class Database:
         self.path = Path(path)
 
     def initialize(self) -> None:
+        """Create or migrate the schema; safe to run from several processes.
+
+        The bot and the Mini App server may start together. Every step takes
+        the write lock and re-reads the version under it, so a process that
+        lost the race finds the step done and moves on instead of repeating
+        DDL that already ran.
+        """
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
-            connection.execute("PRAGMA journal_mode = WAL")
+            self._enable_wal(connection)
             connection.execute("PRAGMA synchronous = NORMAL")
-            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-            if version == 0:
-                tables = {
-                    row[0]
-                    for row in connection.execute(
-                        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
-                    )
-                }
-                if tables:
-                    raise RuntimeError(
-                        "The database has an unsupported legacy schema. "
-                        "Back it up and use a new DATABASE_PATH for the Python version."
-                    )
-                connection.executescript(SCHEMA)
-                version = 4
-            if version in (1, 2):
-                self._upgrade_v1_v2_to_v3(connection)
-                version = 3
-            if version == 3:
-                self._upgrade_v3_to_v4(connection)
-                version = 4
-            if version == 4:
-                connection.executescript("""
-                    BEGIN IMMEDIATE;
-                    ALTER TABLE sessions ADD COLUMN return_day TEXT NULL;
-                    ALTER TABLE sessions ADD COLUMN return_offset INTEGER NOT NULL DEFAULT 0;
-                    ALTER TABLE sessions ADD COLUMN selected_weight_id INTEGER NULL;
-                    ALTER TABLE sessions ADD COLUMN prompt_text TEXT NULL;
-                    PRAGMA user_version = 5;
-                    COMMIT;
-                """)
-                version = 5
-            if version == 5:
-                connection.executescript("""
-                    BEGIN IMMEDIATE;
+            while self._migrate_step(connection):
+                pass
+
+    @staticmethod
+    def _enable_wal(connection: sqlite3.Connection) -> None:
+        # Leaving rollback-journal mode needs a moment of exclusive access,
+        # and SQLite reports a busy database here at once instead of waiting
+        # through busy_timeout; so wait for the other process by hand.
+        deadline = time.monotonic() + 5.0
+        while True:
+            try:
+                connection.execute("PRAGMA journal_mode = WAL")
+                return
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc) or time.monotonic() > deadline:
+                    raise
+                time.sleep(0.05)
+
+    @staticmethod
+    def _user_version(connection: sqlite3.Connection) -> int:
+        return int(connection.execute("PRAGMA user_version").fetchone()[0])
+
+    def _migrate_step(self, connection: sqlite3.Connection) -> bool:
+        """Apply the next migration step; False once the schema is current."""
+        expected = self._user_version(connection)
+        if expected == SCHEMA_VERSION:
+            return False
+        # Table rebuilds need foreign keys off, and legacy rename semantics so
+        # swapping the new tables in does not rewrite other tables' foreign-key
+        # clauses. Both pragmas must be set outside a transaction.
+        rebuild = expected == 3
+        if rebuild:
+            connection.execute("PRAGMA foreign_keys = OFF")
+            connection.execute("PRAGMA legacy_alter_table = ON")
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                version = self._user_version(connection)
+                # Another process may have migrated while this one waited for
+                # the lock; then there is nothing to do but look again.
+                if version == expected:
+                    self._apply_migration(connection, version)
+                connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
+        finally:
+            if rebuild:
+                connection.execute("PRAGMA legacy_alter_table = OFF")
+                connection.execute("PRAGMA foreign_keys = ON")
+        return True
+
+    @classmethod
+    def _apply_migration(cls, connection: sqlite3.Connection, version: int) -> None:
+        """Move the schema one step on, inside the caller's write transaction."""
+        if version == 0:
+            tables = connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()
+            if tables:
+                raise RuntimeError(
+                    "The database has an unsupported legacy schema. "
+                    "Back it up and use a new DATABASE_PATH for the Python version."
+                )
+            _execute_script(connection, SCHEMA)
+        elif version in (1, 2):
+            cls._upgrade_v1_v2_to_v3(connection)
+        elif version == 3:
+            _execute_script(connection, _MIGRATE_V3_TO_V4)
+            # Checked before COMMIT: a failed check must leave the database at
+            # version 3 for the backup restore, not as an accepted version 4.
+            if connection.execute("PRAGMA foreign_key_check").fetchall():
+                raise RuntimeError(
+                    "Schema migration produced foreign key violations; "
+                    "restore the pre-update backup."
+                )
+        elif version == 4:
+            _execute_script(
+                connection,
+                """
+                ALTER TABLE sessions ADD COLUMN return_day TEXT NULL;
+                ALTER TABLE sessions ADD COLUMN return_offset INTEGER NOT NULL DEFAULT 0;
+                ALTER TABLE sessions ADD COLUMN selected_weight_id INTEGER NULL;
+                ALTER TABLE sessions ADD COLUMN prompt_text TEXT NULL;
+                PRAGMA user_version = 5;
+                """,
+            )
+        elif version == 5:
+            _execute_script(
+                connection,
+                """
                     CREATE TABLE IF NOT EXISTS web_operations (
                         user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
                         operation_key TEXT NOT NULL,
@@ -348,12 +484,12 @@ class Database:
                         PRIMARY KEY (user_id, entry_id)
                     );
                     PRAGMA user_version = 6;
-                    COMMIT;
-                """)
-                version = 6
-            if version == 6:
-                connection.executescript("""
-                    BEGIN IMMEDIATE;
+                """,
+            )
+        elif version == 6:
+            _execute_script(
+                connection,
+                """
                     CREATE TABLE IF NOT EXISTS health_connections (
                         user_id INTEGER PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
                         token_hash TEXT UNIQUE,
@@ -370,85 +506,172 @@ class Database:
                     CREATE UNIQUE INDEX IF NOT EXISTS health_one_pending
                         ON health_samples(user_id) WHERE state = 'pending';
                     PRAGMA user_version = 7;
-                    COMMIT;
-                """)
-                version = 7
-            if version == 7:
-                health_columns = {
-                    row[1]
-                    for row in connection.execute(
-                        "PRAGMA table_info(health_connections)"
-                    )
-                }
-                connection.execute("BEGIN IMMEDIATE")
-                if "end_utc" not in health_columns:
-                    connection.execute(
-                        "ALTER TABLE health_connections ADD COLUMN end_utc INTEGER NULL"
-                    )
-                connection.execute("PRAGMA user_version = 8")
-                connection.commit()
-                version = 8
-            if version == 8:
-                connection.executescript(_MIGRATE_V8_TO_V9)
-                version = 9
-            if version != SCHEMA_VERSION:
-                raise RuntimeError(
-                    f"Unsupported database schema version {version}; expected {SCHEMA_VERSION}."
+                """,
+            )
+        elif version == 7:
+            health_columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(health_connections)")
+            }
+            if "end_utc" not in health_columns:
+                connection.execute(
+                    "ALTER TABLE health_connections ADD COLUMN end_utc INTEGER NULL"
                 )
+            connection.execute("PRAGMA user_version = 8")
+        elif version == 8:
+            _execute_script(connection, _MIGRATE_V8_TO_V9)
+        elif version == 9:
+            cls._enforce_unique_favorite_names(connection)
+            connection.execute("PRAGMA user_version = 10")
+        elif version == 10:
+            _upgrade_v10_to_v11(connection)
+        else:
+            raise RuntimeError(
+                f"Unsupported database schema version {version}; expected {SCHEMA_VERSION}."
+            )
 
     @staticmethod
     def _upgrade_v1_v2_to_v3(connection: sqlite3.Connection) -> None:
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            session_columns = {
-                row[1] for row in connection.execute("PRAGMA table_info(sessions)")
-            }
-            if "prompt_pending" not in session_columns:
-                connection.execute(
-                    "ALTER TABLE sessions ADD COLUMN prompt_pending INTEGER "
-                    "NOT NULL DEFAULT 0 CHECK (prompt_pending IN (0, 1))"
+        session_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(sessions)")
+        }
+        if "prompt_pending" not in session_columns:
+            connection.execute(
+                "ALTER TABLE sessions ADD COLUMN prompt_pending INTEGER "
+                "NOT NULL DEFAULT 0 CHECK (prompt_pending IN (0, 1))"
+            )
+        if "last_message_id" not in session_columns:
+            connection.execute(
+                "ALTER TABLE sessions ADD COLUMN last_message_id INTEGER NULL"
+            )
+        if "selected_entry_id" not in session_columns:
+            connection.execute(
+                "ALTER TABLE sessions ADD COLUMN selected_entry_id INTEGER NULL"
+            )
+        user_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(users)")
+        }
+        if "daily_calorie_goal" not in user_columns:
+            connection.execute(
+                "ALTER TABLE users ADD COLUMN daily_calorie_goal REAL "
+                "NULL CHECK (daily_calorie_goal IS NULL OR "
+                "(daily_calorie_goal > 0 AND daily_calorie_goal <= 50000))"
+            )
+        connection.execute("PRAGMA user_version = 3")
+
+    @classmethod
+    def _enforce_unique_favorite_names(cls, connection: sqlite3.Connection) -> int:
+        """Resolve favorites that share an owner and name, then forbid them.
+
+        Per name, the favorite a recipe publishes to survives, else the newest
+        one: the row the bot already found by that name and updated on save.
+        Each other row with the very same values as a row kept so far is
+        merged into it (the sessions and recipes that pointed at it move
+        over), which loses nothing. A row with values of its own is kept under
+        a free numbered name, "Rice (2)", where the owner sees it and decides.
+        Returns how many rows were merged away.
+        """
+        merged = 0
+        groups = connection.execute(
+            """
+            SELECT user_id, name_key FROM favorite_foods
+            GROUP BY user_id, name_key HAVING count(*) > 1
+            """
+        ).fetchall()
+        for user_id, name_key in groups:
+            survivor, *duplicates = connection.execute(
+                """
+                SELECT * FROM favorite_foods AS f
+                WHERE user_id = ? AND name_key = ?
+                ORDER BY EXISTS (
+                    SELECT 1 FROM recipes AS r WHERE r.favorite_id = f.favorite_id
+                ) DESC, favorite_id DESC
+                """,
+                (user_id, name_key),
+            ).fetchall()
+            kept = [survivor]
+            for duplicate in duplicates:
+                same = next(
+                    (
+                        row
+                        for row in kept
+                        if all(
+                            row[column] == duplicate[column]
+                            for column in _FAVORITE_VALUE_COLUMNS
+                        )
+                    ),
+                    None,
                 )
-            if "last_message_id" not in session_columns:
-                connection.execute(
-                    "ALTER TABLE sessions ADD COLUMN last_message_id INTEGER NULL"
-                )
-            if "selected_entry_id" not in session_columns:
-                connection.execute(
-                    "ALTER TABLE sessions ADD COLUMN selected_entry_id INTEGER NULL"
-                )
-            user_columns = {
-                row[1] for row in connection.execute("PRAGMA table_info(users)")
-            }
-            if "daily_calorie_goal" not in user_columns:
-                connection.execute(
-                    "ALTER TABLE users ADD COLUMN daily_calorie_goal REAL "
-                    "NULL CHECK (daily_calorie_goal IS NULL OR "
-                    "(daily_calorie_goal > 0 AND daily_calorie_goal <= 50000))"
-                )
-            connection.execute("PRAGMA user_version = 3")
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
+                if same is not None:
+                    cls._merge_favorite(
+                        connection,
+                        user_id,
+                        duplicate["favorite_id"],
+                        same["favorite_id"],
+                    )
+                    merged += 1
+                else:
+                    name = cls._free_favorite_name(
+                        connection, user_id, duplicate["name"]
+                    )
+                    connection.execute(
+                        "UPDATE favorite_foods SET name = ?, name_key = ? WHERE favorite_id = ?",
+                        (name, name.casefold(), duplicate["favorite_id"]),
+                    )
+                    kept.append(duplicate)
+        connection.execute(_FAVORITES_UNIQUE_NAME_SQL)
+        return merged
 
     @staticmethod
-    def _upgrade_v3_to_v4(connection: sqlite3.Connection) -> None:
-        # Table rebuilds need foreign keys off, and legacy rename semantics so
-        # swapping the new tables in does not rewrite other tables' foreign-key
-        # clauses. Both pragmas must be set outside a transaction.
-        connection.execute("PRAGMA foreign_keys = OFF")
-        connection.execute("PRAGMA legacy_alter_table = ON")
-        try:
-            connection.executescript(_MIGRATE_V3_TO_V4)
-            violations = connection.execute("PRAGMA foreign_key_check").fetchall()
-            if violations:
-                raise RuntimeError(
-                    "Schema migration produced foreign key violations; "
-                    "restore the pre-update backup."
-                )
-        finally:
-            connection.execute("PRAGMA legacy_alter_table = OFF")
-            connection.execute("PRAGMA foreign_keys = ON")
+    def _free_favorite_name(
+        connection: sqlite3.Connection, user_id: int, name: str
+    ) -> str:
+        number = 2
+        while True:
+            suffix = f" ({number})"
+            candidate = name[: 200 - len(suffix)].rstrip() + suffix
+            taken = connection.execute(
+                "SELECT 1 FROM favorite_foods WHERE user_id = ? AND name_key = ?",
+                (user_id, candidate.casefold()),
+            ).fetchone()
+            if taken is None:
+                return candidate
+            number += 1
+
+    @staticmethod
+    def _merge_favorite(
+        connection: sqlite3.Connection,
+        user_id: int,
+        duplicate_id: int,
+        survivor_id: int,
+    ) -> None:
+        """Delete a favorite after pointing what referenced it at survivor_id.
+
+        Bot sessions follow it; the revision bump makes a handler that still
+        holds the old session see a changed workflow rather than write the
+        deleted id back. A recipe follows it unless the survivor already
+        belongs to another recipe; then the foreign key unlinks the recipe,
+        as deleting a recipe's favorite in the bot does.
+        """
+        connection.execute(
+            """
+            UPDATE sessions SET selected_favorite_id = ?, revision = revision + 1
+            WHERE user_id = ? AND selected_favorite_id = ?
+            """,
+            (survivor_id, user_id, duplicate_id),
+        )
+        connection.execute(
+            """
+            UPDATE recipes SET favorite_id = ?
+            WHERE favorite_id = ?
+              AND NOT EXISTS (SELECT 1 FROM recipes WHERE favorite_id = ?)
+            """,
+            (survivor_id, duplicate_id, survivor_id),
+        )
+        connection.execute(
+            "DELETE FROM favorite_foods WHERE user_id = ? AND favorite_id = ?",
+            (user_id, duplicate_id),
+        )
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(
@@ -599,6 +822,87 @@ class Database:
             raise
         finally:
             connection.close()
+
+    def get_goals(self, user_id: int) -> Goals:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT daily_calorie_goal, protein_goal, fat_goal, carbs_goal
+                FROM users WHERE user_id = ?
+                """,
+                (user_id,),
+            ).fetchone()
+        if row is None:
+            return Goals()
+        return Goals(
+            row["daily_calorie_goal"],
+            row["protein_goal"],
+            row["fat_goal"],
+            row["carbs_goal"],
+        )
+
+    @staticmethod
+    def _write_goals(
+        connection: sqlite3.Connection, user_id: int, goals: Goals, now: int
+    ) -> None:
+        check_goals(goals)
+        cursor = connection.execute(
+            """
+            UPDATE users SET daily_calorie_goal = ?, protein_goal = ?,
+                fat_goal = ?, carbs_goal = ?, updated_at_utc = ?
+            WHERE user_id = ?
+            """,
+            (goals.calories, goals.protein, goals.fat, goals.carbs, now, user_id),
+        )
+        if cursor.rowcount != 1:
+            raise NotFound("User not found")
+
+    def set_goals(
+        self, user_id: int, goals: Goals, now_utc: Optional[int] = None
+    ) -> Goals:
+        """Replace all daily goals at once."""
+        now = self.now_epoch() if now_utc is None else now_utc
+        with self._connect() as connection:
+            self._write_goals(connection, user_id, goals, now)
+        return goals
+
+    def complete_goals_session(
+        self,
+        session: Session,
+        changes: Optional[dict[str, Optional[float]]],
+        now_utc: Optional[int] = None,
+    ) -> Goals:
+        """Apply goal changes from the goal prompt; None removes every goal.
+
+        Nutrients missing from ``changes`` keep their current goal.
+        """
+        if session.state != SessionState.WAIT_GOAL:
+            raise StateConflict("Goal workflow is not active")
+        now = self.now_epoch() if now_utc is None else now_utc
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            self._assert_session(connection, session)
+            row = connection.execute(
+                """
+                SELECT daily_calorie_goal, protein_goal, fat_goal, carbs_goal
+                FROM users WHERE user_id = ?
+                """,
+                (session.user_id,),
+            ).fetchone()
+            if row is None:
+                raise NotFound("User not found")
+            current = Goals(*row)
+            goals = Goals() if changes is None else current.merged(changes)
+            self._write_goals(connection, session.user_id, goals, now)
+            self._delete_exact_session(connection, session)
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        return goals
 
     def start_session(
         self,
@@ -826,7 +1130,7 @@ class Database:
             validate_macro_sum(
                 session.protein_per_100g, session.fat_per_100g, session.carbs_per_100g
             )
-            favorite_id = self._insert_favorite(
+            favorite_id, _created = self._upsert_favorite(
                 connection,
                 user_id,
                 session.draft_name,
@@ -1064,6 +1368,7 @@ class Database:
         carbs_per_100g: Optional[float],
         now_utc: Optional[int] = None,
     ) -> FavoriteFood:
+        """Save a per-100 g favorite, updating the one with the same name."""
         name = normalize_food_name(name)
         scale_per_100(
             calories_per_100g,
@@ -1075,7 +1380,8 @@ class Database:
         now = self.now_epoch() if now_utc is None else now_utc
         validate_macro_sum(protein_per_100g, fat_per_100g, carbs_per_100g)
         with self._connect() as connection:
-            favorite_id = self._insert_favorite(
+            connection.execute("BEGIN IMMEDIATE")
+            favorite_id, _created = self._upsert_favorite(
                 connection,
                 user_id,
                 name,
@@ -1099,7 +1405,7 @@ class Database:
         return None if row is None else self._row_to_favorite(row)
 
     def find_favorite_by_name(self, user_id: int, name: str) -> Optional[FavoriteFood]:
-        """Return the newest favorite whose name matches, ignoring case."""
+        """Return the favorite whose name matches, ignoring case."""
         key = normalize_food_name(name).casefold()
         with self._connect() as connection:
             row = connection.execute(
@@ -1294,49 +1600,24 @@ class Database:
             unit, calories, protein, fat, carbs, serving_grams
         )
         self.ensure_user(user_id, now)
-        existing = self.find_favorite_by_name(user_id, name)
         with self._connect() as connection:
-            if existing is None:
-                favorite_id = self._insert_favorite(
-                    connection,
-                    user_id,
-                    name,
-                    calories,
-                    protein,
-                    fat,
-                    carbs,
-                    now,
-                    unit=unit,
-                    serving_grams=serving_grams,
-                )
-            else:
-                favorite_id = existing.favorite_id
-                cursor = connection.execute(
-                    """
-                    UPDATE favorite_foods
-                    SET unit = ?, serving_grams = ?, calories_per_100g = ?,
-                        protein_per_100g = ?, fat_per_100g = ?, carbs_per_100g = ?,
-                        updated_at_utc = ?
-                    WHERE user_id = ? AND favorite_id = ?
-                    """,
-                    (
-                        unit,
-                        serving_grams,
-                        calories,
-                        protein,
-                        fat,
-                        carbs,
-                        now,
-                        user_id,
-                        favorite_id,
-                    ),
-                )
-                if cursor.rowcount != 1:
-                    raise NotFound("Favorite not found")
+            connection.execute("BEGIN IMMEDIATE")
+            favorite_id, created = self._upsert_favorite(
+                connection,
+                user_id,
+                name,
+                calories,
+                protein,
+                fat,
+                carbs,
+                now,
+                unit=unit,
+                serving_grams=serving_grams,
+            )
         favorite = self.get_favorite(user_id, favorite_id)
         if favorite is None:
             raise StateConflict("Favorite was not saved")
-        return favorite, existing is None
+        return favorite, created
 
     def convert_favorite_to_serving(
         self,
@@ -1788,6 +2069,39 @@ class Database:
         items = tuple(self._row_to_entry(row) for row in rows[:limit])
         return Page(items, offset, offset > 0, len(rows) > limit)
 
+    def export_entries(
+        self,
+        user_id: int,
+        start_utc: Optional[int] = None,
+        end_utc: Optional[int] = None,
+    ) -> tuple[FoodEntry, ...]:
+        """A user's entries oldest first; all of them when no bounds are given."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM food_entries
+                WHERE user_id = ?
+                  AND (? IS NULL OR eaten_at_utc >= ?)
+                  AND (? IS NULL OR eaten_at_utc < ?)
+                ORDER BY eaten_at_utc, entry_id
+                """,
+                (user_id, start_utc, start_utc, end_utc, end_utc),
+            ).fetchall()
+        return tuple(self._row_to_entry(row) for row in rows)
+
+    def all_weights(self, user_id: int) -> tuple[WeightRecord, ...]:
+        """Every weight measurement of a user, oldest first, for export."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM weights
+                WHERE user_id = ?
+                ORDER BY measured_at_utc, weight_id
+                """,
+                (user_id,),
+            ).fetchall()
+        return tuple(self._row_to_weight(row) for row in rows)
+
     def recent_entry_templates(
         self, user_id: int, limit: int = 10
     ) -> tuple[FoodEntry, ...]:
@@ -1899,6 +2213,297 @@ class Database:
             for day in days[offset : offset + limit]
         )
         return Page(items, offset, offset > 0, len(days) > offset + limit)
+
+    # --- Reminders and weekly summaries ------------------------------------
+
+    _NOTIFICATION_COLUMNS = (
+        "user_id, timezone, reminder_minute, reminder_sent_day, "
+        "weekly_summary, summary_sent_week"
+    )
+
+    @staticmethod
+    def _row_to_notifications(row: sqlite3.Row) -> NotificationSettings:
+        return NotificationSettings(
+            user_id=row["user_id"],
+            timezone=row["timezone"],
+            reminder_minute=row["reminder_minute"],
+            reminder_sent_day=stored_date(row["reminder_sent_day"]),
+            weekly_summary=bool(row["weekly_summary"]),
+            summary_sent_week=stored_date(row["summary_sent_week"]),
+        )
+
+    def _read_notifications(
+        self, connection: sqlite3.Connection, user_id: int
+    ) -> NotificationSettings:
+        row = connection.execute(
+            f"SELECT {self._NOTIFICATION_COLUMNS} FROM users WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+        if row is None:
+            raise NotFound("User not found")
+        return self._row_to_notifications(row)
+
+    def get_notification_settings(self, user_id: int) -> NotificationSettings:
+        with self._connect() as connection:
+            return self._read_notifications(connection, user_id)
+
+    def notification_candidates(self) -> list[NotificationSettings]:
+        """Users with a timezone and the reminder or weekly summary enabled."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT {self._NOTIFICATION_COLUMNS} FROM users
+                WHERE timezone IS NOT NULL
+                  AND (reminder_minute IS NOT NULL OR weekly_summary = 1)
+                ORDER BY user_id
+                """
+            ).fetchall()
+        return [self._row_to_notifications(row) for row in rows]
+
+    def _write_reminder(
+        self,
+        connection: sqlite3.Connection,
+        user_id: int,
+        minute: Optional[int],
+        now: int,
+    ) -> NotificationSettings:
+        if minute is not None and not 0 <= minute < 24 * 60:
+            raise ValidationError("Reminder time must be between 00:00 and 23:59.")
+        current = self._read_notifications(connection, user_id)
+        sent_day = current.reminder_sent_day
+        if minute is not None and current.timezone is not None:
+            # A time that already passed today starts tomorrow instead of
+            # firing a minute after it was set.
+            passed = reminder_due_day(now, current.timezone, minute, sent_day)
+            if passed is not None:
+                sent_day = passed
+        connection.execute(
+            """
+            UPDATE users SET reminder_minute = ?, reminder_sent_day = ?,
+                updated_at_utc = ?
+            WHERE user_id = ?
+            """,
+            (minute, None if sent_day is None else sent_day.isoformat(), now, user_id),
+        )
+        return replace(current, reminder_minute=minute, reminder_sent_day=sent_day)
+
+    def set_reminder(
+        self, user_id: int, minute: Optional[int], now_utc: Optional[int] = None
+    ) -> NotificationSettings:
+        """Turn the evening reminder on at a local minute of the day, or off."""
+        now = self.now_epoch() if now_utc is None else now_utc
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            settings = self._write_reminder(connection, user_id, minute, now)
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        return settings
+
+    def complete_reminder_session(
+        self, session: Session, minute: Optional[int], now_utc: Optional[int] = None
+    ) -> NotificationSettings:
+        if session.state != SessionState.WAIT_REMINDER_TIME:
+            raise StateConflict("Reminder workflow is not active")
+        now = self.now_epoch() if now_utc is None else now_utc
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            self._assert_session(connection, session)
+            settings = self._write_reminder(connection, session.user_id, minute, now)
+            self._delete_exact_session(connection, session)
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        return settings
+
+    def set_weekly_summary(
+        self, user_id: int, enabled: bool, now_utc: Optional[int] = None
+    ) -> NotificationSettings:
+        """Turn the weekly summary on or off.
+
+        Turning it on marks the latest already-released week as handled, so
+        the first summary arrives next Monday instead of immediately.
+        """
+        now = self.now_epoch() if now_utc is None else now_utc
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            current = self._read_notifications(connection, user_id)
+            sent_week = current.summary_sent_week
+            if enabled and current.timezone is not None:
+                released = latest_summary_week(now, current.timezone)
+                if released is not None and (sent_week is None or sent_week < released):
+                    sent_week = released
+            connection.execute(
+                """
+                UPDATE users SET weekly_summary = ?, summary_sent_week = ?,
+                    updated_at_utc = ?
+                WHERE user_id = ?
+                """,
+                (
+                    int(enabled),
+                    None if sent_week is None else sent_week.isoformat(),
+                    now,
+                    user_id,
+                ),
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        return replace(current, weekly_summary=enabled, summary_sent_week=sent_week)
+
+    def claim_reminder(
+        self, expected: NotificationSettings, day: date, now_utc: int
+    ) -> Optional[bool]:
+        """Atomically mark ``day``'s reminder as handled before it is sent.
+
+        Returns None when the reminder is no longer due (already handled,
+        settings or timezone changed since ``expected`` was read), False when
+        it is handled without a message because food is logged that day, and
+        True when the caller should send it. Claiming before sending makes
+        delivery at most once: a crash between claim and send loses one
+        reminder instead of repeating it.
+        """
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            current = self._read_notifications(connection, expected.user_id)
+            if (
+                current.timezone is None
+                or current.timezone != expected.timezone
+                or current.reminder_minute != expected.reminder_minute
+                or reminder_due_day(
+                    now_utc,
+                    current.timezone,
+                    current.reminder_minute,
+                    current.reminder_sent_day,
+                )
+                != day
+            ):
+                connection.rollback()
+                return None
+            bounds = day_bounds(day, current.timezone)
+            logged = connection.execute(
+                """
+                SELECT 1 FROM food_entries
+                WHERE user_id = ? AND eaten_at_utc >= ? AND eaten_at_utc < ?
+                LIMIT 1
+                """,
+                (current.user_id, bounds.start_utc, bounds.end_utc),
+            ).fetchone()
+            connection.execute(
+                "UPDATE users SET reminder_sent_day = ? WHERE user_id = ?",
+                (day.isoformat(), current.user_id),
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        return logged is None
+
+    def release_reminder(
+        self, user_id: int, day: date, previous: Optional[date]
+    ) -> None:
+        """Undo a claim whose message was definitely not delivered."""
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE users SET reminder_sent_day = ?
+                WHERE user_id = ? AND reminder_sent_day = ?
+                """,
+                (
+                    None if previous is None else previous.isoformat(),
+                    user_id,
+                    day.isoformat(),
+                ),
+            )
+
+    def claim_summary(
+        self, expected: NotificationSettings, week: date, now_utc: int
+    ) -> bool:
+        """Atomically mark the summary of the week starting ``week`` as sent.
+
+        False when it is no longer due (already handled, turned off, or the
+        timezone changed since ``expected`` was read).
+        """
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            current = self._read_notifications(connection, expected.user_id)
+            if (
+                current.timezone is None
+                or current.timezone != expected.timezone
+                or not current.weekly_summary
+                or summary_due_week(
+                    now_utc, current.timezone, current.summary_sent_week
+                )
+                != week
+            ):
+                connection.rollback()
+                return False
+            connection.execute(
+                "UPDATE users SET summary_sent_week = ? WHERE user_id = ?",
+                (week.isoformat(), current.user_id),
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        return True
+
+    def release_summary(
+        self, user_id: int, week: date, previous: Optional[date]
+    ) -> None:
+        """Undo a claim whose summary was definitely not delivered."""
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE users SET summary_sent_week = ?
+                WHERE user_id = ? AND summary_sent_week = ?
+                """,
+                (
+                    None if previous is None else previous.isoformat(),
+                    user_id,
+                    week.isoformat(),
+                ),
+            )
+
+    def weight_range(
+        self, user_id: int, start_utc: int, end_utc: int
+    ) -> tuple[Optional[WeightRecord], Optional[WeightRecord]]:
+        """First and last measurement in [start_utc, end_utc)."""
+        with self._connect() as connection:
+            rows = [
+                connection.execute(
+                    f"""
+                    SELECT * FROM weights
+                    WHERE user_id = ? AND measured_at_utc >= ? AND measured_at_utc < ?
+                    ORDER BY measured_at_utc {order}, weight_id {order}
+                    LIMIT 1
+                    """,
+                    (user_id, start_utc, end_utc),
+                ).fetchone()
+                for order in ("ASC", "DESC")
+            ]
+        first, last = (
+            None if row is None else self._row_to_weight(row) for row in rows
+        )
+        return first, last
 
     @staticmethod
     def _validate_page(offset: int, limit: int) -> None:
@@ -2093,6 +2698,67 @@ class Database:
             ),
         )
         return int(cursor.lastrowid)
+
+    @classmethod
+    def _upsert_favorite(
+        cls,
+        connection: sqlite3.Connection,
+        user_id: int,
+        name: str,
+        calories: float,
+        protein: Optional[float],
+        fat: Optional[float],
+        carbs: Optional[float],
+        now_utc: int,
+        unit: str = UNIT_100G,
+        serving_grams: Optional[float] = None,
+    ) -> tuple[int, bool]:
+        """Update the owner's favorite of this name, or insert it; returns
+        (favorite_id, created). Call it inside a write transaction (BEGIN
+        IMMEDIATE): a concurrent save of the same new name then waits for this
+        one and updates the row it created."""
+        name = normalize_food_name(name)
+        existing = connection.execute(
+            "SELECT favorite_id FROM favorite_foods WHERE user_id = ? AND name_key = ?",
+            (user_id, name.casefold()),
+        ).fetchone()
+        if existing is None:
+            favorite_id = cls._insert_favorite(
+                connection,
+                user_id,
+                name,
+                calories,
+                protein,
+                fat,
+                carbs,
+                now_utc,
+                unit=unit,
+                serving_grams=serving_grams,
+            )
+            return favorite_id, True
+        cls._validate_favorite_values(
+            unit, calories, protein, fat, carbs, serving_grams
+        )
+        connection.execute(
+            """
+            UPDATE favorite_foods
+            SET unit = ?, serving_grams = ?, calories_per_100g = ?,
+                protein_per_100g = ?, fat_per_100g = ?, carbs_per_100g = ?,
+                updated_at_utc = ?
+            WHERE favorite_id = ?
+            """,
+            (
+                unit,
+                serving_grams,
+                calories,
+                protein,
+                fat,
+                carbs,
+                now_utc,
+                existing["favorite_id"],
+            ),
+        )
+        return existing["favorite_id"], False
 
     @staticmethod
     def _assert_session(connection: sqlite3.Connection, session: Session) -> None:

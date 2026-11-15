@@ -22,7 +22,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from kcaloriebot.config import Settings
 from kcaloriebot.database import Database
 from kcaloriebot.health import HealthStore
-from kcaloriebot.domain import SessionState
+from kcaloriebot.domain import Goals, SessionState
 from kcaloriebot.domain import local_datetime
 from kcaloriebot.web_store import entry_data
 from kcaloriebot.web import authenticate, build_web_app
@@ -220,6 +220,53 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.headers["Cache-Control"], "no-store")
         response = await self.client.get("/static/config.py")
         self.assertEqual(response.status, 404)
+
+    async def test_macro_goals_are_saved_and_returned_with_the_diary(self):
+        self.store.set_timezone(123, "Europe/Moscow")
+        goals = {"calories": 2000, "protein": 150, "fat": None, "carbs": 220.5}
+        response = await self.request("PUT", "/api/profile", json={"goals": goals})
+        self.assertEqual(response.status, 200)
+        diary = await (await self.request("GET", "/api/diary")).json()
+        self.assertEqual(diary["goals"], goals)
+        self.assertEqual(diary["goal"], 2000)
+        # The calorie-only request of older clients keeps the macro goals.
+        response = await self.request("PUT", "/api/profile", json={"goal": 1800})
+        self.assertEqual(response.status, 200)
+        diary = await (await self.request("GET", "/api/diary")).json()
+        self.assertEqual(diary["goals"], {**goals, "calories": 1800})
+        # Empty fields remove goals.
+        empty = dict.fromkeys(goals)
+        response = await self.request("PUT", "/api/profile", json={"goals": empty})
+        self.assertEqual(response.status, 200)
+        diary = await (await self.request("GET", "/api/diary")).json()
+        self.assertEqual(diary["goals"], empty)
+        self.assertIsNone(diary["goal"])
+
+    async def test_invalid_macro_goals_write_nothing(self):
+        self.store.set_timezone(123, "UTC")
+        valid = {"calories": 2000, "protein": 150, "fat": 70, "carbs": 200}
+        for goals in (
+            {**valid, "protein": 0},
+            {**valid, "fat": 2001},
+            {**valid, "carbs": -1},
+            {**valid, "calories": 50001},
+            {**valid, "protein": "150"},
+            {**valid, "protein": True},
+            {key: value for key, value in valid.items() if key != "carbs"},
+            {**valid, "sodium": 5},
+            [2000, 150, 70, 200],
+        ):
+            with self.subTest(goals=goals):
+                response = await self.request(
+                    "PUT", "/api/profile", json={"goals": goals}
+                )
+                self.assertEqual(response.status, 400)
+                self.assertIn("error", await response.json())
+        response = await self.request(
+            "PUT", "/api/profile", json={"goals": {**valid, "fat": 2001}}
+        )
+        self.assertIn("БЖУ", (await response.json())["error"])
+        self.assertEqual(self.store.get_goals(123), Goals())
 
     async def test_onboarding_add_goal_favorite_and_delete(self):
         response = await self.request("GET", "/api/diary")
@@ -893,6 +940,69 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.search_favorites(123, "борщ"), ())
         self.assertEqual(self.store.get_session(123, 123), session)
         self.assertEqual(len(self.store.page_entries(123, 0, 2**40, 0, 5).items), 1)
+
+    async def test_double_tapped_favorite_saves_create_one_favorite(self):
+        self.store.set_timezone(123, "UTC")
+        entry = self.store.add_entry(123, int(time.time()), "Овсянка", 370, 60)
+        body = {"name": "Гречка", "calories": 313, "protein": 12.6}
+        responses = await asyncio.gather(
+            *(self.request("POST", "/api/favorites", json=body) for _ in range(3)),
+            *(
+                self.request("POST", f"/api/entries/{entry.entry_id}/favorite", json={})
+                for _ in range(3)
+            ),
+        )
+        self.assertEqual(
+            sorted(response.status for response in responses[:3]), [200, 200, 201]
+        )
+        self.assertEqual({response.status for response in responses[3:]}, {201})
+        self.assertEqual(
+            sorted(item.name for item in self.store.page_favorites(123, 0, 30).items),
+            ["Гречка", "Овсянка"],
+        )
+
+    async def test_recipe_renamed_onto_a_plain_favorite_merges_into_it(self):
+        self.store.set_timezone(123, "UTC")
+        oats = self.store.add_favorite(123, "Овсянка", 370, None, None, None)
+        ingredients = [{"name": "Крупа", "grams": 100, "calories": 350}]
+        response = await self.request(
+            "POST", "/api/recipes", json={"name": "Каша", "ingredients": ingredients}
+        )
+        recipe = (await response.json())["recipe"]
+        porridge = self.store.find_favorite_by_name(123, "Каша")
+        session = self.store.start_session(
+            123,
+            123,
+            SessionState.WAIT_FAVORITE_GRAMS,
+            selected_favorite_id=porridge.favorite_id,
+        )
+        response = await self.request(
+            "PUT",
+            f"/api/recipes/{recipe['recipe_id']}",
+            json={
+                "name": "овсянка",
+                "ingredients": ingredients,
+                "version": recipe["version"],
+            },
+        )
+        self.assertEqual(response.status, 200, await response.text())
+        favorites = self.store.page_favorites(123, 0, 30).items
+        self.assertEqual([item.favorite_id for item in favorites], [oats.favorite_id])
+        self.assertEqual(favorites[0].name, "овсянка")
+        self.assertEqual(favorites[0].calories_per_100g, 350)
+        # The chat workflow that had picked the old favorite follows it.
+        moved = self.store.get_session(123, 123)
+        self.assertEqual(moved.selected_favorite_id, oats.favorite_id)
+        self.assertEqual(moved.revision, session.revision + 1)
+        # Deleting the recipe removes the favorite it now publishes to.
+        recipe = (await response.json())["recipe"]
+        response = await self.request(
+            "DELETE",
+            f"/api/recipes/{recipe['recipe_id']}",
+            json={"version": recipe["version"]},
+        )
+        self.assertEqual(response.status, 200)
+        self.assertEqual(self.store.page_favorites(123).items, ())
 
     async def test_invalid_recipes_write_nothing(self):
         self.store.set_timezone(123, "UTC")

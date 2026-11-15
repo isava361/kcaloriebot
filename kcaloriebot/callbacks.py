@@ -63,6 +63,15 @@ def parse_callback(data: str) -> Optional[CallbackAction]:
             return None
     if data in {"menu:add", "menu:search", "menu:progress", "menu:settings"}:
         return CallbackAction(data.replace(":", "_"))
+    # Reminder settings panel and its toggles.
+    if data in {
+        "menu:reminders",
+        "notify:reminder:time",
+        "notify:reminder:off",
+        "notify:weekly:on",
+        "notify:weekly:off",
+    }:
+        return CallbackAction(data.replace(":", "_"))
     if data in {"cancel", "cancel_all"}:
         return CallbackAction("cancel")
     if data == "dismiss":
@@ -76,6 +85,18 @@ def parse_callback(data: str) -> Optional[CallbackAction]:
             and parts[1] in {"edit", "undo", "view"}
         ):
             return CallbackAction(f"weight_{parts[1]}", record_id=_parse_id(parts[2]))
+        if len(parts) == 3 and parts[0] == "photo" and parts[1] in {"save", "cancel"}:
+            # The ID is the owner's photo message; the proposal itself is in memory.
+            return CallbackAction(f"photo_{parts[1]}", record_id=_parse_id(parts[2]))
+        if len(parts) == 4 and parts[:2] == ["photo", "drop"]:
+            # «Убрать» in the summary of a saved proposal: the entry to delete.
+            return CallbackAction(
+                "photo_drop",
+                record_id=_parse_id(parts[2]),
+                issued_at=_parse_timestamp(parts[3]),
+            )
+        if len(parts) == 3 and parts[:2] == ["photo", "unweigh"]:
+            return CallbackAction("photo_unweigh", record_id=_parse_id(parts[2]))
         if len(parts) == 4 and parts[:2] == ["entry", "undo"]:
             return CallbackAction(
                 "entry_undo",
@@ -89,6 +110,14 @@ def parse_callback(data: str) -> Optional[CallbackAction]:
                 "entry_list",
                 day=_parse_day(parts[2]),
                 offset=_parse_offset(parts[3]),
+            )
+        if parts == ["export", "week"]:
+            return CallbackAction("export", period="week")
+        if len(parts) == 3 and parts[:2] == ["export", "day"]:
+            return CallbackAction("export", period="day", day=_parse_day(parts[2]))
+        if len(parts) == 3 and parts[:2] == ["export", "month"]:
+            return CallbackAction(
+                "export", period="month", month=_parse_month(parts[2])
             )
         if len(parts) == 3 and parts[:2] == ["fav", "list"]:
             return CallbackAction("favorite_list", offset=_parse_offset(parts[2]))
