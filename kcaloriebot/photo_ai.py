@@ -18,6 +18,7 @@ from .domain import (
     ValidationError,
     check_calories_per_100g,
     normalize_food_name,
+    scale_per_serving,
     validate_macro_sum,
 )
 
@@ -39,15 +40,24 @@ You log food for a calorie-tracking diary from a single photo sent by its owner.
 Report the result by calling the record_foods tool exactly once.
 
 Identify every distinct food or drink the person is about to eat or has eaten
-and estimate, for each one:
-- name: a short Russian name, e.g. "Гречка отварная", "Куриная грудка жареная";
-- grams: the weight of the portion in the photo;
-- calories_per_100g, protein_per_100g, fat_per_100g, carbs_per_100g: typical
-  nutrition per 100 g of that food as prepared.
+and record each one in one of two ways, chosen by unit:
+- unit "100g": calories, protein, fat and carbs are per 100 g of the food as
+  prepared, and amount is the weight eaten in grams. Set serving_grams to 0.
+- unit "serving": calories, protein, fat and carbs are the totals for one
+  serving (a portion, a piece, a whole package), and amount is the number of
+  servings eaten, normally 1. Set serving_grams to the weight of one serving
+  when it is printed or stated, otherwise to 0; never guess it.
+- name: a short Russian name, e.g. "Гречка отварная", "Куриная грудка жареная".
 
 Rules:
-- If a nutrition label or package is visible, use its per-100 g values. When
-  only per-serving or per-item values are known, convert them to per 100 g.
+- Use unit "serving" whenever the nutrition is known per serving, per item or
+  per package: a label, menu, receipt, app screenshot or caption that gives
+  values for the portion, or a caption saying the visible numbers are per
+  serving ("калораж на порцию", "КБЖУ за порцию"). Copy those numbers as they
+  are. Never convert them to per 100 g and never multiply them by an estimated
+  weight.
+- If a nutrition label gives per-100 g values and the weight eaten is known or
+  can be estimated, use unit "100g" with the label's values.
 - A single packaged item (a bar, a yogurt, a drink) counts as eaten whole, at
   its net weight, unless the caption says otherwise.
 - If the caption names the food, its weight or its nutrition, trust the caption
@@ -84,19 +94,23 @@ RECORD_SCHEMA: dict[str, Any] = {
                 "type": "object",
                 "properties": {
                     "name": {"type": "string"},
-                    "grams": {"type": "number"},
-                    "calories_per_100g": {"type": "number"},
-                    "protein_per_100g": {"type": "number"},
-                    "fat_per_100g": {"type": "number"},
-                    "carbs_per_100g": {"type": "number"},
+                    "unit": {"type": "string", "enum": ["100g", "serving"]},
+                    "amount": {"type": "number"},
+                    "calories": {"type": "number"},
+                    "protein": {"type": "number"},
+                    "fat": {"type": "number"},
+                    "carbs": {"type": "number"},
+                    "serving_grams": {"type": "number"},
                 },
                 "required": [
                     "name",
-                    "grams",
-                    "calories_per_100g",
-                    "protein_per_100g",
-                    "fat_per_100g",
-                    "carbs_per_100g",
+                    "unit",
+                    "amount",
+                    "calories",
+                    "protein",
+                    "fat",
+                    "carbs",
+                    "serving_grams",
                 ],
                 "additionalProperties": False,
             },
@@ -130,12 +144,20 @@ class PhotoUnavailable(Exception):
 
 @dataclass(frozen=True)
 class FoodGuess:
+    """One recognized food.
+
+    Nutrition is per 100 g and ``grams`` is the weight eaten, unless
+    ``servings`` is set: then nutrition is per one serving and ``grams`` is the
+    weight of one serving, or None when it is unknown.
+    """
+
     name: str
-    grams: float
-    calories_per_100g: float
-    protein_per_100g: Optional[float]
-    fat_per_100g: Optional[float]
-    carbs_per_100g: Optional[float]
+    grams: Optional[float]
+    calories: float
+    protein: Optional[float]
+    fat: Optional[float]
+    carbs: Optional[float]
+    servings: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -156,25 +178,33 @@ def _food_guess(item: Any) -> Optional[FoodGuess]:
     """Turn one model-reported item into a storable guess, or None if unusable."""
     if not isinstance(item, dict) or not isinstance(item.get("name"), str):
         return None
-    grams = _number(item.get("grams"))
-    calories = _number(item.get("calories_per_100g"))
-    if grams is None or not 0 < grams <= MAX_SERVING_GRAMS or calories is None:
+    amount = _number(item.get("amount"))
+    calories = _number(item.get("calories"))
+    if amount is None or calories is None:
         return None
+    macros = tuple(_number(item.get(key)) for key in ("protein", "fat", "carbs"))
     try:
         name = normalize_food_name(item["name"])
+        if item.get("unit") == "serving":
+            serving_grams = _number(item.get("serving_grams")) or None
+            try:
+                scale_per_serving(calories, amount, *macros, serving_grams)
+            except ValidationError:
+                # Implausible extras should not cost the entry its calories.
+                macros, serving_grams = (None, None, None), None
+                scale_per_serving(calories, amount, *macros)
+            return FoodGuess(name, serving_grams, calories, *macros, amount)
+        if not 0 < amount <= MAX_SERVING_GRAMS:
+            return None
         calories = check_calories_per_100g(calories)
     except ValidationError:
         return None
-    macros = tuple(
-        _number(item.get(key))
-        for key in ("protein_per_100g", "fat_per_100g", "carbs_per_100g")
-    )
     try:
         validate_macro_sum(*macros)
     except ValidationError:
         # Implausible macros should not cost the entry its calories.
         macros = (None, None, None)
-    return FoodGuess(name, grams, calories, *macros)
+    return FoodGuess(name, amount, calories, *macros)
 
 
 def parse_analysis(data: Any) -> PhotoAnalysis:

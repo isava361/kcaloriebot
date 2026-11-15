@@ -2347,17 +2347,31 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         else database.now_epoch()
     )
     for food in analysis.foods:
-        entry = await _call(
-            database.add_entry,
-            turn.user_id,
-            event_epoch,
-            food.name,
-            food.calories_per_100g,
-            food.grams,
-            food.protein_per_100g,
-            food.fat_per_100g,
-            food.carbs_per_100g,
-        )
+        if food.servings is not None:
+            entry = await _call(
+                database.add_serving_entry,
+                turn.user_id,
+                event_epoch,
+                food.name,
+                food.calories,
+                food.servings,
+                food.protein,
+                food.fat,
+                food.carbs,
+                food.grams,
+            )
+        else:
+            entry = await _call(
+                database.add_entry,
+                turn.user_id,
+                event_epoch,
+                food.name,
+                food.calories,
+                food.grams,
+                food.protein,
+                food.fat,
+                food.carbs,
+            )
         await _send_receipt(database, turn.user_id, message, entry)
     if analysis.weight_kg is not None:
         record = await _call(

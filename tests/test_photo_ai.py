@@ -65,21 +65,25 @@ class ParseAnalysisTests(unittest.TestCase):
                 "foods": [
                     {
                         "name": "  Гречка   отварная ",
-                        "grams": 180,
-                        "calories_per_100g": 110,
-                        "protein_per_100g": 4.2,
-                        "fat_per_100g": 1.1,
-                        "carbs_per_100g": 21.3,
+                        "unit": "100g",
+                        "amount": 180,
+                        "calories": 110,
+                        "protein": 4.2,
+                        "fat": 1.1,
+                        "carbs": 21.3,
+                        "serving_grams": 0,
                     },
-                    {"name": "", "grams": 10, "calories_per_100g": 10},
-                    {"name": "Вода", "grams": 0, "calories_per_100g": 0},
+                    {"name": "", "unit": "100g", "amount": 10, "calories": 10},
+                    {"name": "Вода", "unit": "100g", "amount": 0, "calories": 0},
                     {
                         "name": "Котлета",
-                        "grams": 90,
-                        "calories_per_100g": 220,
-                        "protein_per_100g": 60,
-                        "fat_per_100g": 50,
-                        "carbs_per_100g": 10,
+                        "unit": "100g",
+                        "amount": 90,
+                        "calories": 220,
+                        "protein": 60,
+                        "fat": 50,
+                        "carbs": 10,
+                        "serving_grams": 0,
                     },
                 ],
                 "weight_kg": 0,
@@ -96,6 +100,40 @@ class ParseAnalysisTests(unittest.TestCase):
         )
         self.assertIsNone(analysis.weight_kg)
         self.assertEqual("Обед.", analysis.comment)
+
+    def test_per_serving_values_are_kept_as_given(self) -> None:
+        def item(**overrides: Any) -> dict[str, Any]:
+            return {
+                "name": "Паста карбонара",
+                "unit": "serving",
+                "amount": 1,
+                "calories": 640,
+                "protein": 28,
+                "fat": 31,
+                "carbs": 140,
+                "serving_grams": 0,
+                **overrides,
+            }
+
+        analysis = parse_analysis(
+            {
+                "foods": [
+                    item(),
+                    item(name="Батончик", amount=2, serving_grams=45),
+                    item(name="Ноль порций", amount=0),
+                ],
+                "weight_kg": 0,
+                "comment": "",
+            }
+        )
+
+        self.assertEqual(
+            (
+                FoodGuess("Паста карбонара", None, 640.0, 28.0, 31.0, 140.0, 1.0),
+                FoodGuess("Батончик", 45.0, 640.0, 28.0, 31.0, 140.0, 2.0),
+            ),
+            analysis.foods,
+        )
 
     def test_scale_reading_is_reported(self) -> None:
         analysis = parse_analysis({"foods": [], "weight_kg": 81.4, "comment": ""})
@@ -244,6 +282,27 @@ class HandlePhotoTests(unittest.IsolatedAsyncioTestCase):
         replies = [text for text, _ in update.effective_message.replies]
         self.assertIn("Гречка с котлетой.", replies)
         self.assertEqual(2, sum(text.startswith("Added ") for text in replies))
+
+    async def test_per_serving_food_is_logged_without_a_guessed_weight(self) -> None:
+        self.analyzer.result = PhotoAnalysis(
+            (FoodGuess("Паста", None, 640.0, 28.0, 31.0, 62.0, 1.0),), None, ""
+        )
+
+        await handle_photo(photo_update(caption="калораж на порцию"), self.context)
+
+        (entry,) = self.entries()
+        nutrition = entry.nutrition
+        self.assertEqual(
+            (640.0, None, 1.0, 28.0, 31.0, 62.0),
+            (
+                nutrition.calories,
+                nutrition.grams,
+                nutrition.servings,
+                nutrition.protein,
+                nutrition.fat,
+                nutrition.carbs,
+            ),
+        )
 
     async def test_other_users_photos_are_not_analyzed(self) -> None:
         update = photo_update(user_id=7)
