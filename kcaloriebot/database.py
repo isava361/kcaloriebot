@@ -1498,6 +1498,33 @@ class Database:
             entry_id = int(cursor.lastrowid)
         return FoodEntry(entry_id, user_id, eaten_at_utc, clean_name, totals)
 
+    def add_serving_entry(
+        self,
+        user_id: int,
+        eaten_at_utc: int,
+        name: Optional[str],
+        calories_per_serving: float,
+        servings: float,
+        protein_per_serving: Optional[float] = None,
+        fat_per_serving: Optional[float] = None,
+        carbs_per_serving: Optional[float] = None,
+        serving_grams: Optional[float] = None,
+    ) -> FoodEntry:
+        clean_name = None if name is None else normalize_food_name(name)
+        totals = scale_per_serving(
+            calories_per_serving,
+            servings,
+            protein_per_serving,
+            fat_per_serving,
+            carbs_per_serving,
+            serving_grams=serving_grams,
+        )
+        with self._connect() as connection:
+            entry_id = self._insert_entry(
+                connection, user_id, eaten_at_utc, clean_name, totals
+            )
+        return FoodEntry(entry_id, user_id, eaten_at_utc, clean_name, totals)
+
     def log_favorite(
         self, user_id: int, favorite_id: int, amount: float, eaten_at_utc: int
     ) -> FoodEntry:

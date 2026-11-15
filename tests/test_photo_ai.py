@@ -196,20 +196,20 @@ class ParseAnalysisTests(unittest.TestCase):
                     {
                         "name": "  Гречка   отварная ",
                         "grams": 180,
-                        "calories_per_100g": 110,
-                        "protein_per_100g": 4.2,
-                        "fat_per_100g": 1.1,
-                        "carbs_per_100g": 21.3,
+                        "calories": 110,
+                        "protein": 4.2,
+                        "fat": 1.1,
+                        "carbs": 21.3,
                     },
-                    {"name": "", "grams": 10, "calories_per_100g": 10},
-                    {"name": "Вода", "grams": 0, "calories_per_100g": 0},
+                    {"name": "", "grams": 10, "calories": 10},
+                    {"name": "Вода", "grams": 0, "calories": 0},
                     {
                         "name": "Котлета",
                         "grams": 90,
-                        "calories_per_100g": 220,
-                        "protein_per_100g": 60,
-                        "fat_per_100g": 50,
-                        "carbs_per_100g": 10,
+                        "calories": 220,
+                        "protein": 60,
+                        "fat": 50,
+                        "carbs": 10,
                     },
                 ],
                 "weight_kg": 0,
@@ -799,6 +799,54 @@ class HandlePhotoTests(unittest.IsolatedAsyncioTestCase):
         # Corrections keep the same list, so saved_food numbers stay valid.
         self.assertIs(first["owner_foods"], second["owner_foods"])
 
+    async def test_per_serving_food_is_saved_without_a_weight(self) -> None:
+        self.analyzer.result = PhotoAnalysis(
+            (
+                FoodGuess(
+                    "Паста",
+                    None,
+                    640.0,
+                    28.0,
+                    31.0,
+                    62.0,
+                    nutrition_source="label",
+                    grams_source="unknown",
+                    servings=1.0,
+                ),
+                FoodGuess(
+                    "Батончик",
+                    90.0,
+                    200.0,
+                    None,
+                    None,
+                    None,
+                    nutrition_source="label",
+                    grams_source="package",
+                    servings=2.0,
+                ),
+            ),
+            None,
+            "По этикетке, на порцию.",
+        )
+        update, proposal = await self.propose()
+        key = update.effective_message.message_id
+
+        self.assertIn(
+            "• Паста — 1 порц. · 640 ккал · Б 28 · Ж 31 · У 62\n", proposal.text
+        )
+        self.assertIn("• Батончик — 2 порц. (90 г) · 400 ккал\n", proposal.text)
+        self.assertIn("Итого: 1040 ккал", proposal.text)
+        self.assertNotIn("Сколько грамм", proposal.text)
+        await handle_photo_callback(tap(f"photo:save:{key}", proposal), self.context)
+
+        by_name = {entry.name: entry.nutrition for entry in self.entries()}
+        self.assertEqual(
+            NutritionTotals(640.0, None, 28.0, 31.0, 62.0, 1.0), by_name["Паста"]
+        )
+        self.assertEqual(
+            NutritionTotals(400.0, 90.0, None, None, None, 2.0), by_name["Батончик"]
+        )
+
     async def test_save_is_blocked_until_every_weight_is_known(self) -> None:
         buckwheat = FoodGuess("Гречка", 200.0, 110.0, 4.0, 1.0, 21.0)
         self.analyzer.result = PhotoAnalysis(
@@ -1287,10 +1335,12 @@ def food_item(**overrides: Any) -> dict[str, Any]:
         "name": "Гречка",
         "nutrition_source": "estimate",
         "saved_food": 0,
-        "calories_per_100g": 110,
-        "protein_per_100g": 4,
-        "fat_per_100g": 1,
-        "carbs_per_100g": 21,
+        "basis": "100g",
+        "calories": 110,
+        "protein": 4,
+        "fat": 1,
+        "carbs": 21,
+        "servings": 0,
         "grams_source": "estimate",
         "grams": 200,
         "grams_low": 150,
@@ -1442,7 +1492,7 @@ class ParseSourcesTests(unittest.TestCase):
                 # A weight next to "unknown" is not trusted either.
                 food_item(name="Сок", grams_source="unknown", grams=500),
                 # Nothing to count: asking for the weight would only block saving.
-                unknown_weight(name="Вода", calories_per_100g=0),
+                unknown_weight(name="Вода", calories=0),
             )
         )
 
@@ -1455,9 +1505,9 @@ class ParseSourcesTests(unittest.TestCase):
             {"grams": -5},
             {"grams": math.nan},
             {"grams": "200"},
-            {"calories_per_100g": -1},
-            {"calories_per_100g": math.inf},
-            {"calories_per_100g": None},
+            {"calories": -1},
+            {"calories": math.inf},
+            {"calories": None},
             {"name": "  "},
         ]
         for overrides in dropped:
@@ -1465,7 +1515,7 @@ class ParseSourcesTests(unittest.TestCase):
                 self.assertEqual(
                     (), parse_analysis(model_record(food_item(**overrides))).foods
                 )
-        food = self.parse_one(protein_per_100g=60, fat_per_100g=50)
+        food = self.parse_one(protein=60, fat=50)
         self.assertEqual(
             (110.0, None, None, None),
             (
@@ -1501,8 +1551,8 @@ class ParseSourcesTests(unittest.TestCase):
         exact = self.parse_one(
             nutrition_source="saved",
             saved_food=1,
-            calories_per_100g=125,
-            protein_per_100g=16,
+            calories=125,
+            protein=16,
         )
         self.assertEqual(
             ("saved", 121.0, 17.0, 5.0, 1.8),
@@ -1515,9 +1565,7 @@ class ParseSourcesTests(unittest.TestCase):
             ),
         )
         # A per-serving food without a weight: the model's conversion is kept.
-        converted = self.parse_one(
-            nutrition_source="saved", saved_food=2, calories_per_100g=400
-        )
+        converted = self.parse_one(nutrition_source="saved", saved_food=2, calories=400)
         self.assertEqual(
             ("saved", 2, 400.0),
             (
@@ -1526,6 +1574,66 @@ class ParseSourcesTests(unittest.TestCase):
                 converted.calories_per_100g,
             ),
         )
+
+        # Recorded per serving, it gets his numbers exactly.
+        serving = self.parse_one(
+            basis="serving",
+            servings=2,
+            nutrition_source="saved",
+            saved_food=2,
+            calories=999,
+        )
+        self.assertEqual(
+            (200.0, 10.0, 8.0, 20.0, 2.0, None),
+            (
+                serving.calories_per_100g,
+                serving.protein_per_100g,
+                serving.fat_per_100g,
+                serving.carbs_per_100g,
+                serving.servings,
+                serving.grams,
+            ),
+        )
+
+    def test_per_serving_values_are_kept_without_a_weight(self) -> None:
+        label = {
+            "basis": "serving",
+            "servings": 1,
+            "nutrition_source": "label",
+            "calories": 640,
+            "protein": 28,
+            "fat": 31,
+            "carbs": 140,
+        }
+        # A weight judged by eye is dropped instead of scaling anything.
+        guessed = self.parse_one(**label)
+        self.assertEqual(
+            FoodGuess(
+                "Гречка",
+                None,
+                640.0,
+                28.0,
+                31.0,
+                140.0,
+                nutrition_source="label",
+                grams_source="unknown",
+                servings=1.0,
+            ),
+            guessed,
+        )
+        printed = self.parse_one(
+            **label, grams_source="package", grams=350, grams_low=350, grams_high=350
+        )
+        self.assertEqual(("package", 350.0), (printed.grams_source, printed.grams))
+        analysis = parse_analysis(
+            model_record(
+                food_item(**label, grams_source="unknown", grams=0),
+                food_item(**{**label, "servings": 0}),
+                food_item(**{**label, "calories": -1}),
+            )
+        )
+        self.assertEqual(1, len(analysis.foods))
+        self.assertEqual((), analysis.missing_weight)
 
     def test_question_and_comment_are_cleaned(self) -> None:
         analysis = parse_analysis(
@@ -1612,7 +1720,7 @@ class AnalyzerRequestTests(unittest.IsolatedAsyncioTestCase):
                 name="Творог",
                 nutrition_source="saved",
                 saved_food=1,
-                calories_per_100g=130,
+                calories=130,
             )
         )
         client, messages = fake_client(response("tool_use", record_block(payload)))
@@ -1710,17 +1818,17 @@ class ProposalTextTests(unittest.TestCase):
                 food_item(
                     name="Йогурт",
                     nutrition_source="label",
-                    calories_per_100g=60,
-                    protein_per_100g=5,
-                    fat_per_100g=2,
-                    carbs_per_100g=6,
+                    calories=60,
+                    protein=5,
+                    fat=2,
+                    carbs=6,
                     grams_source="package",
                     grams=120,
                     grams_low=120,
                     grams_high=120,
                 ),
                 unknown_weight(
-                    name="Соус", nutrition_source="manufacturer", calories_per_100g=200
+                    name="Соус", nutrition_source="manufacturer", calories=200
                 ),
                 question="Гречка с маслом?",
                 comment="Обед.",

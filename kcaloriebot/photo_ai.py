@@ -26,6 +26,7 @@ from .domain import (
     check_calories_per_100g,
     normalize_food_name,
     per_unit_from_totals,
+    scale_per_serving,
     validate_macro_sum,
 )
 
@@ -60,7 +61,12 @@ EYE_ESTIMATE_UPWARD_SHARE = 0.5
 # had no real idea; the excess is ignored rather than inflating the entry.
 MAX_ESTIMATE_RANGE_FACTOR = 2.0
 
-# Where an item's nutrition per 100 g came from.
+# What an item's nutrition values are given for: 100 g, or one serving.
+BASIS_100G = "100g"
+BASIS_SERVING = "serving"
+BASES = (BASIS_100G, BASIS_SERVING)
+
+# Where an item's nutrition came from.
 NUTRITION_LABEL = "label"
 NUTRITION_MANUFACTURER = "manufacturer"
 NUTRITION_OWNER = "owner"
@@ -117,12 +123,25 @@ What to record. Each distinct food or drink he is about to eat or has eaten \
 is one item; list clearly separate components separately (a side dish and a \
 cutlet) and keep a mixed dish (soup, salad, pizza) as one item. Names are \
 short and in Russian, e.g. "Гречка отварная", "Куриная грудка жареная". \
-Nutrition is per 100 g of the food as eaten, including the cooking oil, \
-butter and sauce it was made or served with; convert per-serving or per-item \
-figures to per 100 g. If a body-weight scale display is in a photo, put the \
+If a body-weight scale display is in a photo, put the \
 reading in weight_kg, otherwise 0. If there is nothing to log (a message \
 that names no food or drink, such as a thank-you or a question), record an \
 empty foods list and say why in a few words in comment.
+
+Nutrition. Each item is recorded on one of two bases. With basis "100g", \
+calories, protein, fat and carbs are per 100 g of the food as eaten, \
+including the cooking oil, butter and sauce it was made or served with, and \
+servings is 0; the bot multiplies them by the weight. With basis "serving", \
+they are the totals for one serving (a portion, a piece, a whole package) and \
+servings is how many he ate, normally 1; the bot logs them as they are and \
+needs no weight. Use "serving" whenever the figures you have are per serving, \
+per item or per package and the weight of that serving is not printed or \
+stated: a label, menu, receipt or app screenshot that gives values for the \
+portion, or his words that the visible numbers are per serving ("калораж на \
+порцию", "КБЖУ за порцию"). Copy such figures exactly. Never treat them as \
+per 100 g, and never multiply or divide them by a weight you estimated. When \
+the serving weight is printed or stated, either basis is exact; prefer \
+"100g" when the label also gives per-100 g values.
 
 Sources. For every item, say where its nutrition and its weight came from; \
 the owner uses this to decide what to double-check, and the bot treats \
@@ -140,9 +159,8 @@ visible label, then his saved foods, then manufacturer data, then your own \
 estimate. When his photos or words clearly show one of his saved foods, use \
 its listed values exactly and put its number in saved_food; otherwise \
 saved_food is 0. A saved food listed per \
-serving with no serving weight still needs grams and per-100 g values: \
-estimate the weight of one serving and convert, so the calories per serving \
-stay as listed. Label and manufacturer figures are exact; do not adjust them \
+serving with no serving weight is recorded with basis "serving" and the \
+number of servings he ate. Label and manufacturer figures are exact; do not adjust them \
 or call them approximate.
 
 Weight. When you judge the weight by eye from plates, cutlery, hands and \
@@ -150,10 +168,12 @@ packaging, or assume a typical portion ("тарелка борща", "круас
 your honest best estimate in grams and the plausible range around it in \
 grams_low and grams_high; do not skew the estimate up or down, the bot does \
 its own adjustment. For any other grams_source, set grams_low \
-and grams_high equal to grams. When the nutrition is known but nothing shows \
-how much was eaten (only a label in frame, say), set grams_source to \
+and grams_high equal to grams. When per-100 g nutrition is known but nothing \
+shows how much was eaten (only a label in frame, say), set grams_source to \
 "unknown" and the three weight fields to 0 instead of inventing a weight; the \
-bot will ask the owner.
+bot will ask the owner. With basis "serving", grams is the total weight of \
+the servings eaten only when it is printed or he stated it; otherwise set \
+grams_source to "unknown" and the weight fields to 0, never an estimate.
 
 Questions. If something neither the photos nor his words show would change \
 the calories a lot (whether food was fried in oil, whether a multi-serving \
@@ -182,10 +202,19 @@ _FOOD_PROPERTIES: dict[str, Any] = {
         "type": "integer",
         "description": "Number of the owner's saved food used, or 0.",
     },
-    "calories_per_100g": {"type": "number"},
-    "protein_per_100g": {"type": "number"},
-    "fat_per_100g": {"type": "number"},
-    "carbs_per_100g": {"type": "number"},
+    "basis": {
+        "type": "string",
+        "enum": list(BASES),
+        "description": "What calories, protein, fat and carbs are given for.",
+    },
+    "calories": {"type": "number"},
+    "protein": {"type": "number"},
+    "fat": {"type": "number"},
+    "carbs": {"type": "number"},
+    "servings": {
+        "type": "number",
+        "description": "Servings eaten with basis serving; 0 with basis 100g.",
+    },
     "grams_source": {"type": "string", "enum": list(GRAMS_SOURCES)},
     "grams": {
         "type": "number",
@@ -265,16 +294,22 @@ class OwnerFood:
     per_serving: bool = False
     serving_grams: Optional[float] = None
 
-    def per_100g(
+    def values(
         self,
-    ) -> Optional[tuple[float, Optional[float], Optional[float], Optional[float]]]:
-        if self.per_serving:
-            return None
+    ) -> tuple[float, Optional[float], Optional[float], Optional[float]]:
         return self.calories, self.protein, self.fat, self.carbs
 
 
 @dataclass(frozen=True)
 class FoodGuess:
+    """One recognized food.
+
+    Nutrition is per 100 g, unless ``servings`` is set: then the same fields
+    hold the values for one serving (as a serving-based favorite does), the
+    entry is logged by servings, and ``grams`` is only the total weight eaten
+    when it is known for certain.
+    """
+
     name: str
     # The weight to log, or None when the model could not tell it.
     grams: Optional[float]
@@ -289,6 +324,7 @@ class FoodGuess:
     grams_range: Optional[tuple[float, float, float]] = None
     # 1-based number of the owner's food used, or 0.
     saved_food: int = 0
+    servings: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -301,7 +337,11 @@ class PhotoAnalysis:
     @property
     def missing_weight(self) -> tuple[str, ...]:
         """Names of the foods that cannot be logged until the owner gives a weight."""
-        return tuple(food.name for food in self.foods if food.grams is None)
+        return tuple(
+            food.name
+            for food in self.foods
+            if food.grams is None and food.servings is None
+        )
 
 
 def _number(value: Any) -> Optional[float]:
@@ -502,22 +542,24 @@ def _food_guess(item: Any, owner_foods: Sequence[OwnerFood]) -> Optional[FoodGue
         grams_source = GRAMS_ESTIMATE
     if nutrition_source != NUTRITION_SAVED and grams_source != GRAMS_SAVED:
         saved = 0
+    per_serving = _source(item.get("basis"), BASES, BASIS_100G) == BASIS_SERVING
     exact = (
-        owner_foods[saved - 1].per_100g()
+        owner_foods[saved - 1]
         if saved and nutrition_source == NUTRITION_SAVED
         else None
     )
-    if exact is not None:
+    if exact is not None and exact.per_serving == per_serving:
         # The owner's own numbers, not the model's copy of them.
-        calories, *macros = exact
+        calories, *macros = exact.values()
     else:
-        calories = _number(item.get("calories_per_100g"))
-        macros = [
-            _number(item.get(key))
-            for key in ("protein_per_100g", "fat_per_100g", "carbs_per_100g")
-        ]
+        calories = _number(item.get("calories"))
+        macros = [_number(item.get(key)) for key in ("protein", "fat", "carbs")]
     if calories is None:
         return None
+    if per_serving:
+        return _serving_guess(
+            item, name, calories, macros, nutrition_source, grams_source, saved
+        )
     try:
         calories = check_calories_per_100g(calories)
     except ValidationError:
@@ -541,6 +583,48 @@ def _food_guess(item: Any, owner_foods: Sequence[OwnerFood]) -> Optional[FoodGue
         grams_source=grams_source,
         grams_range=grams_range,
         saved_food=saved,
+    )
+
+
+def _serving_guess(
+    item: dict[str, Any],
+    name: str,
+    calories: float,
+    macros: list[Optional[float]],
+    nutrition_source: str,
+    grams_source: str,
+    saved: int,
+) -> Optional[FoodGuess]:
+    """A food logged by servings: its values are kept exactly as reported."""
+    servings = _number(item.get("servings"))
+    if servings is None:
+        return None
+    # Only a weight that was read or stated is kept; a guess adds nothing here.
+    grams = (
+        _number(item.get("grams"))
+        if grams_source in (GRAMS_PACKAGE, GRAMS_OWNER, GRAMS_SAVED)
+        else None
+    )
+    if grams is not None and not 0 < grams <= MAX_SERVING_GRAMS:
+        grams = None
+    try:
+        scale_per_serving(calories, servings, None, None, None)
+    except ValidationError:
+        return None
+    try:
+        scale_per_serving(calories, servings, *macros)
+    except ValidationError:
+        # Implausible macros should not cost the entry its calories.
+        macros = [None, None, None]
+    return FoodGuess(
+        name,
+        grams,
+        calories,
+        *macros,
+        nutrition_source=nutrition_source,
+        grams_source=GRAMS_UNKNOWN if grams is None else grams_source,
+        saved_food=saved,
+        servings=servings,
     )
 
 
@@ -575,7 +659,11 @@ def parse_analysis(data: Any, owner_foods: Sequence[OwnerFood] = ()) -> PhotoAna
 
 
 def _previous_food(food: FoodGuess) -> str:
-    if food.grams is None:
+    if food.servings is not None:
+        weight = f"{food.servings:g} serving(s)"
+        if food.grams is not None:
+            weight += f", {food.grams:g} g in total"
+    elif food.grams is None:
         weight = "weight unknown"
     elif food.grams_range is not None:
         low, best, high = food.grams_range
@@ -583,7 +671,9 @@ def _previous_food(food: FoodGuess) -> str:
     else:
         weight = f"{food.grams:g} g"
     line = (
-        f"- {food.name}: {weight}; per 100 g: {food.calories_per_100g:g} kcal, "
+        f"- {food.name}: {weight}; "
+        f"{'per serving' if food.servings is not None else 'per 100 g'}: "
+        f"{food.calories_per_100g:g} kcal, "
         f"protein {_value(food.protein_per_100g)}, fat {_value(food.fat_per_100g)}, "
         f"carbs {_value(food.carbs_per_100g)}; nutrition from {food.nutrition_source}"
         f", weight from {food.grams_source}"

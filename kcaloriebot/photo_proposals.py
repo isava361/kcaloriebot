@@ -13,7 +13,13 @@ from typing import Any, Callable, Iterable, Optional
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from .domain import FoodEntry, WeightRecord, scale_per_100
+from .domain import (
+    FoodEntry,
+    NutritionTotals,
+    WeightRecord,
+    scale_per_100,
+    scale_per_serving,
+)
 from .photo_ai import (
     GRAMS_ESTIMATE,
     NUTRITION_ESTIMATE,
@@ -177,7 +183,7 @@ def _macros(
 def _estimate_note(food: FoodGuess) -> str:
     """Point out what was judged by eye: those are the numbers worth checking."""
     parts = []
-    if food.grams_source == GRAMS_ESTIMATE:
+    if food.grams_source == GRAMS_ESTIMATE and food.servings is None:
         if food.grams_range is not None:
             low, _, high = food.grams_range
             parts.append(f"вес {number(low)}–{number(high)} г")
@@ -188,8 +194,43 @@ def _estimate_note(food: FoodGuess) -> str:
     return f" · на глаз: {' и '.join(parts)}" if parts else ""
 
 
+def _amount(nutrition: NutritionTotals) -> str:
+    if nutrition.servings is None:
+        return f"{number(nutrition.grams or 0)} г"
+    servings = f"{number(nutrition.servings)} порц."
+    if nutrition.grams is None:
+        return servings
+    return f"{servings} ({number(nutrition.grams)} г)"
+
+
+def _serving_totals(food: FoodGuess) -> NutritionTotals:
+    assert food.servings is not None
+    totals = scale_per_serving(
+        food.calories_per_100g,
+        food.servings,
+        food.protein_per_100g,
+        food.fat_per_100g,
+        food.carbs_per_100g,
+    )
+    # ``grams`` is already the total weight eaten, not the weight of a serving.
+    return NutritionTotals(
+        totals.calories,
+        food.grams,
+        totals.protein,
+        totals.fat,
+        totals.carbs,
+        totals.servings,
+    )
+
+
 def _food_line(food: FoodGuess) -> tuple[str, Any]:
     note = _estimate_note(food)
+    if food.servings is not None:
+        totals = _serving_totals(food)
+        line = f"• {food.name} — {_amount(totals)} · {totals.calories:.0f} ккал"
+        if (totals.protein, totals.fat, totals.carbs) != (None, None, None):
+            line += f" · {_macros(totals.protein, totals.fat, totals.carbs)}"
+        return line + note, totals
     if food.grams is None:
         return (
             f"• {food.name} — вес не указан · "
@@ -291,7 +332,7 @@ def saved_text(
         total = sum(entry.nutrition.calories for entry in entries)
         lines.append(f"Записано в дневник — {total:.0f} ккал:")
         lines.extend(
-            f"• {entry.name or 'Еда'} — {number(entry.nutrition.grams or 0)} г · "
+            f"• {entry.name or 'Еда'} — {_amount(entry.nutrition)} · "
             f"{entry.nutrition.calories:.0f} ккал"
             for entry in entries
         )

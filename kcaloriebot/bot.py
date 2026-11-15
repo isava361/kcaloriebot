@@ -3047,15 +3047,21 @@ async def handle_photo_callback(
     analysis = proposal.analysis
     entries = [
         await _call(
-            database.add_entry,
+            database.add_entry if food.servings is None else database.add_serving_entry,
             user_id,
             proposal.eaten_at_utc,
             food.name,
             food.calories_per_100g,
-            food.grams,
+            food.grams if food.servings is None else food.servings,
             food.protein_per_100g,
             food.fat_per_100g,
             food.carbs_per_100g,
+            # A serving entry also takes the weight of one serving, when known.
+            *(
+                ()
+                if food.servings is None or food.grams is None
+                else (food.grams / food.servings,)
+            ),
         )
         for food in analysis.foods
     ]
