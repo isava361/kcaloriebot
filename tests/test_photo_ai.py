@@ -50,7 +50,7 @@ from kcaloriebot.photo_ai import (
     MAX_OWNER_FOODS_CHARS,
     NUTRITION_SOURCES,
     RECORD_SCHEMA,
-    TOOLS,
+    RECORD_TOOL,
     FoodGuess,
     OwnerFood,
     PhotoAnalysis,
@@ -1649,8 +1649,28 @@ class ParseSourcesTests(unittest.TestCase):
         long = parse_analysis(model_record(question="а" * 5000)).question
         self.assertLessEqual(len(long), 300)
 
+    def test_web_search_version_follows_the_model(self) -> None:
+        cases = {
+            "claude-haiku-5-5": "web_search_20250305",
+            "claude-haiku-4-5": "web_search_20250305",
+            "claude-opus-4-5": "web_search_20250305",
+            "some-future-model": "web_search_20250305",
+            "claude-sonnet-5-5": "web_search_20260209",
+            "claude-sonnet-4-6": "web_search_20260209",
+            " Claude-Opus-5-5 ": "web_search_20260209",
+            "claude-fable-5-2": "web_search_20260209",
+        }
+        for model, expected in cases.items():
+            with self.subTest(model=model):
+                search, record = PhotoAnalyzer(None, model, "high")._tools
+                self.assertEqual(
+                    (expected, "web_search", 3),
+                    (search["type"], search["name"], search["max_uses"]),
+                )
+                self.assertIs(RECORD_TOOL, record)
+
     def test_record_schema_avoids_what_strict_tools_reject(self) -> None:
-        [record_tool] = [tool for tool in TOOLS if tool.get("name") == "record_foods"]
+        record_tool = RECORD_TOOL
         self.assertTrue(record_tool["strict"])
         self.assertIs(RECORD_SCHEMA, record_tool["input_schema"])
         unsupported = {
