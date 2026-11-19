@@ -251,19 +251,46 @@ RECORD_SCHEMA: dict[str, Any] = {
 }
 
 
-TOOLS: list[dict[str, Any]] = [
-    {
-        "type": "web_search_20250305",
-        "name": "web_search",
-        "max_uses": MAX_WEB_SEARCHES,
-    },
-    {
-        "name": RECORD_TOOL_NAME,
-        "description": "Record the foods he ate (and a scale reading in a photo).",
-        "strict": True,
-        "input_schema": RECORD_SCHEMA,
-    },
-]
+RECORD_TOOL: dict[str, Any] = {
+    "name": RECORD_TOOL_NAME,
+    "description": "Record the foods he ate (and a scale reading in a photo).",
+    "strict": True,
+    "input_schema": RECORD_SCHEMA,
+}
+
+# The basic web search works on every model. The newer version filters the
+# results with code before they reach the model, which costs fewer input
+# tokens, but only these model families accept it; an unknown model gets the
+# basic one.
+WEB_SEARCH_BASIC = "web_search_20250305"
+WEB_SEARCH_FILTERING = "web_search_20260209"
+FILTERING_SEARCH_MODEL_PREFIXES = (
+    "claude-fable-",
+    "claude-mythos-",
+    "claude-opus-5",
+    "claude-opus-4-8",
+    "claude-opus-4-7",
+    "claude-opus-4-6",
+    "claude-sonnet-5",
+    "claude-sonnet-4-6",
+)
+
+
+def web_search_type(model: str) -> str:
+    if model.strip().casefold().startswith(FILTERING_SEARCH_MODEL_PREFIXES):
+        return WEB_SEARCH_FILTERING
+    return WEB_SEARCH_BASIC
+
+
+def tools_for(model: str) -> list[dict[str, Any]]:
+    return [
+        {
+            "type": web_search_type(model),
+            "name": "web_search",
+            "max_uses": MAX_WEB_SEARCHES,
+        },
+        RECORD_TOOL,
+    ]
 
 
 class PhotoUnavailable(Exception):
@@ -724,6 +751,7 @@ class PhotoAnalyzer:
         self._client = client
         self._model = model
         self._effort = effort
+        self._tools = tools_for(model)
 
     async def analyze(
         self,
@@ -767,7 +795,7 @@ class PhotoAnalyzer:
                     max_tokens=16000,
                     system=system,
                     messages=messages,
-                    tools=TOOLS,
+                    tools=self._tools,
                     output_config={"effort": self._effort},
                 )
             except anthropic.APIError as exc:

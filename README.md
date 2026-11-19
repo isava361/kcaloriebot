@@ -508,7 +508,9 @@ by the bot owner (`ADMIN_USER_ID` in `kcaloriebot/bot.py`) are analyzed by Claud
 and `PHOTO_EFFORT` — `low`, `medium`, `high`, `xhigh` or `max`). A caption
 such as `200 г` or `творог 5%` refines the estimate. For branded products or
 chain dishes without a visible label, Claude may run up to three web searches
-per photo ($10 per 1,000 searches on top of token costs). Photos from anyone
+per photo ($10 per 1,000 searches on top of token costs). Sonnet, Opus and
+Fable models from 4.6 on get the web search version that filters results
+before they reach the model; other models get the basic one. Photos from anyone
 else, or with no key configured, are not sent anywhere.
 
 Several photos sent as one Telegram album (say, the dish and its package
